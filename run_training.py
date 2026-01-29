@@ -2,14 +2,8 @@
 """
 5G O-RAN Network Slicing - Optimized CMDP-SAC Training
 ======================================================
-
-맥북 MPS 가속, tqdm 진행률 표시, 계산량 최적화 적용
-
 한 번에 실행:
     pip install -r requirements.txt && python run_training.py -t 100000 -f
-
-Author: Research Team
-Date: 2026-01
 """
 
 import os
