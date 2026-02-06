@@ -1,0 +1,48 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Env files
+.env
+.env.*
+
+# Test/coverage artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs/editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Project outputs
+logs/
+figures/
+
+# Model artifacts / checkpoints
+checkpoints/
+*.zip
+
+# Temporary files
+*.tmp
+*.log
