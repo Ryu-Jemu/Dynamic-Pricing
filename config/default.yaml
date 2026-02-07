@@ -1,0 +1,224 @@
+# ================================================================
+# O-RAN 1-Cell Slicing + Pricing — Default Configuration
+# ================================================================
+# All numeric scenario parameters are configurable.
+# Standards-pinned values are marked [TS38104] etc.
+# Calibrated values are overwritten by calibrate.py → calibrated.yaml
+# ================================================================
+
+# --- Section 4: Standards-pinned radio constants [TS38104][TSDI_KEYNOTE] ---
+radio:
+  bandwidth_mhz: 100          # [TS38104] NR Band n78 100 MHz
+  scs_khz: 30                 # [TS38104] SubCarrier Spacing
+  prb_total: 273              # [TS38104][TSDI_KEYNOTE] NRB for 100MHz@30kHz
+
+# --- Section 5: Time model ---
+time:
+  step_months: 1
+  episode_len_months: 50
+  inner_loop_K: 30             # intra-month micro-steps (engineering choice)
+
+# --- Section 6: Slices & action space [SB3_SAC] ---
+slices:
+  names: ["eMBB", "URLLC"]
+
+action:
+  rho_urllc_min: 0.05          # avoid 0-PRB [SB3_TIPS]
+  rho_urllc_max: 0.95
+  price_explore_factor: 0.2    # ±20% around catalog bounds
+
+# --- Section 7: Plan catalog (Korea-style monthly; anonymized) ---
+# Each plan: plan_id, slice, F_krw_month, Q_gb_month, v_cap_mbps
+# Source URLs in plan_source_url.txt; do NOT name carriers in code.
+plans:
+  eMBB:
+    - plan_id: "eMBB_basic"
+      F_krw_month: 55000
+      Q_gb_month: 12
+      v_cap_mbps: 1.0
+    - plan_id: "eMBB_standard"
+      F_krw_month: 69000
+      Q_gb_month: 50
+      v_cap_mbps: 3.0
+    - plan_id: "eMBB_premium"
+      F_krw_month: 89000
+      Q_gb_month: 200
+      v_cap_mbps: 5.0
+  URLLC:
+    - plan_id: "URLLC_basic"
+      F_krw_month: 40000
+      Q_gb_month: 5
+      v_cap_mbps: 0.4
+    - plan_id: "URLLC_standard"
+      F_krw_month: 55000
+      Q_gb_month: 15
+      v_cap_mbps: 1.0
+    - plan_id: "URLLC_premium"
+      F_krw_month: 75000
+      Q_gb_month: 40
+      v_cap_mbps: 3.0
+
+# Derived price bounds (computed at runtime from catalog)
+# F_s ∈ [0.8*F_min_s, 1.2*F_max_s]  (Section 6.2)
+
+# --- Section 8: User population & pool management ---
+population:
+  N0_eMBB: 120
+  N0_URLLC: 30
+  inactive_pool_size: 2000
+
+# Segments (max 4) [LOGNORMAL_TNET]
+segments:
+  names: ["light", "mid", "heavy", "qos_sensitive"]
+  proportions: [0.25, 0.40, 0.25, 0.10]
+  # demand_scale per segment (multiplier on base lognormal)
+  demand_scale:
+    light: 0.5
+    mid: 1.0
+    heavy: 2.0
+    qos_sensitive: 1.0
+  # sensitivity profiles (w_price, w_qos, sw_cost, b_u base)
+  sensitivity:
+    light:
+      w_price: 1.2
+      w_qos: 0.6
+      sw_cost: 0.3
+      b_u: 0.5
+    mid:
+      w_price: 1.0
+      w_qos: 1.0
+      sw_cost: 0.5
+      b_u: 0.0
+    heavy:
+      w_price: 0.7
+      w_qos: 1.3
+      sw_cost: 0.6
+      b_u: -0.3
+    qos_sensitive:
+      w_price: 0.8
+      w_qos: 1.8
+      sw_cost: 0.7
+      b_u: -0.5
+
+# --- Section 9: Demand model [LOGNORMAL_TNET] ---
+# mu, sigma are CALIBRATED (not hardcoded); these are initial guesses
+# overwritten by calibrate.py
+demand:
+  eMBB:
+    # Calibration targets (scenario)
+    target_mean_gb: 15.0
+    target_p50_gb: 10.0
+    target_p90_gb: 35.0
+    D_min_gb: 0.2
+    D_max_gb: 300.0
+    # Initial guess (overwritten by calibration)
+    mu: 2.3
+    sigma: 0.8
+  URLLC:
+    target_mean_gb: 3.0
+    target_p50_gb: 2.0
+    target_p90_gb: 7.0
+    D_min_gb: 0.05
+    D_max_gb: 50.0
+    mu: 0.7
+    sigma: 0.7
+
+# --- Section 10: Radio capacity proxy [TS38214][CONG_5G_PMC][LTE_LOAD_TPUT] ---
+radio_model:
+  T_cell_cap_mbps: 1000.0      # macro cell baseline capacity (scenario; calibratable)
+  c_load: 1.0                   # load coefficient for rho_util mapping
+  N_ref_eMBB: 200               # reference user count for utilization normalization
+  N_ref_URLLC: 100
+  rho_util_max: 0.98            # clip ceiling
+
+# --- Section 11: Data cap + throttle + top-up ---
+topup:
+  enabled: true
+  topup_once_per_month: true
+  price_krw: 11000              # scenario default top-up pack price
+  data_gb: 5.0                  # top-up pack size
+  # Logit calibration params (calibrated)
+  kappa_top: 1.0                # calibrated
+  w_price_topup: 0.5
+  target_adoption_rate: 0.30    # among exceeders
+
+# --- Section 12: SLA/SLO [VERIZON_SLA][SOLARWINDS_SLA_SLO] ---
+sla:
+  SLO_T_user_eMBB_mbps: 10.0   # internal SLO target
+  SLO_T_user_URLLC_mbps: 5.0
+  # Credit tier table (scenario; MRC-based) [VERIZON_SLA]
+  credit_tiers:
+    - threshold: 0.05
+      fraction: 0.00
+    - threshold: 0.15
+      fraction: 0.05
+    - threshold: 0.30
+      fraction: 0.10
+    - threshold: 1.00
+      fraction: 0.20
+  credit_cap_fraction: 0.30     # max 30% of MRC
+
+# --- Section 13: Market model [CHURN_SLR][DISCONF_PDF] ---
+market:
+  # Churn logistic coefficients (CALIBRATED; initial guesses)
+  beta_price: 0.5
+  beta_qos: 0.3
+  beta_disc: 0.4
+  beta_sw: 0.2
+  U_outside: 0.0
+  delta_max: 50.0               # soft-saturate disconfirmation (Mbps)
+  # Join model (Poisson) [CHURN_SLR]
+  lambda_join_eMBB: 8.0
+  lambda_join_URLLC: 3.0
+  join_cap_eMBB: 25
+  join_cap_URLLC: 10
+  # Calibration targets
+  target_churn_rate_eMBB: 0.03
+  target_churn_rate_URLLC: 0.04
+
+# --- Section 14: Energy model [BS_POWER][BS_POWER_MEAS] ---
+energy:
+  P0_kw: 0.8                    # idle power (kW); literature-reasonable range
+  P1_kw: 1.4                    # full-load power (kW)
+  hours_per_month: 730.0        # ~365.25*24/12
+  elec_price_krw_per_kwh: 120.0 # fixed unit price (no TOU)
+
+# --- Section 15: Economics & reward [SB3_TIPS] ---
+economics:
+  unit_cost_prb_krw: 50.0       # scenario: per-PRB resource cost
+  profit_scale: 1.0             # CALIBRATED by calibrate_reward_scale
+  lambda_penalty: 10.0          # penalty weight for hard violations
+  reward_clip: 2.0              # clip final reward magnitude
+
+# --- Section 16: Observation space ---
+observation:
+  # Obs vector dimension is computed at runtime
+  clip_min: -10.0
+  clip_max: 10.0
+
+# --- Section 18: Training [SAC][SB3_SAC][SB3_TIPS] ---
+training:
+  total_timesteps: 50000
+  learning_rate: 0.0003
+  batch_size: 256
+  buffer_size: 50000
+  gamma: 0.99
+  tau: 0.005
+  ent_coef: "auto"
+  train_freq: 1
+  gradient_steps: 1
+  eval_episodes: 5              # per eval call
+  eval_freq_steps: 5000
+  n_repeats: 3                  # multiple repeats for mean±std [SB3_TIPS]
+  log_interval: 10
+
+# --- Section 19: Calibration ---
+calibration:
+  demand_tolerance: 0.10        # 10% relative tolerance
+  market_tolerance: 0.15        # 15% relative tolerance
+  reward_scale_episodes: 20     # random rollouts for profit_scale
+  max_optim_iter: 500
+
+# --- Artifacts ---
+artifacts:
+  base_dir: "artifacts"

@@ -1,0 +1,21 @@
+# O-RAN 1-Cell Slicing + Pricing (SB3 SAC, Monthly)
+# Core RL
+stable-baselines3>=2.3.0
+gymnasium>=0.29.0
+
+# Scientific
+numpy>=1.24.0
+scipy>=1.11.0
+pandas>=2.0.0
+
+# Config
+pyyaml>=6.0
+
+# Plotting & reporting
+matplotlib>=3.7.0
+
+# Progress
+tqdm>=4.65.0
+
+# PyTorch (MPS support for macOS)
+torch>=2.0.0
