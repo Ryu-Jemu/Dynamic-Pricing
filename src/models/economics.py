@@ -27,6 +27,61 @@ References:
   [SB3_TIPS]          https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
 """
 
+"""
+Economics module: SLA credits, energy cost, profit, and reward.
+
+Section 12 — SLA/SLO violation & credits:
+  12.1  V_s = (#violating inner steps) / K
+  12.2  C_sla_s = credit_frac(V_s) * F_s * N_active_s
+        Credit tiers are scenario assumptions informed by MRC-based
+        credit structures.  [VERIZON_SLA][SOLARWINDS_SLA_SLO]
+
+Section 14 — Energy model:
+  P_kW(load) = P0 + (P1 - P0) * load   [BS_POWER][BS_POWER_MEAS]
+  C_energy = P_avg_kW * hours_month * elec_price_KRW_per_kWh
+  Fixed electricity unit price (no TOU variation).
+
+Section 15 — Profit and reward:
+  15.1  Rev = Σ_active F_s + Σ_topup Price_top
+        Cost = C_energy + Σ_s C_sla_s + C_resource
+        Pi = Rev - Cost       (CAC is removed)
+  15.2  C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)
+
+  15.3  Reward function — STEP 2 INTEGRATION
+        ┌─────────┬────────────────────────────────────────────────────┐
+        │ Type    │ Formula                                            │
+        ├─────────┼────────────────────────────────────────────────────┤
+        │ tanh    │ r = tanh(P / S) - λ*penalty           [ORIGINAL]  │
+        │ linear  │ r = clip(P / S, -c, c) - λ*penalty    [Step 2]   │
+        │ log     │ r = sign(P)*log(1+|P|/S) - λ*penalty  [DEFAULT]  │
+        └─────────┴────────────────────────────────────────────────────┘
+
+        Step 1 analysis showed tanh saturates above 3×profit_scale:
+          - P=5M: tanh gradient = 7.07e-10 (effectively zero)
+          - 150-user vs 10-user discrimination ratio: only 1.17×
+        log reward fixes this:
+          - Never saturates; always monotone with positive gradient
+          - Discrimination ratio 2.74× (2.3× improvement over tanh)
+          - Concave compression stabilizes Q-learning
+
+        Selection via config: economics.reward_type ∈ {tanh, linear, log}
+        Default: "log" (changed from implicit "tanh" in Step 2)
+
+        Academic basis:
+          - Haarnoja et al. (ICML 2018): SAC sensitive to reward scale;
+            ent_coef="auto" compensates via entropy temperature α.
+          - Gao et al. (JNFA 2025): AN-SAC adaptive normalization.
+          - Ibrahim et al. (IEEE Access 2024): reward engineering accuracy.
+          - ReDit (arXiv:2506.18631): reward smoothing prevents gradient issues.
+
+References:
+  [VERIZON_SLA]       https://www.verizon.com/business/service_guide/reg/cp_mgn_plus_sla_2020AUG17_mk.pdf
+  [SOLARWINDS_SLA_SLO] https://www.solarwinds.com/sre-best-practices/sla-vs-slo
+  [BS_POWER]          https://arxiv.org/abs/1411.1571
+  [BS_POWER_MEAS]     https://www.mdpi.com/1424-8220/12/4/4281
+  [SB3_TIPS]          https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
+"""
+
 from __future__ import annotations
 
 import logging
@@ -35,6 +90,9 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 logger = logging.getLogger("oran.economics")
+
+# Allowed reward_type values
+_VALID_REWARD_TYPES = ("tanh", "linear", "log")
 
 
 # =====================================================================
@@ -184,8 +242,14 @@ class EconomicsModel:
 
     15.2  C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)
 
-    15.3  r = tanh(Pi / profit_scale) - λ_penalty * penalty
+    15.3  r = f(Pi / profit_scale) - λ_penalty * penalty
+          where f ∈ {tanh, linear_clip, log} selected by reward_type.
           profit_scale calibrated via random rollouts.  [SB3_TIPS]
+
+    Step 2 integration:
+      - reward_type read from config (economics.reward_type)
+      - Default changed from implicit "tanh" to explicit "log"
+      - Backward compatible: reward_type="tanh" reproduces v1 behavior
     """
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
@@ -195,6 +259,14 @@ class EconomicsModel:
         self.lambda_penalty: float = ec.get("lambda_penalty", 10.0)
         self.reward_clip: float = ec.get("reward_clip", 2.0)
         self.prb_total: int = cfg.get("radio", {}).get("prb_total", 273)
+
+        # ── Step 2: reward_type from config ─────────────────────
+        self.reward_type: str = ec.get("reward_type", "log")
+        if self.reward_type not in _VALID_REWARD_TYPES:
+            raise ValueError(
+                f"Unknown reward_type: '{self.reward_type}'. "
+                f"Must be one of {_VALID_REWARD_TYPES}"
+            )
 
         self.sla = SLAModel(cfg)
         self.energy = EnergyModel(cfg)
@@ -288,28 +360,81 @@ class EconomicsModel:
         }
 
     # -----------------------------------------------------------------
-    # 15.3  Reward  [SB3_TIPS]
+    # 15.3  Reward  — STEP 2 INTEGRATION
     # -----------------------------------------------------------------
+
+    @staticmethod
+    def _compute_reward_raw(
+        profit: float,
+        reward_type: str,
+        profit_scale: float,
+        reward_clip: float,
+    ) -> float:
+        """Compute raw reward value (before penalty) for given reward_type.
+
+        This static method is also used by the observation builder
+        (obs[15]) to ensure consistent normalization.
+
+        Parameters
+        ----------
+        profit : float        Monthly profit (KRW)
+        reward_type : str     "tanh" | "linear" | "log"
+        profit_scale : float  Calibrated scale factor
+        reward_clip : float   Clipping bound (used by linear mode)
+
+        Returns
+        -------
+        float : raw reward value (no penalty applied)
+        """
+        scale = max(abs(profit_scale), 1.0)
+
+        if reward_type == "tanh":
+            # ── Original v1 (retained for backward compatibility) ──
+            return float(np.tanh(profit / scale))
+
+        elif reward_type == "linear":
+            # ── Linear with clipping ──────────────────────────────
+            return float(np.clip(profit / scale, -reward_clip, reward_clip))
+
+        elif reward_type == "log":
+            # ── Step 1 fix: Log scaling (default) ─────────────────
+            # sign(P) × log(1 + |P| / S)
+            # Never saturates; always monotone with positive gradient.
+            # Concave compression stabilizes Q-learning.
+            return float(np.sign(profit) * np.log1p(abs(profit) / scale))
+
+        else:
+            raise ValueError(
+                f"Unknown reward_type: '{reward_type}'. "
+                f"Must be one of {_VALID_REWARD_TYPES}"
+            )
 
     def compute_reward(
         self,
         profit: float,
         penalty: float = 0.0,
     ) -> float:
-        """Reward: tanh(Pi / profit_scale) - λ_penalty * penalty.
+        """Reward using the configured reward_type.
 
-        profit_scale is calibrated from random rollouts to avoid
-        arbitrary scaling.  [SB3_TIPS]
+        r = f(Pi / profit_scale) - λ_penalty * penalty
 
+        where f is selected by self.reward_type:
+          "tanh"   → tanh(Pi / S)                     [original v1]
+          "linear" → clip(Pi / S, -c, c)              [Step 2 alt]
+          "log"    → sign(Pi) × log(1 + |Pi| / S)     [Step 1 default]
+
+        profit_scale is calibrated from random rollouts.  [SB3_TIPS]
         Final reward is clipped to [-reward_clip, reward_clip].
+
+        Step 2 change: dispatch to _compute_reward_raw by reward_type.
         """
         if not np.isfinite(profit):
             logger.warning("Non-finite profit: %s → using 0", profit)
             profit = 0.0
 
-        # Avoid division by zero in profit_scale
-        scale = max(abs(self.profit_scale), 1.0)
-        raw = float(np.tanh(profit / scale))
+        raw = self._compute_reward_raw(
+            profit, self.reward_type, self.profit_scale, self.reward_clip,
+        )
 
         r = raw - self.lambda_penalty * penalty
         r = float(np.clip(r, -self.reward_clip, self.reward_clip))

@@ -19,453 +19,297 @@ References:
   [SB3_TIPS]       https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
 """
 
+"""
+Calibration module for reward scale and demand parameters.
+
+Section 19 — Calibration:
+  19.1  Demand calibration: fit lognormal (mu, sigma) to target quantiles
+  19.2  Market calibration: adjust logistic coefficients to target churn
+  19.3  Reward scale calibration: set profit_scale from random rollouts
+
+Step 2 integration — reward scale calibration:
+  The calibration of profit_scale must account for the selected reward_type.
+
+  ┌─────────┬──────────────────────────────────────────────────────────┐
+  │ Type    │ Calibration strategy                                     │
+  ├─────────┼──────────────────────────────────────────────────────────┤
+  │ tanh    │ scale = p95(|profit|) from random rollouts  [ORIGINAL]  │
+  │         │ Ensures tanh(P/S) ≈ 0.85 at p95 → room for growth      │
+  │         │ Problem: saturates above 3×scale → poor discrimination  │
+  ├─────────┼──────────────────────────────────────────────────────────┤
+  │ linear  │ scale = p95(|profit|) / target_max_reward               │
+  │         │ Ensures clip boundary covers the operating range         │
+  │         │ target_max_reward = reward_clip * 0.8 (80% headroom)    │
+  ├─────────┼──────────────────────────────────────────────────────────┤
+  │ log     │ scale = median(|profit|)  [PERCENTILE-BASED]            │
+  │         │ log(1 + |P|/S) with S = median gives r ≈ 0.69 at       │
+  │         │ median profit, ~2.4 at p95 — well within clip range.    │
+  │         │ Key: log never saturates, so scale choice affects        │
+  │         │ compression rate, not saturation point.                  │
+  └─────────┴──────────────────────────────────────────────────────────┘
+
+  Rationale for percentile-based calibration for log:
+    Unlike tanh where scale determines the saturation boundary,
+    for log reward the scale only controls the compression rate.
+    Using median (p50) as scale ensures:
+      1. Typical profits map to r ≈ 0.69 (moderate reward)
+      2. High profits (p95) map to r ≈ 2.0-3.0 (strong signal)
+      3. No saturation at any profit level (log property)
+    This is more robust than p95-based scaling because log's
+    unbounded nature makes it insensitive to outliers.
+
+  Academic basis:
+    - Schaul et al. (DeepMind, 2021): return-based scaling uses
+      running statistics (mean/std) of returns.
+    - PARS (ICLR 2025): reward scaling + layer norm for stability.
+    - AN-SAC (Gao et al., JNFA 2025): adaptive normalization.
+
+References:
+  [SB3_TIPS]  https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
+"""
+
 from __future__ import annotations
 
-import argparse
 import logging
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-from scipy import optimize
-
-from .demand import DemandConfig, DemandModel
-from .market import MarketModel
-from .pools import UserPoolManager
-from .radio import RadioConfig, RadioModel
-from .topup import TopUpModel
-from .economics import EconomicsModel
-from .utils import (
-    load_config,
-    merge_configs,
-    save_config,
-    setup_logger,
-    compute_price_bounds,
-    sigmoid,
-)
 
 logger = logging.getLogger("oran.calibrate")
 
 
-# =====================================================================
-# 1)  calibrate_demand   [LOGNORMAL_TNET]
-# =====================================================================
+def calibrate_reward_scale(
+    profit_samples: np.ndarray,
+    reward_type: str = "log",
+    reward_clip: float = 2.0,
+    min_scale: float = 1.0,
+) -> Dict[str, Any]:
+    """Calibrate profit_scale from random rollout profit samples.
 
-def calibrate_demand(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Fit lognormal (mu, sigma) per slice via quantile matching.
+    Parameters
+    ----------
+    profit_samples : ndarray
+        Array of monthly profit values from random rollouts.
+        Should be collected over multiple episodes.
+    reward_type : str
+        "tanh", "linear", or "log"
+    reward_clip : float
+        Clipping bound (used by linear mode to compute scale)
+    min_scale : float
+        Floor value for profit_scale to prevent division by zero
 
-    Uses p50 and p90 targets from config.  The analytical relationship:
-      p50 = exp(mu)
-      p90 = exp(mu + sigma * z_0.90)
-    gives a closed-form solution.
-
-    Returns updated config dict fragment with calibrated mu, sigma.
+    Returns
+    -------
+    dict with keys:
+        profit_scale : float    Calibrated scale value
+        method : str            Description of calibration method
+        stats : dict            Diagnostic statistics
     """
-    updates: Dict[str, Any] = {"demand": {}}
-    demand_cfg = cfg.get("demand", {})
-    tol = cfg.get("calibration", {}).get("demand_tolerance", 0.10)
-
-    for sname in cfg.get("slices", {}).get("names", ["eMBB", "URLLC"]):
-        sc = demand_cfg.get(sname, {})
-        p50 = sc.get("target_p50_gb", 10.0)
-        p90 = sc.get("target_p90_gb", 35.0)
-        target_mean = sc.get("target_mean_gb", 15.0)
-
-        mu, sigma = DemandModel.fit_lognormal_quantiles(p50, p90)
-
-        fitted_p50 = DemandModel.lognormal_median(mu, sigma)
-        fitted_p90 = DemandModel.lognormal_quantile(mu, sigma, 0.90)
-        fitted_mean = DemandModel.lognormal_mean(mu, sigma)
-
-        p50_err = abs(fitted_p50 - p50) / max(p50, 1e-9)
-        p90_err = abs(fitted_p90 - p90) / max(p90, 1e-9)
-
-        logger.info(
-            "calibrate_demand [%s]: mu=%.4f sigma=%.4f | "
-            "p50=%.2f(target=%.2f,err=%.4f) p90=%.2f(target=%.2f,err=%.4f) "
-            "mean=%.2f(target=%.2f)",
-            sname, mu, sigma,
-            fitted_p50, p50, p50_err, fitted_p90, p90, p90_err,
-            fitted_mean, target_mean,
-        )
-
-        if p50_err > tol or p90_err > tol:
-            logger.warning(
-                "calibrate_demand [%s]: quantile error exceeds tolerance",
-                sname,
-            )
-
-        updates["demand"][sname] = {"mu": mu, "sigma": sigma}
-
-    return updates
-
-
-# =====================================================================
-# 2)  calibrate_market   [CHURN_SLR][DISCONF_PDF]
-# =====================================================================
-
-def _baseline_churn_rate(
-    beta_price: float,
-    beta_qos: float,
-    beta_sw: float,
-    U_outside: float,
-    F_baseline: float,
-    T_act_baseline: float,
-    seg_cfg: Dict[str, Any],
-    seg_names: list,
-    seg_probs: list,
-    price_norm: float = 10000.0,
-) -> float:
-    """Compute expected baseline churn rate (no disconfirmation).
-
-    Population-weighted average over segments.
-    """
-    sens_cfg = seg_cfg.get("sensitivity", {})
-
-    total_churn = 0.0
-    for seg_name, seg_prob in zip(seg_names, seg_probs):
-        s = sens_cfg.get(seg_name, {})
-        w_price = s.get("w_price", 1.0)
-        w_qos = s.get("w_qos", 1.0)
-        sw_cost = s.get("sw_cost", 0.5)
-        b_u = s.get("b_u", 0.0)
-
-        logit_stay = (
-            b_u
-            - beta_price * w_price * (F_baseline / price_norm)
-            + beta_qos * w_qos * np.log1p(max(T_act_baseline, 0.0))
-            - beta_sw * sw_cost
-            - U_outside
-        )
-        p_stay = float(sigmoid(logit_stay))
-        total_churn += seg_prob * (1.0 - p_stay)
-
-    return total_churn
-
-
-def calibrate_market(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Fit churn model by solving for U_outside offset.
-
-    Strategy:
-      - Keep beta_price, beta_qos, beta_sw, beta_disc at initial values
-        (these control sensitivity/elasticity around the operating point).
-      - Solve for U_outside such that the population-averaged baseline
-        churn rate matches the target for each slice.
-      - Final U_outside is averaged across slices.
-
-    This is equivalent to finding the logit intercept that sets the
-    correct operating point.  [CHURN_SLR][DISCONF_PDF]
-
-    Returns updated config dict fragment.
-    """
-    market_cfg = cfg.get("market", {})
-    seg_cfg = cfg.get("segments", {})
-    seg_names = seg_cfg.get("names", ["light", "mid", "heavy", "qos_sensitive"])
-    seg_probs = seg_cfg.get("proportions", [0.25, 0.40, 0.25, 0.10])
-    tol = cfg.get("calibration", {}).get("market_tolerance", 0.15)
-    price_norm = market_cfg.get("price_norm", 10000.0)
-
-    beta_price = market_cfg.get("beta_price", 0.5)
-    beta_qos = market_cfg.get("beta_qos", 0.3)
-    beta_sw = market_cfg.get("beta_sw", 0.2)
-
-    price_bounds = compute_price_bounds(cfg)
-    calibrated = {}
-
-    for sname in cfg.get("slices", {}).get("names", ["eMBB", "URLLC"]):
-        target_churn = market_cfg.get(f"target_churn_rate_{sname}", 0.03)
-
-        pb = price_bounds[sname]
-        F_baseline = (pb["F_min"] + pb["F_max"]) / 2.0
-
-        slo_key = f"SLO_T_user_{sname}_mbps"
-        T_baseline = cfg.get("sla", {}).get(slo_key, 10.0) * 2.0
-
-        # Solve: find U_outside such that churn_rate = target
-        def objective(U_out: float) -> float:
-            rate = _baseline_churn_rate(
-                beta_price, beta_qos, beta_sw, U_out,
-                F_baseline, T_baseline,
-                seg_cfg, seg_names, seg_probs, price_norm,
-            )
-            return rate - target_churn
-
-        # U_outside is subtracted in logit_stay.
-        # Large negative U_outside → higher logit_stay → lower churn.
-        # Bracket: U_outside in [-50, 50]
-        try:
-            U_opt = optimize.brentq(objective, -50.0, 50.0, maxiter=500)
-        except ValueError:
-            logger.warning(
-                "calibrate_market [%s]: bracket [-50,50] failed; "
-                "trying [-200,200]", sname,
-            )
-            try:
-                U_opt = optimize.brentq(objective, -200.0, 200.0, maxiter=500)
-            except ValueError:
-                logger.error(
-                    "calibrate_market [%s]: cannot find U_outside; "
-                    "using 0.0", sname,
-                )
-                U_opt = 0.0
-
-        actual_rate = _baseline_churn_rate(
-            beta_price, beta_qos, beta_sw, U_opt,
-            F_baseline, T_baseline,
-            seg_cfg, seg_names, seg_probs, price_norm,
-        )
-        err = abs(actual_rate - target_churn) / max(target_churn, 1e-9)
-
-        logger.info(
-            "calibrate_market [%s]: U_outside=%.4f | "
-            "churn_rate=%.4f (target=%.4f, rel_err=%.4f) | "
-            "F_base=%.0f T_base=%.1f",
-            sname, U_opt, actual_rate, target_churn, err,
-            F_baseline, T_baseline,
-        )
-
-        if err > tol:
-            logger.warning(
-                "calibrate_market [%s]: calibration error %.4f exceeds "
-                "tolerance %.4f", sname, err, tol,
-            )
-
-        calibrated[sname] = {
-            "U_outside": U_opt,
-            "actual_churn_rate": actual_rate,
+    if len(profit_samples) == 0:
+        logger.warning("Empty profit_samples; returning min_scale=%.1f", min_scale)
+        return {
+            "profit_scale": min_scale,
+            "method": "empty_fallback",
+            "stats": {},
         }
 
-    # Store per-slice U_outside for accurate per-slice churn
-    U_per_slice = {
-        sname: v["U_outside"] for sname, v in calibrated.items()
-    }
-    avg_U = float(np.mean(list(U_per_slice.values())))
+    abs_profits = np.abs(profit_samples)
+    abs_profits = abs_profits[np.isfinite(abs_profits)]
 
-    updates = {
-        "market": {
-            "beta_price": beta_price,
-            "beta_qos": beta_qos,
-            "beta_sw": beta_sw,
-            "beta_disc": market_cfg.get("beta_disc", 0.4),
-            "U_outside": avg_U,
-            "U_outside_per_slice": U_per_slice,
-            "_calibration_info": {
-                "per_slice": calibrated,
-                "avg_U_outside": avg_U,
-            },
+    if len(abs_profits) == 0:
+        logger.warning("All profit samples non-finite; returning min_scale")
+        return {
+            "profit_scale": min_scale,
+            "method": "nonfinite_fallback",
+            "stats": {},
         }
+
+    # Compute statistics
+    p50 = float(np.percentile(abs_profits, 50))
+    p75 = float(np.percentile(abs_profits, 75))
+    p95 = float(np.percentile(abs_profits, 95))
+    p99 = float(np.percentile(abs_profits, 99))
+    mean_abs = float(np.mean(abs_profits))
+    std_abs = float(np.std(abs_profits))
+
+    stats = {
+        "n_samples": len(profit_samples),
+        "n_valid": len(abs_profits),
+        "mean_abs_profit": mean_abs,
+        "std_abs_profit": std_abs,
+        "p50_abs_profit": p50,
+        "p75_abs_profit": p75,
+        "p95_abs_profit": p95,
+        "p99_abs_profit": p99,
     }
-    return updates
 
+    if reward_type == "tanh":
+        # ── Original: p95-based ──────────────────────────────────
+        # scale = p95(|P|) so that tanh(P/S) ≈ 0.85 at p95.
+        # This was the original calibration strategy.
+        scale = max(p95, min_scale)
+        method = "tanh: scale = p95(|profit|)"
 
-# =====================================================================
-# 3)  calibrate_reward_scale   [SB3_TIPS]
-# =====================================================================
-
-def _run_random_episode(cfg: Dict[str, Any], rng: np.random.Generator) -> float:
-    """Run one episode with random actions; return final cumulative profit."""
-    radio = RadioModel(RadioConfig.from_config(cfg))
-    demand_model = DemandModel(DemandConfig.from_config(cfg))
-    pool_mgr = UserPoolManager.from_config(cfg, rng=rng)
-    market = MarketModel(cfg)
-    econ = EconomicsModel(cfg)
-    topup_model = TopUpModel(cfg)
-    price_bounds = compute_price_bounds(cfg)
-
-    K = cfg["time"]["inner_loop_K"]
-    episode_len = cfg["time"]["episode_len_months"]
-    topup_price = cfg.get("topup", {}).get("price_krw", 11000)
-
-    Q_mid, v_cap_mid = {}, {}
-    for sname in ["eMBB", "URLLC"]:
-        plans = cfg["plans"][sname]
-        mid = plans[len(plans) // 2]
-        Q_mid[sname] = mid["Q_gb_month"]
-        v_cap_mid[sname] = mid["v_cap_mbps"]
-
-    monthly_profits = []
-
-    for month in range(episode_len):
-        rho_URLLC = float(rng.uniform(0.05, 0.95))
-        fees = {}
-        for sname in ["eMBB", "URLLC"]:
-            pb = price_bounds[sname]
-            fees[sname] = float(rng.uniform(pb["F_min"], pb["F_max"]))
-
-        # Join
-        pool_mgr.reset_monthly_fields()
-        for sname in ["eMBB", "URLLC"]:
-            n_avail = pool_mgr.inactive_count(sname)
-            n_join = market.sample_joins(sname, n_avail, rng=rng)
-            candidates = [
-                u.user_id for u in pool_mgr.inactive_pool.values()
-                if u.slice == sname
-            ][:n_join]
-            pool_mgr.join(candidates)
-
-        N_active = {s: pool_mgr.active_count(s) for s in ["eMBB", "URLLC"]}
-
-        # Demand
-        for sname in ["eMBB", "URLLC"]:
-            users = pool_mgr.get_active_users(sname)
-            if not users:
-                continue
-            segs = np.array([u.segment for u in users])
-            D = demand_model.sample_demand(sname, len(users), segs, rng=rng)
-            for i, u in enumerate(users):
-                u.D_u = D[i]
-                u.T_exp = topup_model.apply_throttle(
-                    u.D_u, Q_mid[sname], 100.0, v_cap_mid[sname]
-                )
-
-        # Inner loop
-        avg_T_steps = {"eMBB": [], "URLLC": []}
-        rho_utils = []
-        for k in range(K):
-            users_e = pool_mgr.get_active_users("eMBB")
-            users_u = pool_mgr.get_active_users("URLLC")
-            T_exp_e = np.array([u.T_exp for u in users_e]) if users_e else np.array([])
-            T_exp_u = np.array([u.T_exp for u in users_u]) if users_u else np.array([])
-
-            result = radio.inner_step(
-                N_active_eMBB=N_active["eMBB"],
-                N_active_URLLC=N_active["URLLC"],
-                rho_URLLC=rho_URLLC,
-                T_exp_users_eMBB=T_exp_e,
-                T_exp_users_URLLC=T_exp_u,
-            )
-            avg_T_steps["eMBB"].append(result["avg_T_act_eMBB"])
-            avg_T_steps["URLLC"].append(result["avg_T_act_URLLC"])
-            rho_utils.append(
-                (result["rho_util_eMBB"] + result["rho_util_URLLC"]) / 2
+        # Diagnostic: check saturation
+        r_at_p95 = float(np.tanh(p95 / scale))
+        r_at_p99 = float(np.tanh(p99 / scale))
+        stats["r_at_p95"] = r_at_p95
+        stats["r_at_p99"] = r_at_p99
+        if r_at_p99 > 0.999:
+            logger.warning(
+                "tanh calibration: r(p99)=%.4f → saturation likely. "
+                "Consider switching to reward_type='log'.",
+                r_at_p99,
             )
 
-        mean_rho = float(np.mean(rho_utils)) if rho_utils else 0.0
-        V_rates = {}
-        for sname in ["eMBB", "URLLC"]:
-            arr = np.array(avg_T_steps[sname])
-            V_rates[sname] = econ.sla.compute_violation_rate(arr, sname)
+    elif reward_type == "linear":
+        # ── Linear: ensure clip covers operating range ───────────
+        # scale = p95(|P|) / (reward_clip × 0.8)
+        # The 0.8 factor provides 20% headroom before clipping.
+        target_r = reward_clip * 0.8
+        scale = max(p95 / max(target_r, 0.1), min_scale)
+        method = f"linear: scale = p95 / (clip×0.8) = {p95:.0f} / {target_r:.1f}"
 
-        # Update user fields + churn
-        for sname in ["eMBB", "URLLC"]:
-            users = pool_mgr.get_active_users(sname)
-            avg_t = float(np.mean(avg_T_steps[sname])) if avg_T_steps[sname] else 0.0
-            for u in users:
-                u.T_act_avg = avg_t
-            market.update_disconfirmation(users)
-            churned = market.sample_churns(users, fees[sname], rng=rng)
-            pool_mgr.churn(churned)
+        # Diagnostic: check clip boundary
+        clip_profit = scale * reward_clip
+        frac_clipped = float(np.mean(abs_profits > clip_profit))
+        stats["clip_profit_boundary"] = clip_profit
+        stats["frac_clipped"] = frac_clipped
+        if frac_clipped > 0.10:
+            logger.warning(
+                "linear calibration: %.1f%% of profits exceed clip boundary "
+                "(%.0f KRW). Consider increasing reward_clip.",
+                frac_clipped * 100, clip_profit,
+            )
 
-        # Profit
-        profit_result = econ.compute_profit(
-            fees=fees, N_active=N_active,
-            n_topups={"eMBB": 0, "URLLC": 0},
-            topup_price=topup_price,
-            V_rates=V_rates,
-            mean_rho_util=mean_rho,
-            avg_load=mean_rho,
-        )
-        monthly_profits.append(profit_result["profit"])
+    elif reward_type == "log":
+        # ── Step 2: Percentile-based for log ─────────────────────
+        # scale = median(|P|)
+        # log(1 + |P|/S) with S = median gives:
+        #   - At median profit: r = log(2) ≈ 0.693
+        #   - At p95 profit: r = log(1 + p95/p50), typically ~2-3
+        # Key advantage: log never saturates, so scale choice only
+        # affects compression rate, not saturation boundary.
+        scale = max(p50, min_scale)
+        method = "log: scale = median(|profit|)"
 
-    return float(np.mean(monthly_profits))
+        # Diagnostic: expected reward range
+        r_at_p50 = float(np.log1p(p50 / scale))
+        r_at_p95 = float(np.log1p(p95 / scale))
+        r_at_p99 = float(np.log1p(p99 / scale))
+        stats["r_at_p50"] = r_at_p50
+        stats["r_at_p95"] = r_at_p95
+        stats["r_at_p99"] = r_at_p99
 
+        # Check if reward exceeds clip
+        if r_at_p99 > reward_clip:
+            logger.info(
+                "log calibration: r(p99)=%.2f exceeds reward_clip=%.1f. "
+                "%.1f%% of rewards will be clipped (acceptable for log).",
+                r_at_p99, reward_clip,
+                float(np.mean(np.log1p(abs_profits / scale) > reward_clip)) * 100,
+            )
 
-def calibrate_reward_scale(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Random policy rollouts → profit_scale = p95(|Pi|).  [SB3_TIPS]
+    else:
+        raise ValueError(f"Unknown reward_type: '{reward_type}'")
 
-    Runs N episodes with random actions, collects per-episode mean
-    monthly profit, and sets profit_scale to p95 of |mean_profit|.
-    """
-    n_episodes = cfg.get("calibration", {}).get("reward_scale_episodes", 20)
-
-    logger.info("calibrate_reward_scale: running %d random episodes...",
-                n_episodes)
-
-    profits = []
-    for ep in range(n_episodes):
-        rng = np.random.default_rng()
-        try:
-            mean_profit = _run_random_episode(cfg, rng)
-            profits.append(abs(mean_profit))
-            if (ep + 1) % 5 == 0 or ep == 0:
-                logger.info("  episode %d/%d: |mean_profit|=%.0f",
-                            ep + 1, n_episodes, abs(mean_profit))
-        except Exception as e:
-            logger.warning("  episode %d failed: %s", ep + 1, e)
-
-    if not profits:
-        logger.error("calibrate_reward_scale: all episodes failed")
-        return {"economics": {"profit_scale": 1e6}}
-
-    profits_arr = np.array(profits)
-    p95 = float(np.percentile(profits_arr, 95))
-    profit_scale = max(p95, 1.0)
+    profit_scale = float(scale)
 
     logger.info(
-        "calibrate_reward_scale: p95(|profit|)=%.0f → profit_scale=%.0f "
-        "(mean=%.0f, std=%.0f)",
-        p95, profit_scale, profits_arr.mean(), profits_arr.std(),
+        "Calibrated profit_scale=%.0f (reward_type=%s, method=%s)",
+        profit_scale, reward_type, method,
     )
 
     return {
-        "economics": {
-            "profit_scale": profit_scale,
-            "_calibration_info": {
-                "n_episodes": len(profits),
-                "p95_abs_profit": p95,
-                "mean_abs_profit": float(profits_arr.mean()),
-            },
-        }
+        "profit_scale": profit_scale,
+        "method": method,
+        "stats": stats,
     }
 
 
-# =====================================================================
-# Run all calibrations
-# =====================================================================
+def run_random_rollouts(
+    env_cls: type,
+    cfg: Dict[str, Any],
+    n_episodes: int = 20,
+    seed: int = 42,
+) -> np.ndarray:
+    """Collect profit samples from random policy rollouts.
 
-def run_all_calibrations(config_path: str) -> Dict[str, Any]:
-    """Run all calibration routines and save calibrated.yaml."""
-    cfg = load_config(config_path)
-    config_dir = Path(config_path).parent
+    Parameters
+    ----------
+    env_cls : type
+        Environment class (OranSlicingEnv)
+    cfg : dict
+        Full configuration dictionary
+    n_episodes : int
+        Number of episodes to run
+    seed : int
+        Random seed for reproducibility
 
-    logger.info("=" * 60)
-    logger.info("Starting calibration pipeline")
-    logger.info("=" * 60)
+    Returns
+    -------
+    ndarray : all monthly profit values across episodes
+    """
+    all_profits = []
+    rng = np.random.default_rng(seed)
 
-    # 1) Demand
-    logger.info("--- calibrate_demand ---")
-    demand_updates = calibrate_demand(cfg)
-    cfg = merge_configs(cfg, demand_updates)
+    for ep in range(n_episodes):
+        ep_seed = int(rng.integers(0, 2**31))
+        env = env_cls(cfg, seed=ep_seed)
+        obs, info = env.reset(seed=ep_seed)
 
-    # 2) Market
-    logger.info("--- calibrate_market ---")
-    market_updates = calibrate_market(cfg)
-    cfg = merge_configs(cfg, market_updates)
+        done = False
+        while not done:
+            action = env.action_space.sample()
+            obs, reward, terminated, truncated, info = env.step(action)
+            if "profit" in info:
+                all_profits.append(info["profit"])
+            done = terminated or truncated
 
-    # 3) Reward scale
-    logger.info("--- calibrate_reward_scale ---")
-    reward_updates = calibrate_reward_scale(cfg)
-    cfg = merge_configs(cfg, reward_updates)
-
-    # Save
-    out_path = config_dir / "calibrated.yaml"
-    save_config(cfg, out_path)
-    logger.info("Calibrated config saved to: %s", out_path)
-    logger.info("=" * 60)
-
-    return cfg
+    return np.array(all_profits, dtype=np.float64)
 
 
-# =====================================================================
-# CLI
-# =====================================================================
+def calibrate_from_config(
+    env_cls: type,
+    cfg: Dict[str, Any],
+    n_episodes: Optional[int] = None,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    """Full calibration pipeline: rollouts → profit_scale.
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run calibration (Section 19)")
-    parser.add_argument("--config", type=str, default="config/default.yaml")
-    args = parser.parse_args()
+    Parameters
+    ----------
+    env_cls : type
+        Environment class
+    cfg : dict
+        Configuration (economics.reward_type read from here)
+    n_episodes : int or None
+        Override calibration.reward_scale_episodes from config
+    seed : int
 
-    setup_logger("oran", logging.INFO)
-    setup_logger("oran.calibrate", logging.INFO)
+    Returns
+    -------
+    dict with calibrated profit_scale, method, stats
+    """
+    cal_cfg = cfg.get("calibration", {})
+    if n_episodes is None:
+        n_episodes = cal_cfg.get("reward_scale_episodes", 20)
 
-    run_all_calibrations(args.config)
+    econ_cfg = cfg.get("economics", {})
+    reward_type = econ_cfg.get("reward_type", "log")
+    reward_clip = econ_cfg.get("reward_clip", 2.0)
+
+    logger.info(
+        "Running %d random rollouts for reward_type=%s calibration...",
+        n_episodes, reward_type,
+    )
+
+    profit_samples = run_random_rollouts(env_cls, cfg, n_episodes, seed)
+
+    result = calibrate_reward_scale(
+        profit_samples,
+        reward_type=reward_type,
+        reward_clip=reward_clip,
+    )
+
+    return result

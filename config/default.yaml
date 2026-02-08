@@ -184,9 +184,22 @@ energy:
   elec_price_krw_per_kwh: 120.0 # fixed unit price (no TOU)
 
 # --- Section 15: Economics & reward [SB3_TIPS] ---
+# Step 2: reward_type added; default changed from implicit "tanh" to "log"
+#
+#   reward_type options:
+#     "tanh"   — Original v1. Backward compatible. Saturates above 3×profit_scale.
+#     "linear" — Clip(P/S, -c, c). Best after Step 2 profit_scale recalibration.
+#     "log"    — sign(P)×log(1+|P|/S). DEFAULT. Never saturates. [Step 1 fix]
+#
+#   Academic basis:
+#     Haarnoja et al. (2018): SAC sensitive to reward scale;
+#       ent_coef="auto" compensates via entropy temperature α auto-tuning.
+#     Gao et al. (JNFA, 2025): AN-SAC adaptive normalization improves SAC.
+#     Ibrahim et al. (IEEE Access, 2024): reward engineering accuracy matters.
 economics:
+  reward_type: "log"             # Step 2: NEW — "tanh" | "linear" | "log"
   unit_cost_prb_krw: 50.0       # scenario: per-PRB resource cost
-  profit_scale: 1.0             # CALIBRATED by calibrate_reward_scale
+  profit_scale: 724177.0         # Step 3: calibrated via median(|profit|) from 20 random rollouts
   lambda_penalty: 10.0          # penalty weight for hard violations
   reward_clip: 2.0              # clip final reward magnitude
 
