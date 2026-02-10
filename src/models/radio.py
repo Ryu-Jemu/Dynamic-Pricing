@@ -78,20 +78,10 @@ class RadioModel:
     def __init__(self, config: RadioConfig) -> None:
         self.cfg = config
 
-    # -----------------------------------------------------------------
-    # 10.1  Offered load → utilization  [CONG_5G_PMC][LTE_LOAD_TPUT]
-    # -----------------------------------------------------------------
-
-    def compute_rho_util(
-        self,
-        N_active: int,
-        slice_name: str,
-    ) -> float:
+    def compute_rho_util(self, N_active: int, slice_name: str) -> float:
         """Compute slice-level utilization from number of active users.
 
         rho_util = clip(c_load * N_active / N_ref, 0.0, rho_util_max)
-
-        Monotone in N_active by construction.
         """
         if slice_name == "eMBB":
             n_ref = self.cfg.N_ref_eMBB
@@ -100,7 +90,6 @@ class RadioModel:
         else:
             raise ValueError(f"Unknown slice: {slice_name}")
 
-        # Guard against n_ref == 0
         if n_ref <= 0:
             n_ref = 1.0
 
@@ -108,100 +97,39 @@ class RadioModel:
         rho = float(np.clip(rho, 0.0, self.cfg.rho_util_max))
         return rho
 
-    # -----------------------------------------------------------------
-    # 10.2  Effective cell capacity under congestion  [CONG_5G_PMC]
-    # -----------------------------------------------------------------
-
     def compute_T_eff(self, rho_util: float) -> float:
         """Effective cell throughput at given utilization.
 
         T_eff = T_cell_cap_mbps * (1 - rho_util)
-
         MONOTONICITY GUARANTEE: ∂T_eff/∂rho_util < 0 always.
-        This is the core congestion degradation model.
         """
         rho_util = float(np.clip(rho_util, 0.0, self.cfg.rho_util_max))
         t_eff = self.cfg.T_cell_cap_mbps * (1.0 - rho_util)
         return max(t_eff, 0.0)
 
-    # -----------------------------------------------------------------
-    # 10.3  Per-user delivered throughput proxy
-    # -----------------------------------------------------------------
-
-    def compute_T_act_user(
-        self,
-        T_eff: float,
-        slice_share: float,
-        N_slice: int,
-        T_exp_user: float,
-    ) -> float:
+    def compute_T_act_user(self, T_eff: float, slice_share: float,
+                           N_slice: int, T_exp_user: float) -> float:
         """Per-user delivered throughput at one inner step.
 
         T_act_u,k = min(T_eff * share_s / max(N_s, 1), T_exp_u,k)
-
-        Parameters
-        ----------
-        T_eff : float
-            Effective cell capacity (Mbps) at this inner step.
-        slice_share : float
-            PRB share allocated to this slice (0..1).
-        N_slice : int
-            Number of active users in this slice.
-        T_exp_user : float
-            User's expected / maximum throughput (Mbps).
-            (May be throttled by data cap, Section 11.)
-
-        Returns
-        -------
-        float : Delivered throughput (Mbps), non-negative.
         """
-        n = max(N_slice, 1)  # prevent div-by-zero [SB3_TIPS]
+        n = max(N_slice, 1)
         fair_share = T_eff * slice_share / n
         t_act = min(fair_share, T_exp_user)
         return max(t_act, 0.0)
 
-    # -----------------------------------------------------------------
-    # Combined inner-step computation (convenience)
-    # -----------------------------------------------------------------
-
-    def inner_step(
-        self,
-        N_active_eMBB: int,
-        N_active_URLLC: int,
-        rho_URLLC: float,
-        T_exp_users_eMBB: np.ndarray,
-        T_exp_users_URLLC: np.ndarray,
-    ) -> Dict[str, Any]:
-        """Run one inner-step k of the radio model.
-
-        Parameters
-        ----------
-        N_active_eMBB, N_active_URLLC : int
-            Active user counts per slice.
-        rho_URLLC : float
-            URLLC PRB share (action-controlled).
-        T_exp_users_eMBB, T_exp_users_URLLC : ndarray shape (N_s,)
-            Per-user expected throughput arrays (Mbps).
-
-        Returns
-        -------
-        dict with keys:
-          rho_util_eMBB, rho_util_URLLC : float
-          T_eff_eMBB, T_eff_URLLC : float  (Mbps)
-          T_act_eMBB, T_act_URLLC : ndarray (Mbps)  per-user
-          avg_T_act_eMBB, avg_T_act_URLLC : float
-        """
+    def inner_step(self, N_active_eMBB: int, N_active_URLLC: int,
+                   rho_URLLC: float, T_exp_users_eMBB: np.ndarray,
+                   T_exp_users_URLLC: np.ndarray) -> Dict[str, Any]:
+        """Run one inner-step k of the radio model."""
         rho_eMBB_share = 1.0 - rho_URLLC
 
-        # Utilization (Section 10.1)
         rho_util_eMBB = self.compute_rho_util(N_active_eMBB, "eMBB")
         rho_util_URLLC = self.compute_rho_util(N_active_URLLC, "URLLC")
 
-        # Effective capacity (Section 10.2)
         T_eff_eMBB = self.compute_T_eff(rho_util_eMBB)
         T_eff_URLLC = self.compute_T_eff(rho_util_URLLC)
 
-        # Per-user throughput (Section 10.3)
         T_act_eMBB = np.array([
             self.compute_T_act_user(T_eff_eMBB, rho_eMBB_share,
                                     N_active_eMBB, t_exp)

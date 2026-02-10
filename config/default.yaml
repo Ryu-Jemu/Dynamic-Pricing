@@ -175,6 +175,11 @@ market:
   # Calibration targets
   target_churn_rate_eMBB: 0.03
   target_churn_rate_URLLC: 0.04
+  # D7: Price normalization — should match actual fee scale
+  # With fees ~44k-107k KRW, use midpoint (~70k) so price term doesn't dominate logit
+  price_norm: 70000.0
+  # D9: Churned user recycling cooldown (months before churned can rejoin)
+  churn_recycle_cooldown: 3
 
 # --- Section 14: Energy model [BS_POWER][BS_POWER_MEAS] ---
 energy:
@@ -184,18 +189,6 @@ energy:
   elec_price_krw_per_kwh: 120.0 # fixed unit price (no TOU)
 
 # --- Section 15: Economics & reward [SB3_TIPS] ---
-# Step 2: reward_type added; default changed from implicit "tanh" to "log"
-#
-#   reward_type options:
-#     "tanh"   — Original v1. Backward compatible. Saturates above 3×profit_scale.
-#     "linear" — Clip(P/S, -c, c). Best after Step 2 profit_scale recalibration.
-#     "log"    — sign(P)×log(1+|P|/S). DEFAULT. Never saturates. [Step 1 fix]
-#
-#   Academic basis:
-#     Haarnoja et al. (2018): SAC sensitive to reward scale;
-#       ent_coef="auto" compensates via entropy temperature α auto-tuning.
-#     Gao et al. (JNFA, 2025): AN-SAC adaptive normalization improves SAC.
-#     Ibrahim et al. (IEEE Access, 2024): reward engineering accuracy matters.
 economics:
   reward_type: "log"             # Step 2: NEW — "tanh" | "linear" | "log"
   unit_cost_prb_krw: 50.0       # scenario: per-PRB resource cost

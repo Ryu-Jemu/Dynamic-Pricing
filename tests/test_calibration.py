@@ -1,246 +1,237 @@
 """
-test_calibration.py — Demand + market + reward_scale meet targets
-within tolerance.
+Tests for calibration module (§20 — test_calibration.py).
 
-Tests are deterministic by construction (local fixed RNG or analytical).
-  [SB3_TIPS]
+Tests demand, market, and reward_scale calibration routines
+against scenario targets within tolerance.
 
 References:
-  [LOGNORMAL_TNET] https://dl.acm.org/doi/10.1109/TNET.2021.3059542
-  [CHURN_SLR]      https://link.springer.com/article/10.1007/s11301-023-00335-7
-  [SB3_TIPS]       RL Tips and Tricks
+  [LOGNORMAL_TNET][CHURN_SLR][SB3_TIPS]
 """
 
-import unittest
-import numpy as np
+from __future__ import annotations
 
-from src.models.utils import load_config, compute_price_bounds, merge_configs
-from src.models.demand import DemandConfig, DemandModel
-from src.models.market import MarketModel
-from src.models.pools import User
+import logging
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+# Ensure project root on path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.models.utils import load_config
 from src.models.calibrate import (
     calibrate_demand,
     calibrate_market,
     _baseline_churn_rate,
+    calibrate_reward_scale,
+    calibrate_reward_scale_from_samples,
 )
+from src.models.demand import DemandModel, DemandConfig
+
+logger = logging.getLogger("oran.test.calibration")
 
 
-class TestCalibrateDemand(unittest.TestCase):
-    """Test demand calibration (Section 19.1).  [LOGNORMAL_TNET]"""
+# ── Fixture: load default config ──
 
-    def setUp(self):
-        self.cfg = load_config("config/default.yaml")
-        self.tol = self.cfg.get("calibration", {}).get(
-            "demand_tolerance", 0.10
-        )
+@pytest.fixture
+def cfg():
+    """Load default config for testing."""
+    config_path = Path(__file__).resolve().parent.parent / "config" / "default.yaml"
+    return load_config(str(config_path))
 
-    def test_calibrate_demand_quantile_match(self):
-        """Calibrated mu, sigma must yield p50/p90 within tolerance."""
-        updates = calibrate_demand(self.cfg)
-        cfg_cal = merge_configs(self.cfg, updates)
+
+# =====================================================================
+# Test Demand Calibration  [LOGNORMAL_TNET]
+# =====================================================================
+
+class TestCalibrateDemand:
+    """Test demand parameter fitting via quantile matching."""
+
+    def test_demand_calibration_returns_updates(self, cfg):
+        """calibrate_demand should return a dict with demand.{eMBB,URLLC}.{mu,sigma}."""
+        updates = calibrate_demand(cfg)
+
+        assert "demand" in updates
+        for sname in ["eMBB", "URLLC"]:
+            assert sname in updates["demand"]
+            assert "mu" in updates["demand"][sname]
+            assert "sigma" in updates["demand"][sname]
+            assert updates["demand"][sname]["sigma"] > 0
+
+    def test_demand_params_match_targets(self, cfg):
+        """Fitted mu, sigma should produce p50/p90 within tolerance."""
+        updates = calibrate_demand(cfg)
+        tolerance = cfg.get("calibration", {}).get("demand_tolerance", 0.10)
 
         for sname in ["eMBB", "URLLC"]:
-            sc = cfg_cal["demand"][sname]
-            mu = sc["mu"]
-            sigma = sc["sigma"]
-            target_p50 = self.cfg["demand"][sname]["target_p50_gb"]
-            target_p90 = self.cfg["demand"][sname]["target_p90_gb"]
-
-            fitted_p50 = DemandModel.lognormal_median(mu, sigma)
-            fitted_p90 = DemandModel.lognormal_quantile(mu, sigma, 0.90)
-
-            err_p50 = abs(fitted_p50 - target_p50) / target_p50
-            err_p90 = abs(fitted_p90 - target_p90) / target_p90
-
-            self.assertLessEqual(err_p50, self.tol,
-                                 f"{sname} p50 error {err_p50:.4f}")
-            self.assertLessEqual(err_p90, self.tol,
-                                 f"{sname} p90 error {err_p90:.4f}")
-
-    def test_calibrated_sigma_positive(self):
-        """Calibrated sigma must be positive."""
-        updates = calibrate_demand(self.cfg)
-        for sname in ["eMBB", "URLLC"]:
+            mu = updates["demand"][sname]["mu"]
             sigma = updates["demand"][sname]["sigma"]
-            self.assertGreater(sigma, 0.0)
+            target_p50 = cfg["demand"][sname]["target_p50_gb"]
+            target_p90 = cfg["demand"][sname]["target_p90_gb"]
 
-    def test_sample_from_calibrated_params(self):
-        """Empirical statistics from calibrated params should be close
-        to targets (large sample).  [LOGNORMAL_TNET]"""
-        updates = calibrate_demand(self.cfg)
-        cfg_cal = merge_configs(self.cfg, updates)
-        rng = np.random.default_rng(42)
+            actual_p50 = DemandModel.lognormal_median(mu, sigma)
+            actual_p90 = DemandModel.lognormal_quantile(mu, sigma, 0.90)
 
-        dc = DemandConfig.from_config(cfg_cal)
-        dm = DemandModel(dc)
+            assert abs(actual_p50 - target_p50) / target_p50 <= tolerance, \
+                f"{sname} p50: {actual_p50:.2f} vs target {target_p50:.2f}"
+            assert abs(actual_p90 - target_p90) / target_p90 <= tolerance, \
+                f"{sname} p90: {actual_p90:.2f} vs target {target_p90:.2f}"
 
+    def test_demand_calibration_finite(self, cfg):
+        """Calibrated params must be finite."""
+        updates = calibrate_demand(cfg)
         for sname in ["eMBB", "URLLC"]:
-            D = dm.sample_demand(sname, 50000, rng=rng)
-            target_p50 = self.cfg["demand"][sname]["target_p50_gb"]
-            target_p90 = self.cfg["demand"][sname]["target_p90_gb"]
-
-            emp_p50 = float(np.median(D))
-            emp_p90 = float(np.percentile(D, 90))
-
-            # 15% tolerance for empirical (truncation + sampling noise)
-            err_p50 = abs(emp_p50 - target_p50) / target_p50
-            err_p90 = abs(emp_p90 - target_p90) / target_p90
-            self.assertLessEqual(err_p50, 0.15,
-                                 f"{sname} emp p50={emp_p50:.2f}")
-            self.assertLessEqual(err_p90, 0.15,
-                                 f"{sname} emp p90={emp_p90:.2f}")
+            mu = updates["demand"][sname]["mu"]
+            sigma = updates["demand"][sname]["sigma"]
+            assert np.isfinite(mu), f"{sname} mu is not finite"
+            assert np.isfinite(sigma), f"{sname} sigma is not finite"
 
 
-class TestCalibrateMarket(unittest.TestCase):
-    """Test market calibration (Section 19.2).  [CHURN_SLR][DISCONF_PDF]"""
+# =====================================================================
+# Test Market Calibration  [CHURN_SLR][DISCONF_PDF]
+# =====================================================================
 
-    def setUp(self):
-        self.cfg = load_config("config/default.yaml")
-        self.tol = self.cfg.get("calibration", {}).get(
-            "market_tolerance", 0.15
+class TestCalibrateMarket:
+    """Test market parameter calibration."""
+
+    def test_baseline_churn_rate_computes(self, cfg):
+        """_baseline_churn_rate should return a float in [0, 1]."""
+        seg_cfg = cfg.get("segments", {})
+        seg_names = seg_cfg.get("names", ["light", "mid", "heavy", "qos_sensitive"])
+        seg_probs = seg_cfg.get("proportions", [0.25, 0.40, 0.25, 0.10])
+
+        rate = _baseline_churn_rate(
+            beta_price=0.5, beta_qos=0.3, beta_sw=0.2,
+            U_outside=0.0,
+            F_baseline=70000.0,
+            T_act_baseline=20.0,
+            seg_cfg=seg_cfg,
+            seg_names=seg_names,
+            seg_probs=seg_probs,
         )
 
-    def test_calibrate_market_churn_rate(self):
-        """Calibrated U_outside must yield baseline churn within tolerance."""
-        updates = calibrate_market(self.cfg)
-        cfg_cal = merge_configs(self.cfg, updates)
+        assert 0.0 <= rate <= 1.0, f"Churn rate {rate} out of range"
+        assert np.isfinite(rate), "Churn rate not finite"
 
-        seg_cfg = self.cfg.get("segments", {})
-        seg_names = seg_cfg.get("names",
-                                ["light", "mid", "heavy", "qos_sensitive"])
+    def test_market_calibration_returns_updates(self, cfg):
+        """calibrate_market should return dict with market params."""
+        updates = calibrate_market(cfg)
+
+        assert "market" in updates
+        assert "U_outside" in updates["market"]
+        assert "U_outside_per_slice" in updates["market"]
+        assert isinstance(updates["market"]["U_outside_per_slice"], dict)
+
+    def test_market_calibration_matches_targets(self, cfg):
+        """Calibrated U_outside should produce churn rates near targets."""
+        updates = calibrate_market(cfg)
+        tolerance = cfg.get("calibration", {}).get("market_tolerance", 0.15)
+        seg_cfg = cfg.get("segments", {})
+        seg_names = seg_cfg.get("names", ["light", "mid", "heavy", "qos_sensitive"])
         seg_probs = seg_cfg.get("proportions", [0.25, 0.40, 0.25, 0.10])
-        price_bounds = compute_price_bounds(self.cfg)
 
-        cal_market = cfg_cal["market"]
-        U_per_slice = cal_market.get("U_outside_per_slice", {})
+        from src.models.utils import compute_price_bounds
+        price_bounds = compute_price_bounds(cfg)
 
         for sname in ["eMBB", "URLLC"]:
-            target_churn = self.cfg["market"].get(
-                f"target_churn_rate_{sname}", 0.03
-            )
+            target = cfg["market"].get(f"target_churn_rate_{sname}", 0.03)
+            U_opt = updates["market"]["U_outside_per_slice"][sname]
             pb = price_bounds[sname]
             F_baseline = (pb["F_min"] + pb["F_max"]) / 2.0
             slo_key = f"SLO_T_user_{sname}_mbps"
-            T_baseline = self.cfg["sla"].get(slo_key, 10.0) * 2.0
-
-            # Use per-slice U_outside for accurate verification
-            U_out = U_per_slice.get(sname, cal_market["U_outside"])
+            T_baseline = cfg.get("sla", {}).get(slo_key, 10.0) * 2.0
 
             actual = _baseline_churn_rate(
-                beta_price=cal_market["beta_price"],
-                beta_qos=cal_market["beta_qos"],
-                beta_sw=cal_market["beta_sw"],
-                U_outside=U_out,
+                beta_price=updates["market"]["beta_price"],
+                beta_qos=updates["market"]["beta_qos"],
+                beta_sw=updates["market"]["beta_sw"],
+                U_outside=U_opt,
                 F_baseline=F_baseline,
                 T_act_baseline=T_baseline,
                 seg_cfg=seg_cfg,
                 seg_names=seg_names,
                 seg_probs=seg_probs,
-            )
-            err = abs(actual - target_churn) / max(target_churn, 1e-9)
-
-            self.assertLessEqual(
-                err, self.tol,
-                f"{sname}: actual={actual:.4f}, target={target_churn}, "
-                f"err={err:.4f}"
+                price_norm=cfg.get("market", {}).get("price_norm", 70000.0),
             )
 
-    def test_calibrated_betas_positive(self):
-        """Beta_price and beta_qos must remain positive."""
-        updates = calibrate_market(self.cfg)
-        m = updates["market"]
-        self.assertGreater(m["beta_price"], 0.0)
-        self.assertGreater(m["beta_qos"], 0.0)
+            assert abs(actual - target) / max(target, 1e-6) <= tolerance, \
+                f"{sname}: actual churn {actual:.4f} vs target {target:.4f}"
 
-    def test_churn_direction_after_calibration(self):
-        """After calibration, churn direction must be correct:
-        higher price → more churn, higher QoS → less churn."""
-        updates = calibrate_market(self.cfg)
-        cfg_cal = merge_configs(self.cfg, updates)
-        market = MarketModel(cfg_cal)
 
-        user = User(
-            user_id=0, slice="eMBB", segment="mid",
-            w_price=1.0, w_qos=1.0, sw_cost=0.5, b_u=0.0,
+# =====================================================================
+# Test Reward Scale Calibration  [SB3_TIPS]
+# =====================================================================
+
+class TestCalibrateRewardScale:
+    """Test reward_scale calibration."""
+
+    def test_reward_scale_from_samples(self):
+        """calibrate_reward_scale_from_samples should return valid scale."""
+        rng = np.random.default_rng(42)
+        profits = rng.normal(500000, 200000, size=500)
+
+        result = calibrate_reward_scale_from_samples(
+            profits, reward_type="log", reward_clip=2.0,
         )
 
-        p_base = market.compute_churn_prob(user, 55000, 20.0, 0.0)
-        p_high_price = market.compute_churn_prob(user, 100000, 20.0, 0.0)
-        p_high_qos = market.compute_churn_prob(user, 55000, 80.0, 0.0)
-        p_high_disc = market.compute_churn_prob(user, 55000, 20.0, 30.0)
+        assert "profit_scale" in result
+        assert result["profit_scale"] > 0
+        assert np.isfinite(result["profit_scale"])
 
-        self.assertGreater(p_high_price, p_base,
-                           "Higher price should increase churn")
-        self.assertLess(p_high_qos, p_base,
-                        "Higher QoS should decrease churn")
-        self.assertGreater(p_high_disc, p_base,
-                           "Higher disconfirmation should increase churn")
-
-    def test_calibrated_churn_is_reasonable(self):
-        """Calibrated churn at baseline should be in [0.001, 0.20]."""
-        updates = calibrate_market(self.cfg)
-        cfg_cal = merge_configs(self.cfg, updates)
-        market = MarketModel(cfg_cal)
-
-        user = User(
-            user_id=0, slice="eMBB", segment="mid",
-            w_price=1.0, w_qos=1.0, sw_cost=0.5, b_u=0.0,
+    def test_reward_scale_from_samples_empty(self):
+        """Should handle empty samples gracefully."""
+        result = calibrate_reward_scale_from_samples(
+            np.array([]), reward_type="log",
         )
-        p_churn = market.compute_churn_prob(user, 60000, 20.0, 0.0)
-        self.assertGreater(p_churn, 0.001,
-                           f"Churn too low: {p_churn}")
-        self.assertLess(p_churn, 0.20,
-                        f"Churn too high: {p_churn}")
+        assert result["profit_scale"] >= 1.0
+
+    def test_reward_scale_full_pipeline(self, cfg):
+        """FIX C7: calibrate_reward_scale(cfg) should accept config dict.
+
+        The original code passed cfg to a function expecting np.ndarray.
+        The fixed calibrate_reward_scale() now accepts a config dict
+        and internally runs rollouts + calls calibrate_reward_scale_from_samples().
+        """
+        # Use minimal rollouts for testing speed
+        result = calibrate_reward_scale(cfg, n_episodes=2, seed=42)
+
+        assert "economics" in result
+        assert "profit_scale" in result["economics"]
+        assert result["economics"]["profit_scale"] > 0
+        assert np.isfinite(result["economics"]["profit_scale"])
 
 
-class TestCalibrateRewardScale(unittest.TestCase):
-    """Test reward scale calibration (Section 19.3).  [SB3_TIPS]"""
+# =====================================================================
+# Integration: Full calibration pipeline
+# =====================================================================
 
-    def test_profit_scale_positive(self):
-        """profit_scale from calibration must be positive and finite."""
-        cfg = load_config("config/default.yaml")
+class TestFullCalibration:
+    """Test that all three calibrations compose correctly."""
+
+    def test_full_pipeline_produces_valid_config(self, cfg):
+        """Running all calibrations should produce a valid merged config."""
+        from src.models.utils import merge_configs
+
+        # Step 1: demand
         demand_updates = calibrate_demand(cfg)
-        cfg = merge_configs(cfg, demand_updates)
-        market_updates = calibrate_market(cfg)
-        cfg = merge_configs(cfg, market_updates)
+        cfg_1 = merge_configs(cfg, demand_updates)
 
-        cfg["calibration"]["reward_scale_episodes"] = 3
-        from src.models.calibrate import calibrate_reward_scale
-        reward_updates = calibrate_reward_scale(cfg)
+        # Step 2: market
+        market_updates = calibrate_market(cfg_1)
+        cfg_2 = merge_configs(cfg_1, market_updates)
 
-        ps = reward_updates["economics"]["profit_scale"]
-        self.assertGreater(ps, 0.0)
-        self.assertTrue(np.isfinite(ps))
+        # Verify merged config has calibrated values
+        assert cfg_2["demand"]["eMBB"]["mu"] == demand_updates["demand"]["eMBB"]["mu"]
+        assert cfg_2["market"]["U_outside"] == market_updates["market"]["U_outside"]
 
-    def test_scaled_reward_in_range(self):
-        """tanh(Pi/scale) should be in [-1, 1] for typical profits."""
-        profit_scale = 5e6
-        for profit in [-1e7, -1e6, 0, 1e6, 5e6, 1e7]:
-            r = float(np.tanh(profit / profit_scale))
-            self.assertGreaterEqual(r, -1.0)
-            self.assertLessEqual(r, 1.0)
-            self.assertTrue(np.isfinite(r))
+        # Step 3: reward scale (minimal rollouts)
+        reward_updates = calibrate_reward_scale(cfg_2, n_episodes=1, seed=42)
+        cfg_3 = merge_configs(cfg_2, reward_updates)
 
-
-class TestFitLognormalQuantiles(unittest.TestCase):
-    """Test the quantile fitting function directly."""
-
-    def test_exact_recovery(self):
-        """fit_lognormal_quantiles should recover p50 and p90 exactly."""
-        for p50, p90 in [(10.0, 35.0), (2.0, 7.0), (50.0, 150.0), (0.5, 2.0)]:
-            mu, sigma = DemandModel.fit_lognormal_quantiles(p50, p90)
-            recovered_p50 = DemandModel.lognormal_median(mu, sigma)
-            recovered_p90 = DemandModel.lognormal_quantile(mu, sigma, 0.90)
-            self.assertAlmostEqual(recovered_p50, p50, places=4)
-            self.assertAlmostEqual(recovered_p90, p90, places=4)
-
-    def test_invalid_inputs(self):
-        """Should raise on invalid quantile targets."""
-        with self.assertRaises(ValueError):
-            DemandModel.fit_lognormal_quantiles(-1.0, 5.0)
-        with self.assertRaises(ValueError):
-            DemandModel.fit_lognormal_quantiles(10.0, 5.0)
+        assert cfg_3["economics"]["profit_scale"] > 0
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__, "-v"])

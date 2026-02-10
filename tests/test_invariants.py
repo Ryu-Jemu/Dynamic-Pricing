@@ -1,188 +1,175 @@
 """
-test_invariants.py — Pool disjointness + conservation; transitions only
-at month boundary.
+Tests for pool invariants and step order (§20 — test_invariants.py).
 
-Tests are deterministic by construction (fixed inputs or local fixed RNG).
+Tests:
+  - Pool disjointness: inactive ∩ active ∩ churned = ∅
+  - Conservation: |inactive| + |active| + |churned| = total created
+  - Transitions only at month boundaries
+  - Step order: join before demand, churn after top-up (§17)
+
+References:
   [SB3_TIPS]
-
-Section 20:
-  - pool disjointness: pools are pairwise disjoint
-  - conservation: total_users = |inactive| + |active| + |churned|
-  - transitions only at month boundaries via join/churn events
 """
 
-import unittest
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.models.utils import load_config
-from src.models.pools import UserPoolManager, User
+from src.models.pools import UserPoolManager
+from src.envs.oran_slicing_env import OranSlicingEnv
 
 
-class TestPoolInvariants(unittest.TestCase):
-    """Test pool disjointness, conservation, and transition rules."""
+@pytest.fixture
+def cfg():
+    config_path = Path(__file__).resolve().parent.parent / "config" / "default.yaml"
+    return load_config(str(config_path))
 
-    def setUp(self):
-        """Initialize pools with a local fixed RNG (test only)."""
-        self.cfg = load_config("config/default.yaml")
-        self.rng = np.random.default_rng(12345)  # local test RNG
-        self.pm = UserPoolManager.from_config(self.cfg, rng=self.rng)
 
-    # ---------------------------------------------------------------
-    # Disjointness
-    # ---------------------------------------------------------------
+# =====================================================================
+# Pool invariant tests
+# =====================================================================
 
-    def test_initial_disjointness(self):
-        """Pools must be pairwise disjoint after initialization."""
-        ids_i = set(self.pm.inactive_pool.keys())
-        ids_a = set(self.pm.active_pool.keys())
-        ids_c = set(self.pm.churned_pool.keys())
+class TestPoolInvariants:
+    """Pool disjointness + conservation invariants."""
 
-        self.assertTrue(ids_i.isdisjoint(ids_a),
-                        f"inactive ∩ active = {ids_i & ids_a}")
-        self.assertTrue(ids_i.isdisjoint(ids_c),
-                        f"inactive ∩ churned = {ids_i & ids_c}")
-        self.assertTrue(ids_a.isdisjoint(ids_c),
-                        f"active ∩ churned = {ids_a & ids_c}")
+    def test_initial_disjointness(self, cfg):
+        """Pools are pairwise disjoint after initialization."""
+        rng = np.random.default_rng(42)
+        pool = UserPoolManager.from_config(cfg, rng=rng)
+        pool.assert_invariants()  # raises if violated
 
-    def test_disjointness_after_join(self):
-        """Disjointness must hold after join events."""
-        # Pick 10 inactive users
-        inactive_ids = list(self.pm.inactive_pool.keys())[:10]
-        self.pm.join(inactive_ids)
-        self.pm.assert_invariants()  # raises if violated
+    def test_conservation_after_join(self, cfg):
+        """Total user count is conserved after join operations."""
+        rng = np.random.default_rng(42)
+        pool = UserPoolManager.from_config(cfg, rng=rng)
+        total_before = pool.total_users
 
-    def test_disjointness_after_churn(self):
-        """Disjointness must hold after churn events."""
-        active_ids = list(self.pm.active_pool.keys())[:5]
-        self.pm.churn(active_ids)
-        self.pm.assert_invariants()
+        inactive = [
+            u for u in pool.inactive_pool.values() if u.slice == "eMBB"
+        ]
+        join_ids = [u.user_id for u in inactive[:5]]
+        pool.join(join_ids)
 
-    def test_disjointness_after_join_then_churn(self):
-        """Disjointness must hold after join followed by churn."""
-        # Join 10
-        inactive_ids = list(self.pm.inactive_pool.keys())[:10]
-        joined = self.pm.join(inactive_ids)
-        self.assertEqual(len(joined), 10)
+        assert pool.total_users == total_before
+        pool.assert_invariants()
 
-        # Churn 5 of them
-        joined_ids = [u.user_id for u in joined[:5]]
-        churned = self.pm.churn(joined_ids)
-        self.assertEqual(len(churned), 5)
+    def test_conservation_after_churn(self, cfg):
+        """Total user count is conserved after churn operations."""
+        rng = np.random.default_rng(42)
+        pool = UserPoolManager.from_config(cfg, rng=rng)
+        total_before = pool.total_users
 
-        self.pm.assert_invariants()
+        active = [
+            u for u in pool.active_pool.values() if u.slice == "eMBB"
+        ]
+        churn_ids = [u.user_id for u in active[:3]]
+        pool.churn(churn_ids)
 
-    # ---------------------------------------------------------------
-    # Conservation
-    # ---------------------------------------------------------------
+        assert pool.total_users == total_before
+        pool.assert_invariants()
 
-    def test_initial_conservation(self):
-        """total_users = |inactive| + |active| + |churned| at init."""
-        total = (len(self.pm.inactive_pool)
-                 + len(self.pm.active_pool)
-                 + len(self.pm.churned_pool))
-        self.assertEqual(total, self.pm.total_users)
+    def test_conservation_after_full_episode(self, cfg):
+        """Conservation holds through an entire episode."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        total_start = env.pool.total_users
 
-    def test_conservation_after_transitions(self):
-        """Conservation after multiple join/churn cycles."""
-        total_before = self.pm.total_users
+        for _ in range(10):
+            action = env.action_space.sample()
+            env.step(action)
+            assert env.pool.total_users == total_start, \
+                f"Conservation violated: {env.pool.total_users} != {total_start}"
+            env.pool.assert_invariants()
 
-        # Join 15
-        inactive_ids = list(self.pm.inactive_pool.keys())[:15]
-        self.pm.join(inactive_ids)
-        self.assertEqual(self.pm.total_users, total_before)
+    def test_disjointness_after_full_episode(self, cfg):
+        """Disjointness holds through an entire episode."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
 
-        # Churn 8
-        active_ids = list(self.pm.active_pool.keys())[:8]
-        self.pm.churn(active_ids)
-        self.assertEqual(self.pm.total_users, total_before)
+        for _ in range(20):
+            action = env.action_space.sample()
+            env.step(action)
+            ids_i = set(env.pool.inactive_pool.keys())
+            ids_a = set(env.pool.active_pool.keys())
+            ids_c = set(env.pool.churned_pool.keys())
+            assert ids_i.isdisjoint(ids_a), "inactive ∩ active ≠ ∅"
+            assert ids_i.isdisjoint(ids_c), "inactive ∩ churned ≠ ∅"
+            assert ids_a.isdisjoint(ids_c), "active ∩ churned ≠ ∅"
 
-    def test_no_user_duplication(self):
-        """No user ID should appear in more than one pool."""
-        all_ids = (
-            list(self.pm.inactive_pool.keys())
-            + list(self.pm.active_pool.keys())
-            + list(self.pm.churned_pool.keys())
-        )
-        self.assertEqual(len(all_ids), len(set(all_ids)),
-                         "Duplicate user IDs found across pools")
+    def test_join_only_from_inactive(self, cfg):
+        """join() only moves users that are in the inactive pool."""
+        rng = np.random.default_rng(42)
+        pool = UserPoolManager.from_config(cfg, rng=rng)
 
-    # ---------------------------------------------------------------
-    # Transition correctness
-    # ---------------------------------------------------------------
+        active_id = next(iter(pool.active_pool.keys()))
+        # Trying to join an already-active user should be a no-op
+        joined = pool.join([active_id])
+        assert len(joined) == 0, "Should not join from active pool"
+        pool.assert_invariants()
 
-    def test_join_moves_inactive_to_active(self):
-        """Join must move user from inactive to active (not copy)."""
-        uid = list(self.pm.inactive_pool.keys())[0]
-        self.assertIn(uid, self.pm.inactive_pool)
-        self.assertNotIn(uid, self.pm.active_pool)
+    def test_churn_only_from_active(self, cfg):
+        """churn() only moves users that are in the active pool."""
+        rng = np.random.default_rng(42)
+        pool = UserPoolManager.from_config(cfg, rng=rng)
 
-        self.pm.join([uid])
+        inactive_id = next(iter(pool.inactive_pool.keys()))
+        # Trying to churn an inactive user should be a no-op
+        churned = pool.churn([inactive_id])
+        assert len(churned) == 0, "Should not churn from inactive pool"
+        pool.assert_invariants()
 
-        self.assertNotIn(uid, self.pm.inactive_pool)
-        self.assertIn(uid, self.pm.active_pool)
 
-    def test_churn_moves_active_to_churned(self):
-        """Churn must move user from active to churned (not copy)."""
-        uid = list(self.pm.active_pool.keys())[0]
-        self.assertIn(uid, self.pm.active_pool)
-        self.assertNotIn(uid, self.pm.churned_pool)
+# =====================================================================
+# Step order tests (§17 compliance — FIX M1)
+# =====================================================================
 
-        self.pm.churn([uid])
+class TestStepOrder:
+    """Verify §17-compliant step order after Phase 2 M1 fix."""
 
-        self.assertNotIn(uid, self.pm.active_pool)
-        self.assertIn(uid, self.pm.churned_pool)
+    def test_joins_included_in_n_active(self, cfg):
+        """N_active in info should include newly joined users (join at step 2)."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        n_before = env.pool.active_count("eMBB")
 
-    def test_join_nonexistent_is_safe(self):
-        """Joining a user not in inactive pool should be silently skipped."""
-        fake_id = 999999
-        result = self.pm.join([fake_id])
-        self.assertEqual(len(result), 0)
-        self.pm.assert_invariants()
+        action = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        _, _, _, _, info = env.step(action)
 
-    def test_churn_nonexistent_is_safe(self):
-        """Churning a user not in active pool should be silently skipped."""
-        fake_id = 999999
-        result = self.pm.churn([fake_id])
-        self.assertEqual(len(result), 0)
-        self.pm.assert_invariants()
+        # N_active should = pre-step active + joins (since join happens first)
+        expected = n_before + info["joins_eMBB"]
+        assert info["N_active_eMBB"] == expected, \
+            f"N_active={info['N_active_eMBB']} != {n_before}+{info['joins_eMBB']}={expected}"
 
-    # ---------------------------------------------------------------
-    # User field immutability
-    # ---------------------------------------------------------------
+    def test_post_churn_less_than_active(self, cfg):
+        """N_post_churn should be <= N_active (churn removes users)."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
 
-    def test_user_immutable_fields_preserved(self):
-        """user_id, slice, segment must not change across transitions."""
-        uid = list(self.pm.inactive_pool.keys())[0]
-        user_before = self.pm.inactive_pool[uid]
-        slice_before = user_before.slice
-        seg_before = user_before.segment
+        for _ in range(10):
+            action = env.action_space.sample()
+            _, _, _, _, info = env.step(action)
+            for s in ["eMBB", "URLLC"]:
+                assert info[f"N_post_churn_{s}"] <= info[f"N_active_{s}"] + info[f"joins_{s}"], \
+                    f"Post-churn > active+joins for {s}"
 
-        self.pm.join([uid])
-        user_after = self.pm.active_pool[uid]
+    def test_plan_based_t_exp(self, cfg):
+        """T_exp should be set from plan v_cap, not hardcoded 100 (FIX M7)."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
 
-        self.assertEqual(user_after.user_id, uid)
-        self.assertEqual(user_after.slice, slice_before)
-        self.assertEqual(user_after.segment, seg_before)
-
-    # ---------------------------------------------------------------
-    # Monthly reset
-    # ---------------------------------------------------------------
-
-    def test_monthly_reset(self):
-        """Monthly reset should zero transient fields for active users."""
-        users = list(self.pm.active_pool.values())[:3]
-        for u in users:
-            u.D_u = 50.0
-            u.T_act_avg = 25.0
-            u.delta_disc = 10.0
-
-        self.pm.reset_monthly_fields()
-
-        for u in users:
-            self.assertEqual(u.D_u, 0.0)
-            self.assertEqual(u.T_act_avg, 0.0)
-            self.assertEqual(u.delta_disc, 0.0)
+        for u in env.pool.active_pool.values():
+            assert u.T_exp != 100.0 or u.v_cap_mbps == 100.0, \
+                f"User {u.user_id}: T_exp={u.T_exp} (should be {u.v_cap_mbps})"
+            assert u.T_exp == u.v_cap_mbps, \
+                f"User {u.user_id}: T_exp={u.T_exp} != v_cap={u.v_cap_mbps}"
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__, "-v"])

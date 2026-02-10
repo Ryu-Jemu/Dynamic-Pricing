@@ -1,85 +1,10 @@
 """
 Economics module: SLA credits, energy cost, profit, and reward.
 
-Section 12 — SLA/SLO violation & credits:
-  12.1  V_s = (#violating inner steps) / K
-  12.2  C_sla_s = credit_frac(V_s) * F_s * N_active_s
-        Credit tiers are scenario assumptions informed by MRC-based
-        credit structures.  [VERIZON_SLA][SOLARWINDS_SLA_SLO]
-
-Section 14 — Energy model:
-  P_kW(load) = P0 + (P1 - P0) * load   [BS_POWER][BS_POWER_MEAS]
-  C_energy = P_avg_kW * hours_month * elec_price_KRW_per_kWh
-  Fixed electricity unit price (no TOU variation).
-
-Section 15 — Profit and reward:
-  15.1  Rev = Σ_active F_s + Σ_topup Price_top
-        Cost = C_energy + Σ_s C_sla_s + C_resource
-        Pi = Rev - Cost       (CAC is removed)
-  15.2  C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)
-  15.3  r = tanh(Pi / profit_scale) - λ_penalty * penalty  [SB3_TIPS]
+Sections 12, 14, 15 of HybridPrompt.md.
 
 References:
-  [VERIZON_SLA]       https://www.verizon.com/business/service_guide/reg/cp_mgn_plus_sla_2020AUG17_mk.pdf
-  [SOLARWINDS_SLA_SLO] https://www.solarwinds.com/sre-best-practices/sla-vs-slo
-  [BS_POWER]          https://arxiv.org/abs/1411.1571
-  [BS_POWER_MEAS]     https://www.mdpi.com/1424-8220/12/4/4281
-  [SB3_TIPS]          https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
-"""
-
-"""
-Economics module: SLA credits, energy cost, profit, and reward.
-
-Section 12 — SLA/SLO violation & credits:
-  12.1  V_s = (#violating inner steps) / K
-  12.2  C_sla_s = credit_frac(V_s) * F_s * N_active_s
-        Credit tiers are scenario assumptions informed by MRC-based
-        credit structures.  [VERIZON_SLA][SOLARWINDS_SLA_SLO]
-
-Section 14 — Energy model:
-  P_kW(load) = P0 + (P1 - P0) * load   [BS_POWER][BS_POWER_MEAS]
-  C_energy = P_avg_kW * hours_month * elec_price_KRW_per_kWh
-  Fixed electricity unit price (no TOU variation).
-
-Section 15 — Profit and reward:
-  15.1  Rev = Σ_active F_s + Σ_topup Price_top
-        Cost = C_energy + Σ_s C_sla_s + C_resource
-        Pi = Rev - Cost       (CAC is removed)
-  15.2  C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)
-
-  15.3  Reward function — STEP 2 INTEGRATION
-        ┌─────────┬────────────────────────────────────────────────────┐
-        │ Type    │ Formula                                            │
-        ├─────────┼────────────────────────────────────────────────────┤
-        │ tanh    │ r = tanh(P / S) - λ*penalty           [ORIGINAL]  │
-        │ linear  │ r = clip(P / S, -c, c) - λ*penalty    [Step 2]   │
-        │ log     │ r = sign(P)*log(1+|P|/S) - λ*penalty  [DEFAULT]  │
-        └─────────┴────────────────────────────────────────────────────┘
-
-        Step 1 analysis showed tanh saturates above 3×profit_scale:
-          - P=5M: tanh gradient = 7.07e-10 (effectively zero)
-          - 150-user vs 10-user discrimination ratio: only 1.17×
-        log reward fixes this:
-          - Never saturates; always monotone with positive gradient
-          - Discrimination ratio 2.74× (2.3× improvement over tanh)
-          - Concave compression stabilizes Q-learning
-
-        Selection via config: economics.reward_type ∈ {tanh, linear, log}
-        Default: "log" (changed from implicit "tanh" in Step 2)
-
-        Academic basis:
-          - Haarnoja et al. (ICML 2018): SAC sensitive to reward scale;
-            ent_coef="auto" compensates via entropy temperature α.
-          - Gao et al. (JNFA 2025): AN-SAC adaptive normalization.
-          - Ibrahim et al. (IEEE Access 2024): reward engineering accuracy.
-          - ReDit (arXiv:2506.18631): reward smoothing prevents gradient issues.
-
-References:
-  [VERIZON_SLA]       https://www.verizon.com/business/service_guide/reg/cp_mgn_plus_sla_2020AUG17_mk.pdf
-  [SOLARWINDS_SLA_SLO] https://www.solarwinds.com/sre-best-practices/sla-vs-slo
-  [BS_POWER]          https://arxiv.org/abs/1411.1571
-  [BS_POWER_MEAS]     https://www.mdpi.com/1424-8220/12/4/4281
-  [SB3_TIPS]          https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html
+  [VERIZON_SLA] [BS_POWER] [SB3_TIPS]
 """
 
 from __future__ import annotations
@@ -91,20 +16,11 @@ import numpy as np
 
 logger = logging.getLogger("oran.economics")
 
-# Allowed reward_type values
 _VALID_REWARD_TYPES = ("tanh", "linear", "log")
 
 
-# =====================================================================
-# 12) SLA / SLO model  [VERIZON_SLA][SOLARWINDS_SLA_SLO]
-# =====================================================================
-
 class SLAModel:
-    """SLA/SLO violation measurement and credit computation (Section 12).
-
-    Uses internal SLO targets to detect violations; credit tiers
-    are scenario assumptions informed by MRC-based credit structures.
-    """
+    """SLA/SLO violation measurement and credit computation (Section 12)."""
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         sla = cfg.get("sla", {})
@@ -112,9 +28,6 @@ class SLAModel:
             "eMBB": sla.get("SLO_T_user_eMBB_mbps", 10.0),
             "URLLC": sla.get("SLO_T_user_URLLC_mbps", 5.0),
         }
-        # Credit tier table (scenario; configurable) [VERIZON_SLA]
-        # Each entry: {"threshold": V_max, "fraction": credit_frac}
-        # Table is assumed sorted ascending by threshold.
         self.credit_tiers: List[Dict[str, float]] = sla.get("credit_tiers", [
             {"threshold": 0.05, "fraction": 0.00},
             {"threshold": 0.15, "fraction": 0.05},
@@ -123,67 +36,25 @@ class SLAModel:
         ])
         self.credit_cap: float = sla.get("credit_cap_fraction", 0.30)
 
-    # -----------------------------------------------------------------
-    # 12.1  Violation rate (monthly)
-    # -----------------------------------------------------------------
-
-    def compute_violation_rate(
-        self,
-        avg_throughputs_per_step: np.ndarray,
-        slice_name: str,
-    ) -> float:
-        """Fraction of inner steps where avg throughput < SLO.
-
-        Parameters
-        ----------
-        avg_throughputs_per_step : ndarray shape (K,)
-            Per-step slice-level average throughput (Mbps).
-        slice_name : str
-
-        Returns
-        -------
-        float : V_s = (#violating steps) / K, in [0, 1].
-        """
+    def compute_violation_rate(self, avg_throughputs_per_step: np.ndarray,
+                               slice_name: str) -> float:
         if len(avg_throughputs_per_step) == 0:
             return 0.0
-
         slo = self.SLO_T.get(slice_name, 0.0)
         violations = np.sum(avg_throughputs_per_step < slo)
         K = len(avg_throughputs_per_step)
         return float(violations / K)
 
-    # -----------------------------------------------------------------
-    # 12.2  Credit computation (MRC-based)  [VERIZON_SLA]
-    # -----------------------------------------------------------------
-
     def _credit_fraction(self, V_s: float) -> float:
-        """Look up credit fraction from tier table.
-
-        Tier table (scenario defaults):
-          V_s ≤ 0.05 → 0%
-          0.05 < V_s ≤ 0.15 → 5%
-          0.15 < V_s ≤ 0.30 → 10%
-          V_s > 0.30 → 20%
-        """
         frac = 0.0
         for tier in self.credit_tiers:
             if V_s <= tier["threshold"]:
                 frac = tier["fraction"]
                 break
-            frac = tier["fraction"]  # last tier catches all above
+            frac = tier["fraction"]
         return frac
 
-    def compute_credit(
-        self,
-        V_s: float,
-        F_s: float,
-        N_active_s: int,
-    ) -> float:
-        """SLA credit (KRW) for one slice.
-
-        C_sla_s = credit_frac(V_s) * F_s * N_active_s
-        Cap: total credit ≤ credit_cap * F_s * N_active_s
-        """
+    def compute_credit(self, V_s: float, F_s: float, N_active_s: int) -> float:
         frac = self._credit_fraction(V_s)
         mrc = F_s * max(N_active_s, 0)
         credit = frac * mrc
@@ -191,19 +62,8 @@ class SLAModel:
         return min(credit, cap)
 
 
-# =====================================================================
-# 14) Energy model  [BS_POWER][BS_POWER_MEAS]
-# =====================================================================
-
 class EnergyModel:
-    """Base station energy cost (Section 14).
-
-    P_kW(load) = P0 + (P1 - P0) * load
-    C_energy = P_avg_kW * hours_month * elec_price_KRW_per_kWh
-
-    P0, P1 are scenario params with literature-reasonable ranges.
-    Fixed electricity unit price (no TOU variation).
-    """
+    """Base station energy cost (Section 14)."""
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         e = cfg.get("energy", {})
@@ -213,43 +73,20 @@ class EnergyModel:
         self.elec_price: float = e.get("elec_price_krw_per_kwh", 120.0)
 
     def power_kw(self, load: float) -> float:
-        """Instantaneous power (kW) at given load ∈ [0, 1].
-
-        P(load) = P0 + (P1 - P0) * load  [BS_POWER]
-        """
         load = float(np.clip(load, 0.0, 1.0))
         return self.P0_kw + (self.P1_kw - self.P0_kw) * load
 
     def compute_cost(self, avg_load: float) -> float:
-        """Monthly energy cost (KRW).
-
-        C_energy = P_avg_kW * hours_month * elec_price
-        """
         p_avg = self.power_kw(avg_load)
         return p_avg * self.hours_per_month * self.elec_price
 
 
-# =====================================================================
-# 15) Economics — Revenue, Cost, Profit, Reward  [SB3_TIPS]
-# =====================================================================
-
 class EconomicsModel:
     """Full economics: revenue, cost, profit, reward (Section 15).
 
-    15.1  Rev  = Σ_active F_s + Σ_topup Price_top
-          Cost = C_energy + Σ_s C_sla_s + C_resource
-          Pi   = Rev - Cost         (CAC removed)
-
-    15.2  C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)
-
-    15.3  r = f(Pi / profit_scale) - λ_penalty * penalty
-          where f ∈ {tanh, linear_clip, log} selected by reward_type.
-          profit_scale calibrated via random rollouts.  [SB3_TIPS]
-
-    Step 2 integration:
-      - reward_type read from config (economics.reward_type)
-      - Default changed from implicit "tanh" to explicit "log"
-      - Backward compatible: reward_type="tanh" reproduces v1 behavior
+    Phase 3 (M9): Enhanced reward with auxiliary shaping terms:
+      r = f(profit/scale) + α_ret * retention + α_eff * efficiency
+          - α_churn * churn_rate - α_vol * price_volatility - λ * penalty
     """
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
@@ -260,7 +97,6 @@ class EconomicsModel:
         self.reward_clip: float = ec.get("reward_clip", 2.0)
         self.prb_total: int = cfg.get("radio", {}).get("prb_total", 273)
 
-        # ── Step 2: reward_type from config ─────────────────────
         self.reward_type: str = ec.get("reward_type", "log")
         if self.reward_type not in _VALID_REWARD_TYPES:
             raise ValueError(
@@ -268,52 +104,27 @@ class EconomicsModel:
                 f"Must be one of {_VALID_REWARD_TYPES}"
             )
 
+        # M9: Reward shaping weights (default to moderate values)
+        shaping = ec.get("reward_shaping", {})
+        self.alpha_retention: float = shaping.get("alpha_retention", 0.15)
+        self.alpha_efficiency: float = shaping.get("alpha_efficiency", 0.10)
+        self.alpha_churn: float = shaping.get("alpha_churn", 0.20)
+        self.alpha_volatility: float = shaping.get("alpha_volatility", 0.10)
+        # Reference user counts for retention normalization
+        pop = cfg.get("population", {})
+        self._N_ref_eMBB: int = pop.get("N0_eMBB", 120)
+        self._N_ref_URLLC: int = pop.get("N0_URLLC", 30)
+
         self.sla = SLAModel(cfg)
         self.energy = EnergyModel(cfg)
 
-    # -----------------------------------------------------------------
-    # 15.2  Resource cost
-    # -----------------------------------------------------------------
-
     def compute_resource_cost(self, mean_rho_util: float) -> float:
-        """C_resource = unit_cost_prb * PRB_total * mean(rho_util_k)"""
         return self.unit_cost_prb * self.prb_total * max(mean_rho_util, 0.0)
 
-    # -----------------------------------------------------------------
-    # 15.1  Profit
-    # -----------------------------------------------------------------
-
-    def compute_profit(
-        self,
-        fees: Dict[str, float],
-        N_active: Dict[str, int],
-        n_topups: Dict[str, int],
-        topup_price: float,
-        V_rates: Dict[str, float],
-        mean_rho_util: float,
-        avg_load: float,
-    ) -> Dict[str, float]:
-        """Compute monthly profit breakdown (Section 15.1).
-
-        Parameters
-        ----------
-        fees : dict   {"eMBB": F_eMBB, "URLLC": F_URLLC}
-        N_active : dict  active users per slice
-        n_topups : dict  number of top-ups per slice
-        topup_price : float  KRW per top-up pack
-        V_rates : dict  violation rates per slice
-        mean_rho_util : float  average utilization across inner steps
-        avg_load : float  overall cell load for energy model
-
-        Returns
-        -------
-        dict with keys:
-          revenue, revenue_sub, revenue_topup,
-          cost_energy, cost_sla_eMBB, cost_sla_URLLC, cost_sla_total,
-          cost_resource, cost_total,
-          profit
-        """
-        # ---- Revenue ----
+    def compute_profit(self, fees: Dict[str, float], N_active: Dict[str, int],
+                       n_topups: Dict[str, int], topup_price: float,
+                       V_rates: Dict[str, float], mean_rho_util: float,
+                       avg_load: float) -> Dict[str, float]:
         rev_sub = sum(
             fees.get(s, 0.0) * max(N_active.get(s, 0), 0)
             for s in ["eMBB", "URLLC"]
@@ -324,11 +135,7 @@ class EconomicsModel:
         )
         revenue = rev_sub + rev_topup
 
-        # ---- Costs ----
-        # Energy [BS_POWER][BS_POWER_MEAS]
         cost_energy = self.energy.compute_cost(avg_load)
-
-        # SLA credits [VERIZON_SLA]
         cost_sla: Dict[str, float] = {}
         for s in ["eMBB", "URLLC"]:
             cost_sla[s] = self.sla.compute_credit(
@@ -337,104 +144,90 @@ class EconomicsModel:
                 N_active_s=N_active.get(s, 0),
             )
         cost_sla_total = sum(cost_sla.values())
-
-        # Resource cost (Section 15.2)
         cost_resource = self.compute_resource_cost(mean_rho_util)
-
         cost_total = cost_energy + cost_sla_total + cost_resource
-
-        # ---- Profit ----
         profit = revenue - cost_total
 
         return {
-            "revenue": revenue,
-            "revenue_sub": rev_sub,
-            "revenue_topup": rev_topup,
-            "cost_energy": cost_energy,
+            "revenue": revenue, "revenue_sub": rev_sub,
+            "revenue_topup": rev_topup, "cost_energy": cost_energy,
             "cost_sla_eMBB": cost_sla["eMBB"],
             "cost_sla_URLLC": cost_sla["URLLC"],
             "cost_sla_total": cost_sla_total,
             "cost_resource": cost_resource,
-            "cost_total": cost_total,
-            "profit": profit,
+            "cost_total": cost_total, "profit": profit,
         }
 
-    # -----------------------------------------------------------------
-    # 15.3  Reward  — STEP 2 INTEGRATION
-    # -----------------------------------------------------------------
-
     @staticmethod
-    def _compute_reward_raw(
-        profit: float,
-        reward_type: str,
-        profit_scale: float,
-        reward_clip: float,
-    ) -> float:
-        """Compute raw reward value (before penalty) for given reward_type.
-
-        This static method is also used by the observation builder
-        (obs[15]) to ensure consistent normalization.
-
-        Parameters
-        ----------
-        profit : float        Monthly profit (KRW)
-        reward_type : str     "tanh" | "linear" | "log"
-        profit_scale : float  Calibrated scale factor
-        reward_clip : float   Clipping bound (used by linear mode)
-
-        Returns
-        -------
-        float : raw reward value (no penalty applied)
-        """
+    def _compute_reward_raw(profit: float, reward_type: str,
+                            profit_scale: float, reward_clip: float) -> float:
         scale = max(abs(profit_scale), 1.0)
-
         if reward_type == "tanh":
-            # ── Original v1 (retained for backward compatibility) ──
             return float(np.tanh(profit / scale))
-
         elif reward_type == "linear":
-            # ── Linear with clipping ──────────────────────────────
             return float(np.clip(profit / scale, -reward_clip, reward_clip))
-
         elif reward_type == "log":
-            # ── Step 1 fix: Log scaling (default) ─────────────────
-            # sign(P) × log(1 + |P| / S)
-            # Never saturates; always monotone with positive gradient.
-            # Concave compression stabilizes Q-learning.
             return float(np.sign(profit) * np.log1p(abs(profit) / scale))
-
         else:
-            raise ValueError(
-                f"Unknown reward_type: '{reward_type}'. "
-                f"Must be one of {_VALID_REWARD_TYPES}"
-            )
+            raise ValueError(f"Unknown reward_type: '{reward_type}'.")
 
-    def compute_reward(
-        self,
-        profit: float,
-        penalty: float = 0.0,
-    ) -> float:
-        """Reward using the configured reward_type.
+    def compute_retention_bonus(self, N_active: Dict[str, int]) -> float:
+        """M9: Reward for maintaining user base relative to initial count."""
+        ratio_e = min(N_active.get("eMBB", 0) / max(self._N_ref_eMBB, 1), 1.5)
+        ratio_u = min(N_active.get("URLLC", 0) / max(self._N_ref_URLLC, 1), 1.5)
+        # Weighted average: eMBB is bigger slice
+        return 0.7 * ratio_e + 0.3 * ratio_u
 
-        r = f(Pi / profit_scale) - λ_penalty * penalty
+    def compute_efficiency_bonus(self, rho_util: Dict[str, float]) -> float:
+        """M9: Reward for good resource utilization (0.3-0.8 is ideal)."""
+        bonus = 0.0
+        for s in ["eMBB", "URLLC"]:
+            rho = rho_util.get(s, 0.0)
+            # Gaussian-like peak around 0.55 utilization
+            bonus += np.exp(-((rho - 0.55) ** 2) / (2 * 0.15 ** 2))
+        return bonus / 2.0  # average across slices
 
-        where f is selected by self.reward_type:
-          "tanh"   → tanh(Pi / S)                     [original v1]
-          "linear" → clip(Pi / S, -c, c)              [Step 2 alt]
-          "log"    → sign(Pi) × log(1 + |Pi| / S)     [Step 1 default]
+    def compute_churn_penalty(self, n_churns: Dict[str, int],
+                              N_active: Dict[str, int]) -> float:
+        """M9: Penalty for churn rate exceeding target."""
+        total_churn = sum(n_churns.get(s, 0) for s in ["eMBB", "URLLC"])
+        total_active = sum(max(N_active.get(s, 0), 1) for s in ["eMBB", "URLLC"])
+        churn_rate = total_churn / total_active
+        # Penalty kicks in above 5% churn rate
+        return max(0.0, churn_rate - 0.05)
 
-        profit_scale is calibrated from random rollouts.  [SB3_TIPS]
-        Final reward is clipped to [-reward_clip, reward_clip].
+    def compute_volatility_penalty(self, fee_delta: Dict[str, float]) -> float:
+        """M9: Penalty for large price changes between months."""
+        total = 0.0
+        for s in ["eMBB", "URLLC"]:
+            # Normalize by 70k (typical fee scale)
+            norm_delta = abs(fee_delta.get(s, 0.0)) / 70000.0
+            total += norm_delta
+        return total / 2.0  # average across slices
 
-        Step 2 change: dispatch to _compute_reward_raw by reward_type.
+    def compute_reward(self, profit: float, penalty: float = 0.0,
+                       shaping: Optional[Dict[str, float]] = None) -> float:
+        """Compute shaped reward (M9 enhanced).
+
+        Args:
+            profit: Raw monthly profit.
+            penalty: Safety penalty from validate_state.
+            shaping: Optional dict with keys:
+                retention_bonus, efficiency_bonus, churn_penalty, volatility_penalty
         """
         if not np.isfinite(profit):
             logger.warning("Non-finite profit: %s → using 0", profit)
             profit = 0.0
-
         raw = self._compute_reward_raw(
             profit, self.reward_type, self.profit_scale, self.reward_clip,
         )
+
+        # M9: Add shaping terms
+        if shaping is not None:
+            raw += self.alpha_retention * shaping.get("retention_bonus", 0.0)
+            raw += self.alpha_efficiency * shaping.get("efficiency_bonus", 0.0)
+            raw -= self.alpha_churn * shaping.get("churn_penalty", 0.0)
+            raw -= self.alpha_volatility * shaping.get("volatility_penalty", 0.0)
 
         r = raw - self.lambda_penalty * penalty
         r = float(np.clip(r, -self.reward_clip, self.reward_clip))

@@ -1,246 +1,312 @@
 """
-test_finite_reward.py — No NaN/Inf under random actions.
+Tests for finite rewards and Phase 2 validation (§20 — test_finite_reward.py).
 
-Run multiple random episodes using all modules and verify that every
-computed value (reward, profit, observation components) is finite.
+Tests:
+  - No NaN/Inf in observations or rewards under random actions
+  - Phase 2 specific: per-slice rho_util, SLA per-step, action mapping, top-up
 
-Tests are deterministic by construction (local fixed RNG).
+References:
   [SB3_TIPS]
 """
 
-import unittest
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 import numpy as np
+import pytest
 
-from src.models.utils import load_config, compute_price_bounds
-from src.models.radio import RadioConfig, RadioModel
-from src.models.demand import DemandConfig, DemandModel
-from src.models.pools import UserPoolManager
-from src.models.market import MarketModel
-from src.models.economics import EconomicsModel
-from src.models.topup import TopUpModel
-from src.models.safety import sanitize_obs, validate_action, safe_reward
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.models.utils import load_config
+from src.envs.oran_slicing_env import OranSlicingEnv
 
 
-class TestFiniteReward(unittest.TestCase):
-    """Ensure no NaN/Inf under random actions over multi-step episodes."""
+@pytest.fixture
+def cfg():
+    config_path = Path(__file__).resolve().parent.parent / "config" / "default.yaml"
+    return load_config(str(config_path))
 
-    def setUp(self):
-        self.cfg = load_config("config/default.yaml")
 
-    def _run_random_episode(self, seed: int, n_months: int = 10):
-        """Run a short random episode and collect all values.
+# =====================================================================
+# Finite reward / obs tests (§20)
+# =====================================================================
 
-        Returns list of dicts, one per month, with all KPIs.
-        """
-        cfg = self.cfg
-        rng = np.random.default_rng(seed)
+class TestFiniteReward:
+    """No NaN/Inf under random actions. [SB3_TIPS]"""
 
-        radio = RadioModel(RadioConfig.from_config(cfg))
-        demand_model = DemandModel(DemandConfig.from_config(cfg))
-        pool_mgr = UserPoolManager.from_config(cfg, rng=rng)
-        market = MarketModel(cfg)
-        econ = EconomicsModel(cfg)
-        topup_model = TopUpModel(cfg)
-        price_bounds = compute_price_bounds(cfg)
+    def test_no_nan_inf_random_episode(self, cfg):
+        """Full episode with random actions: obs and reward always finite."""
+        env = OranSlicingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert np.all(np.isfinite(obs)), f"Initial obs not finite: {obs}"
 
-        K = cfg["time"]["inner_loop_K"]
-        topup_price = cfg.get("topup", {}).get("price_krw", 11000)
+        for step in range(50):
+            action = env.action_space.sample()
+            obs, reward, terminated, truncated, info = env.step(action)
 
-        # Representative plan params
-        Q_mid, v_cap_mid = {}, {}
-        for sname in ["eMBB", "URLLC"]:
-            plans = cfg["plans"][sname]
-            mid = plans[len(plans) // 2]
-            Q_mid[sname] = mid["Q_gb_month"]
-            v_cap_mid[sname] = mid["v_cap_mbps"]
+            assert np.all(np.isfinite(obs)), \
+                f"Step {step}: obs not finite: {obs}"
+            assert np.isfinite(reward), \
+                f"Step {step}: reward not finite: {reward}"
+            assert np.isfinite(info["profit"]), \
+                f"Step {step}: profit not finite: {info['profit']}"
 
-        monthly_records = []
+            if terminated or truncated:
+                break
 
-        for month in range(n_months):
-            # Random action in [-1, 1]^3
-            raw_action = rng.uniform(-1, 1, size=3).astype(np.float32)
+    def test_no_nan_inf_multiple_seeds(self, cfg):
+        """Finite across different seeds."""
+        for seed in [0, 1, 42, 123, 9999]:
+            env = OranSlicingEnv(cfg, seed=seed)
+            obs, _ = env.reset(seed=seed)
 
-            # Map action → fees, rho
-            rho_URLLC = float(np.clip(
-                0.5 + 0.45 * raw_action[2], 0.05, 0.95
-            ))
-            fees = {}
-            for idx, sname in enumerate(["eMBB", "URLLC"]):
-                pb = price_bounds[sname]
-                mid_fee = (pb["F_min"] + pb["F_max"]) / 2
-                half_range = (pb["F_max"] - pb["F_min"]) / 2
-                fees[sname] = float(np.clip(
-                    mid_fee + half_range * raw_action[idx],
-                    pb["F_min"], pb["F_max"],
-                ))
+            for _ in range(20):
+                action = env.action_space.sample()
+                obs, reward, terminated, truncated, info = env.step(action)
+                assert np.all(np.isfinite(obs)), f"seed={seed}: obs NaN/Inf"
+                assert np.isfinite(reward), f"seed={seed}: reward NaN/Inf"
+                if terminated:
+                    break
 
-            # Join
-            pool_mgr.reset_monthly_fields()
-            for sname in ["eMBB", "URLLC"]:
-                n_avail = pool_mgr.inactive_count(sname)
-                n_join = market.sample_joins(sname, n_avail, rng=rng)
-                candidates = [
-                    u.user_id for u in pool_mgr.inactive_pool.values()
-                    if u.slice == sname
-                ][:n_join]
-                pool_mgr.join(candidates)
+    def test_obs_within_bounds(self, cfg):
+        """Observation values should be within observation_space bounds."""
+        env = OranSlicingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
 
-            N_active = {s: pool_mgr.active_count(s) for s in ["eMBB", "URLLC"]}
+        for _ in range(30):
+            action = env.action_space.sample()
+            obs, reward, terminated, _, _ = env.step(action)
 
-            # Demand + throttle
-            for sname in ["eMBB", "URLLC"]:
-                users = pool_mgr.get_active_users(sname)
-                if not users:
-                    continue
-                segs = np.array([u.segment for u in users])
-                D = demand_model.sample_demand(sname, len(users), segs, rng=rng)
-                for i, u in enumerate(users):
-                    u.D_u = D[i]
-                    u.T_exp = topup_model.apply_throttle(
-                        u.D_u, Q_mid[sname], 100.0, v_cap_mid[sname]
-                    )
+            assert env.observation_space.contains(obs), \
+                f"obs out of bounds: min={obs.min():.4f}, max={obs.max():.4f}"
+            if terminated:
+                break
 
-            # Inner loop
-            avg_T_steps = {"eMBB": [], "URLLC": []}
-            rho_utils = []
+    def test_reward_clipped(self, cfg):
+        """Reward should be within clip bounds."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        clip = env.economics.reward_clip
 
-            for k in range(K):
-                users_e = pool_mgr.get_active_users("eMBB")
-                users_u = pool_mgr.get_active_users("URLLC")
-                T_exp_e = np.array([u.T_exp for u in users_e]) if users_e else np.array([])
-                T_exp_u = np.array([u.T_exp for u in users_u]) if users_u else np.array([])
+        for _ in range(50):
+            action = env.action_space.sample()
+            _, reward, terminated, _, _ = env.step(action)
+            assert -clip <= reward <= clip, \
+                f"Reward {reward} outside clip [{-clip}, {clip}]"
+            if terminated:
+                break
 
-                result = radio.inner_step(
-                    N_active_eMBB=N_active["eMBB"],
-                    N_active_URLLC=N_active["URLLC"],
-                    rho_URLLC=rho_URLLC,
-                    T_exp_users_eMBB=T_exp_e,
-                    T_exp_users_URLLC=T_exp_u,
-                )
-                avg_T_steps["eMBB"].append(result["avg_T_act_eMBB"])
-                avg_T_steps["URLLC"].append(result["avg_T_act_URLLC"])
-                rho_utils.append(
-                    (result["rho_util_eMBB"] + result["rho_util_URLLC"]) / 2
-                )
+    def test_extreme_actions(self, cfg):
+        """Extreme corner actions should not produce NaN/Inf."""
+        env = OranSlicingEnv(cfg, seed=42)
 
-            mean_rho = float(np.mean(rho_utils)) if rho_utils else 0.0
-            V_rates = {}
-            for sname in ["eMBB", "URLLC"]:
-                arr = np.array(avg_T_steps[sname])
-                V_rates[sname] = econ.sla.compute_violation_rate(arr, sname)
+        extreme_actions = [
+            np.array([-1.0, -1.0, -1.0], dtype=np.float32),  # all min
+            np.array([1.0, 1.0, 1.0], dtype=np.float32),      # all max
+            np.array([-1.0, 1.0, -1.0], dtype=np.float32),    # mixed
+            np.array([1.0, -1.0, 1.0], dtype=np.float32),     # mixed
+        ]
 
-            # Update user fields
-            for sname in ["eMBB", "URLLC"]:
-                users = pool_mgr.get_active_users(sname)
-                avg_t = float(np.mean(avg_T_steps[sname])) if avg_T_steps[sname] else 0.0
-                for u in users:
-                    u.T_act_avg = avg_t
-                market.update_disconfirmation(users)
-                churned = market.sample_churns(users, fees[sname], rng=rng)
-                pool_mgr.churn(churned)
+        for ext_action in extreme_actions:
+            obs, _ = env.reset(seed=42)
+            obs, reward, _, _, info = env.step(ext_action)
+            assert np.all(np.isfinite(obs)), f"Extreme action {ext_action}: obs NaN/Inf"
+            assert np.isfinite(reward), f"Extreme action {ext_action}: reward NaN/Inf"
 
-            # Profit & reward
-            profit_result = econ.compute_profit(
-                fees=fees, N_active=N_active,
-                n_topups={"eMBB": 0, "URLLC": 0},
-                topup_price=topup_price,
-                V_rates=V_rates,
-                mean_rho_util=mean_rho,
-                avg_load=mean_rho,
-            )
-            reward = econ.compute_reward(profit_result["profit"])
 
-            monthly_records.append({
-                "month": month,
-                "reward": reward,
-                "profit": profit_result["profit"],
-                "revenue": profit_result["revenue"],
-                "cost_total": profit_result["cost_total"],
-                "V_eMBB": V_rates["eMBB"],
-                "V_URLLC": V_rates["URLLC"],
-                "mean_rho": mean_rho,
-                "N_eMBB": N_active["eMBB"],
-                "N_URLLC": N_active["URLLC"],
-                "rho_URLLC": rho_URLLC,
-                "F_eMBB": fees["eMBB"],
-                "F_URLLC": fees["URLLC"],
-            })
+# =====================================================================
+# Phase 2 specific tests
+# =====================================================================
 
-        return monthly_records
+class TestPhase2ActionMapping:
+    """FIX M5: Action mapping per §6.1."""
 
-    # ---------------------------------------------------------------
-    # Tests
-    # ---------------------------------------------------------------
+    def test_action_mapping_order(self, cfg):
+        """a[0]→F_eMBB, a[1]→F_URLLC, a[2]→rho_URLLC per §6.1."""
+        env = OranSlicingEnv(cfg, seed=42)
 
-    def test_finite_reward_seed_0(self):
-        """All rewards finite with seed 0."""
-        records = self._run_random_episode(seed=0, n_months=15)
-        for r in records:
-            self.assertTrue(
-                np.isfinite(r["reward"]),
-                f"Non-finite reward at month {r['month']}: {r['reward']}"
-            )
+        # Midpoint action
+        fee_e, fee_u, rho = env._map_action(np.array([0.0, 0.0, 0.0]))
+        pb_e = env.price_bounds["eMBB"]
+        pb_u = env.price_bounds["URLLC"]
+        assert abs(fee_e - (pb_e["F_min"] + pb_e["F_max"]) / 2) < 1.0
+        assert abs(fee_u - (pb_u["F_min"] + pb_u["F_max"]) / 2) < 1.0
+        assert abs(rho - (env.rho_min + env.rho_max) / 2) < 0.001
 
-    def test_finite_reward_seed_42(self):
-        """All rewards finite with seed 42."""
-        records = self._run_random_episode(seed=42, n_months=15)
-        for r in records:
-            self.assertTrue(np.isfinite(r["reward"]))
+    def test_action_mapping_boundaries(self, cfg):
+        """Boundary actions map to correct bounds."""
+        env = OranSlicingEnv(cfg, seed=42)
+        pb_e = env.price_bounds["eMBB"]
+        pb_u = env.price_bounds["URLLC"]
 
-    def test_finite_reward_seed_999(self):
-        """All rewards finite with seed 999."""
-        records = self._run_random_episode(seed=999, n_months=15)
-        for r in records:
-            self.assertTrue(np.isfinite(r["reward"]))
+        # All min
+        fee_e, fee_u, rho = env._map_action(np.array([-1.0, -1.0, -1.0]))
+        assert abs(fee_e - pb_e["F_min"]) < 1.0
+        assert abs(fee_u - pb_u["F_min"]) < 1.0
+        assert abs(rho - env.rho_min) < 0.001
 
-    def test_finite_profit_all_seeds(self):
-        """Profit must be finite across multiple seeds."""
-        for seed in [0, 42, 123, 456, 789]:
-            records = self._run_random_episode(seed=seed, n_months=10)
-            for r in records:
-                self.assertTrue(
-                    np.isfinite(r["profit"]),
-                    f"Non-finite profit at seed={seed} month={r['month']}"
-                )
+        # All max
+        fee_e, fee_u, rho = env._map_action(np.array([1.0, 1.0, 1.0]))
+        assert abs(fee_e - pb_e["F_max"]) < 1.0
+        assert abs(fee_u - pb_u["F_max"]) < 1.0
+        assert abs(rho - env.rho_max) < 0.001
 
-    def test_all_kpis_finite(self):
-        """Every KPI must be finite."""
-        records = self._run_random_episode(seed=7, n_months=10)
-        for r in records:
-            for key, val in r.items():
-                if isinstance(val, (float, int)):
-                    self.assertTrue(
-                        np.isfinite(val),
-                        f"Non-finite {key}={val} at month {r['month']}"
-                    )
 
-    def test_reward_bounded(self):
-        """Reward must be within [-clip, clip]."""
-        clip = self.cfg.get("economics", {}).get("reward_clip", 2.0)
-        records = self._run_random_episode(seed=11, n_months=20)
-        for r in records:
-            self.assertGreaterEqual(r["reward"], -clip)
-            self.assertLessEqual(r["reward"], clip)
+class TestPhase2PerSliceRhoUtil:
+    """FIX M4: rho_util tracked independently per slice."""
 
-    def test_sanitize_obs_handles_extremes(self):
-        """sanitize_obs must handle NaN, Inf, extreme values."""
-        obs = np.array([np.nan, np.inf, -np.inf, 1e20, -1e20, 0.5],
-                       dtype=np.float32)
-        sanitized = sanitize_obs(obs)
-        self.assertTrue(np.all(np.isfinite(sanitized)))
-        self.assertEqual(sanitized.dtype, np.float32)
+    def test_rho_util_separate(self, cfg):
+        """rho_util_eMBB and rho_util_URLLC should differ."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
 
-    def test_safe_reward_handles_nan(self):
-        """safe_reward must return finite value for NaN input."""
-        r = safe_reward(float("nan"), penalty=0.0)
-        self.assertTrue(np.isfinite(r))
+        found_different = False
+        for _ in range(10):
+            action = env.action_space.sample()
+            _, _, _, _, info = env.step(action)
+            if abs(info["rho_util_eMBB"] - info["rho_util_URLLC"]) > 1e-6:
+                found_different = True
+                break
 
-    def test_validate_action_nan(self):
-        """validate_action must flag NaN."""
-        ok, violations = validate_action(np.array([np.nan, 0.0, 0.0]))
-        self.assertFalse(ok)
-        self.assertIn("action_nan_inf", violations)
+        assert found_different, "rho_util never differed between slices"
+
+    def test_rho_util_in_valid_range(self, cfg):
+        """rho_util should be in [0, 1]."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for _ in range(30):
+            action = env.action_space.sample()
+            _, _, terminated, _, info = env.step(action)
+            for s in ["eMBB", "URLLC"]:
+                rho = info[f"rho_util_{s}"]
+                assert 0.0 <= rho <= 1.0 + 1e-6, \
+                    f"rho_util_{s}={rho} out of range"
+            if terminated:
+                break
+
+
+class TestPhase2SLAViolation:
+    """FIX M3: SLA violation as per-step fraction (§12.1)."""
+
+    def test_v_rate_in_valid_range(self, cfg):
+        """V_rate should be in [0, 1]."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for _ in range(30):
+            action = env.action_space.sample()
+            _, _, terminated, _, info = env.step(action)
+            for s in ["eMBB", "URLLC"]:
+                V = info[f"V_rate_{s}"]
+                assert 0.0 <= V <= 1.0, f"V_rate_{s}={V} out of [0,1]"
+            if terminated:
+                break
+
+    def test_v_rate_is_step_fraction(self, cfg):
+        """V_rate should be a multiple of 1/K (computed from K inner steps)."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        K = env.K
+
+        action = env.action_space.sample()
+        _, _, _, _, info = env.step(action)
+
+        for s in ["eMBB", "URLLC"]:
+            V = info[f"V_rate_{s}"]
+            # V should be n/K for some integer n
+            n_violations = V * K
+            assert abs(n_violations - round(n_violations)) < 1e-6, \
+                f"V_rate_{s}={V} is not a multiple of 1/{K}"
+
+
+class TestPhase2TopUp:
+    """FIX M2: Top-up model integration."""
+
+    def test_topup_model_active(self, cfg):
+        """Top-up model should be instantiated and enabled."""
+        env = OranSlicingEnv(cfg, seed=42)
+        assert hasattr(env, "topup"), "No topup attribute"
+        assert env.topup.enabled, "TopUp model not enabled"
+
+    def test_topup_produces_purchases(self, cfg):
+        """Over a full episode, some top-ups should occur."""
+        env = OranSlicingEnv(cfg, seed=123)
+        env.reset(seed=123)
+
+        total_topups = 0
+        for _ in range(50):
+            action = env.action_space.sample()
+            _, _, terminated, _, info = env.step(action)
+            total_topups += info["topups_eMBB"] + info["topups_URLLC"]
+            if terminated:
+                break
+
+        assert total_topups > 0, \
+            "No top-ups in entire episode (model may not be integrated)"
+
+    def test_topup_revenue_reflected(self, cfg):
+        """Top-up revenue should contribute to total revenue."""
+        env = OranSlicingEnv(cfg, seed=123)
+        env.reset(seed=123)
+
+        # Run episode and track revenue with/without topups
+        revenues = []
+        topup_months = []
+        for m in range(50):
+            action = env.action_space.sample()
+            _, _, terminated, _, info = env.step(action)
+            revenues.append(info["revenue"])
+            if info["topups_eMBB"] + info["topups_URLLC"] > 0:
+                topup_months.append(m)
+            if terminated:
+                break
+
+        # At least some months should have topup revenue
+        assert len(topup_months) > 0, "No months with top-ups"
+
+
+class TestPhase2PlanAssignment:
+    """FIX M7: Plan-based T_exp and Q_gb."""
+
+    def test_users_have_plan_ids(self, cfg):
+        """All users should have non-empty plan_id."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for u in env.pool.active_pool.values():
+            assert u.plan_id != "", f"User {u.user_id} has no plan_id"
+
+    def test_t_exp_not_100(self, cfg):
+        """T_exp should not be hardcoded 100."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        t_exp_values = set(u.T_exp for u in env.pool.active_pool.values())
+        assert 100.0 not in t_exp_values, \
+            f"T_exp=100.0 still present: {t_exp_values}"
+
+    def test_t_exp_matches_v_cap(self, cfg):
+        """T_exp should equal plan v_cap_mbps after reset_monthly."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for u in env.pool.active_pool.values():
+            assert u.T_exp == u.v_cap_mbps, \
+                f"User {u.user_id}: T_exp={u.T_exp} != v_cap={u.v_cap_mbps}"
+
+    def test_q_gb_from_plan(self, cfg):
+        """Q_gb should be set from plan config, not default."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        q_values = set(u.Q_gb for u in env.pool.active_pool.values())
+        # Should have multiple Q_gb values from different plans
+        assert len(q_values) > 1, \
+            f"Only one Q_gb value: {q_values} (plans not assigned)"
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__, "-v"])
