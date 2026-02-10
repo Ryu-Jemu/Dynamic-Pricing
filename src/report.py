@@ -5,9 +5,6 @@ Reads eval.csv, generates summary statistics and plots.
 
 Usage:
   python -m src.report --run_dir artifacts/<run_id>
-
-References:
-  [SB3_TIPS]
 """
 
 from __future__ import annotations
@@ -41,7 +38,6 @@ def generate_report(run_dir: str) -> None:
     logger.info("Reading %s", csv_path)
     df = pd.read_csv(csv_path)
 
-    # Summary stats per month
     monthly = df.groupby("month").agg({
         "profit": ["mean", "std"],
         "reward": ["mean", "std"],
@@ -80,7 +76,6 @@ def generate_report(run_dir: str) -> None:
 
     logger.info("Report written: %s", report_path)
 
-    # Generate plots if matplotlib available
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -88,7 +83,6 @@ def generate_report(run_dir: str) -> None:
 
         fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 
-        # Plot 1: Profit over time
         ax = axes[0, 0]
         for rep in df["repeat"].unique():
             rep_data = df[df["repeat"] == rep]
@@ -97,7 +91,6 @@ def generate_report(run_dir: str) -> None:
         ax.set_xlabel("Month")
         ax.set_ylabel("Profit (KRW)")
 
-        # Plot 2: Fees over time
         ax = axes[0, 1]
         monthly_mean = df.groupby("month").mean(numeric_only=True)
         ax.plot(monthly_mean.index, monthly_mean["fee_eMBB"], label="eMBB")
@@ -107,7 +100,6 @@ def generate_report(run_dir: str) -> None:
         ax.set_ylabel("Fee (KRW)")
         ax.legend()
 
-        # Plot 3: Active users
         ax = axes[1, 0]
         ax.plot(monthly_mean.index, monthly_mean["N_active_eMBB"], label="eMBB")
         ax.plot(monthly_mean.index, monthly_mean["N_active_URLLC"], label="URLLC")
@@ -116,7 +108,6 @@ def generate_report(run_dir: str) -> None:
         ax.set_ylabel("Count")
         ax.legend()
 
-        # Plot 4: Joins/Churns
         ax = axes[1, 1]
         ax.plot(monthly_mean.index, monthly_mean["joins_eMBB"], label="Joins eMBB")
         ax.plot(monthly_mean.index, monthly_mean["churns_eMBB"], label="Churns eMBB")
@@ -125,7 +116,6 @@ def generate_report(run_dir: str) -> None:
         ax.set_ylabel("Count")
         ax.legend()
 
-        # Plot 5: Violation rates
         ax = axes[2, 0]
         ax.plot(monthly_mean.index, monthly_mean["V_rate_eMBB"], label="eMBB")
         ax.plot(monthly_mean.index, monthly_mean["V_rate_URLLC"], label="URLLC")
@@ -134,7 +124,6 @@ def generate_report(run_dir: str) -> None:
         ax.set_ylabel("V_rate")
         ax.legend()
 
-        # Plot 6: Reward
         ax = axes[2, 1]
         for rep in df["repeat"].unique():
             rep_data = df[df["repeat"] == rep]

@@ -3,9 +3,6 @@ Comparison training script: random vs trained SAC.
 
 Usage:
   python scripts/train_sac.py --config config/calibrated.yaml
-
-References:
-  [SB3_SAC][SB3_TIPS]
 """
 
 from __future__ import annotations
@@ -24,7 +21,6 @@ logger = logging.getLogger("oran.scripts.train")
 def run_random_baseline(cfg: Dict[str, Any], n_episodes: int = 5,
                         seed: int = 42) -> Dict[str, Any]:
     """Run random policy episodes for baseline comparison."""
-    # ── FIX C1: Correct class name ──
     from src.envs.oran_slicing_env import OranSlicingEnv
 
     rng = np.random.default_rng(seed)

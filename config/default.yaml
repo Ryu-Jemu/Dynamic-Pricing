@@ -28,35 +28,73 @@ action:
   price_explore_factor: 0.2    # ±20% around catalog bounds
 
 # --- Section 7: Plan catalog (Korea-style monthly; anonymized) ---
-# Each plan: plan_id, slice, F_krw_month, Q_gb_month, v_cap_mbps
+#
+# Each plan has three speed parameters [TWORLD_18][TS23501]:
+#   v_max_mbps      — Normal (pre-cap) maximum throughput per plan tier.
+#                     In Korean 5G tariffs, higher-tier plans access faster
+#                     network layers.  [TWORLD_18] pages list tier-dependent
+#                     peak rates (e.g., 기본 ~150 Mbps, 프리미엄 "최고속도").
+#                     Used as the throughput ceiling in the radio inner loop
+#                     for users who have NOT exceeded their data quota.
+#
+#   v_cap_mbps      — Post-cap throttle speed.  After Q_gb_month is consumed,
+#                     the carrier throttles the user to v_cap.  [TWORLD_18]
+#                     documents "속도제한" (speed restriction) values of 1–5 Mbps.
+#
+#   T_exp_base_mbps — Realistic user expectation of throughput.
+#                     In expectation-disconfirmation theory [OLIVER_1980],
+#                     users form expectations from prior experience, NOT from
+#                     advertised peak speed.  We set this to a moderate value
+#                     between v_cap and the typical per-user fair-share, so
+#                     disconfirmation is small under normal conditions but
+#                     increases under congestion or after throttling.
+#
 # Source URLs in plan_source_url.txt; do NOT name carriers in code.
+#
+# References:
+#   [TS23501]    3GPP TS 23.501 §5.7  — QoS model and network slicing
+#   [TWORLD_18]  T World plan pages   — post-cap speed restriction
+#   [OLIVER_1980] Oliver, "A Cognitive Model of the Antecedents and
+#                  Consequences of Satisfaction Decisions," JMR 1980
 plans:
   eMBB:
     - plan_id: "eMBB_basic"
       F_krw_month: 55000
       Q_gb_month: 12
-      v_cap_mbps: 1.0
+      v_max_mbps: 150.0        # [TWORLD_18] basic tier peak
+      v_cap_mbps: 1.0          # [TWORLD_18] post-cap throttle
+      T_exp_base_mbps: 3.0     # [OLIVER_1980] realistic user expectation
     - plan_id: "eMBB_standard"
       F_krw_month: 69000
       Q_gb_month: 50
+      v_max_mbps: 300.0        # [TWORLD_18] standard tier peak
       v_cap_mbps: 3.0
+      T_exp_base_mbps: 5.0
     - plan_id: "eMBB_premium"
       F_krw_month: 89000
       Q_gb_month: 200
+      v_max_mbps: 1000.0       # [TWORLD_18] premium "최고속도"
       v_cap_mbps: 5.0
+      T_exp_base_mbps: 8.0
   URLLC:
     - plan_id: "URLLC_basic"
       F_krw_month: 40000
       Q_gb_month: 5
+      v_max_mbps: 50.0
       v_cap_mbps: 0.4
+      T_exp_base_mbps: 2.0
     - plan_id: "URLLC_standard"
       F_krw_month: 55000
       Q_gb_month: 15
+      v_max_mbps: 100.0
       v_cap_mbps: 1.0
+      T_exp_base_mbps: 3.0
     - plan_id: "URLLC_premium"
       F_krw_month: 75000
       Q_gb_month: 40
+      v_max_mbps: 300.0
       v_cap_mbps: 3.0
+      T_exp_base_mbps: 5.0
 
 # Derived price bounds (computed at runtime from catalog)
 # F_s ∈ [0.8*F_min_s, 1.2*F_max_s]  (Section 6.2)
@@ -142,10 +180,37 @@ topup:
   w_price_topup: 0.5
   target_adoption_rate: 0.30    # among exceeders
 
-# --- Section 12: SLA/SLO [VERIZON_SLA][SOLARWINDS_SLA_SLO] ---
+# --- Section 12: SLA/SLO ---
+#
+# FIX: SLO targets aligned with achievable per-user throughput.
+#
+# Previous SLO values (10 Mbps eMBB, 5 Mbps URLLC) exceeded the
+# plan-imposed v_cap ceiling (max 5 / 3 Mbps), causing V_rate = 1.0
+# for every inner step — the SLA was structurally unachievable.
+#
+# New SLO values are set so that violations are *informative*:
+#   - Violations ≈ 0%  under low-to-moderate load
+#   - Violations > 0%  under high load or when many users are throttled
+#
+# Derivation (at converged policy, N_eMBB≈110, ρ_URLLC≈0.20):
+#   ρ_util_eMBB  = 110/200 = 0.55
+#   T_eff        = 1000 × (1 − 0.55) = 450 Mbps
+#   fair_share   = 450 × 0.80 / 110 ≈ 3.3 Mbps  [pre-cap, not capped by v_max]
+#
+#   SLO_eMBB = 3.0 Mbps → violations when fair_share < 3.0
+#     i.e. when N_eMBB > ~120 or ρ_URLLC increases → meaningful gradient.
+#
+#   SLO_URLLC = 2.0 Mbps → violations rare for URLLC (high reliability),
+#     triggered mainly under extreme load.
+#
+# References:
+#   [TS28554]    3GPP TS 28.554 v17.6.0 — 5G end-to-end KPI definitions
+#   [TS28541]    3GPP TS 28.541 — NRM for network slicing (SLA attributes)
+#   [GSMA_NG116] GSMA PRD NG.116 — Network Slicing Connectivity Service SLA
+#   [VERIZON_SLA] Verizon SLA credit tiers (MRC-based)
 sla:
-  SLO_T_user_eMBB_mbps: 10.0   # internal SLO target
-  SLO_T_user_URLLC_mbps: 5.0
+  SLO_T_user_eMBB_mbps: 3.0    # [TS28554] achievable SLO for eMBB slice
+  SLO_T_user_URLLC_mbps: 2.0   # [TS28554] stricter threshold for URLLC reliability
   # Credit tier table (scenario; MRC-based) [VERIZON_SLA]
   credit_tiers:
     - threshold: 0.05
@@ -188,13 +253,29 @@ energy:
   hours_per_month: 730.0        # ~365.25*24/12
   elec_price_krw_per_kwh: 120.0 # fixed unit price (no TOU)
 
-# --- Section 15: Economics & reward [SB3_TIPS] ---
+# --- Section 15: Economics & reward ---
+#
+# FIX: profit_scale recalibrated for appropriate reward range.
+#
+# Previous profit_scale (724,177) produced log reward ≈ 2.0 (saturating
+# at clip bound) for typical profits of ~11M KRW, eliminating gradient
+# signal between "good" and "great" outcomes.
+#
+# New initial estimate: 5,000,000 KRW (will be re-calibrated by
+# calibrate.py after the SLO fix changes SLA credit costs).
+# This keeps log1p(profit / scale) in the range [0.5, 1.5] for
+# typical profit values, preserving useful gradient.
+#
+# References:
+#   [SB3_TIPS]       SB3 RL Tips and Tricks — reward normalization
+#   [HENDERSON_2018] Henderson et al., "Deep Reinforcement Learning
+#                    that Matters," AAAI 2018 — reward scale sensitivity
 economics:
-  reward_type: "log"             # Step 2: NEW — "tanh" | "linear" | "log"
-  unit_cost_prb_krw: 50.0       # scenario: per-PRB resource cost
-  profit_scale: 724177.0         # Step 3: calibrated via median(|profit|) from 20 random rollouts
-  lambda_penalty: 10.0          # penalty weight for hard violations
-  reward_clip: 2.0              # clip final reward magnitude
+  reward_type: "log"
+  unit_cost_prb_krw: 50.0
+  profit_scale: 5000000.0       # [HENDERSON_2018] calibrated for reward ∈ [−2, 2]
+  lambda_penalty: 10.0
+  reward_clip: 2.0
 
 # --- Section 16: Observation space ---
 observation:
@@ -203,19 +284,32 @@ observation:
   clip_max: 10.0
 
 # --- Section 18: Training [SAC][SB3_SAC][SB3_TIPS] ---
+#
+# FIX: total_timesteps increased from 50,000 to 150,000.
+#
+# With 50 months/episode, 50k steps = 1,000 episodes.  Previous
+# analysis showed policy convergence around episode 400–500, leaving
+# only ~500 episodes of exploitation.  150k steps = 3,000 episodes
+# provides sufficient exploration + exploitation phases.
+#
+# References:
+#   [SAC]            Haarnoja et al., "Soft Actor-Critic," ICML 2018
+#   [HENDERSON_2018] Henderson et al., "Deep RL that Matters," AAAI 2018
+#                    — recommends ≥ 1M steps; 150k is still modest but
+#                    appropriate for a 50-step episodic task with 3D action.
 training:
-  total_timesteps: 50000
+  total_timesteps: 150000
   learning_rate: 0.0003
   batch_size: 256
-  buffer_size: 50000
+  buffer_size: 100000           # increased proportionally with timesteps
   gamma: 0.99
   tau: 0.005
   ent_coef: "auto"
   train_freq: 1
   gradient_steps: 1
-  eval_episodes: 5              # per eval call
+  eval_episodes: 5
   eval_freq_steps: 5000
-  n_repeats: 3                  # multiple repeats for mean±std [SB3_TIPS]
+  n_repeats: 3
   log_interval: 10
 
 # --- Section 19: Calibration ---

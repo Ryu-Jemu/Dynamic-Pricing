@@ -107,11 +107,7 @@ class DemandModel:
 
     @staticmethod
     def fit_lognormal_quantiles(target_p50: float, target_p90: float) -> tuple[float, float]:
-        """Fit mu, sigma from p50 and p90 targets via quantile matching.
-
-        p50 = exp(mu)  →  mu = ln(p50)
-        p90 = exp(mu + sigma * z_0.90)  →  sigma = (ln(p90) - mu) / z_0.90
-        """
+        """Fit mu, sigma from p50 and p90 targets via quantile matching."""
         if target_p50 <= 0 or target_p90 <= 0:
             raise ValueError("Quantile targets must be positive.")
         if target_p90 <= target_p50:

@@ -43,8 +43,6 @@ class MarketModel:
             "eMBB": mc.get("join_cap_eMBB", 25),
             "URLLC": mc.get("join_cap_URLLC", 10),
         }
-        # D7: price_norm should match actual fee scale so price term doesn't dominate
-        # Default uses midpoint of typical fee range (~70k KRW) instead of 10k
         self._price_norm: float = mc.get("price_norm", 70000.0)
 
     def compute_disconfirmation(self, T_exp: float, T_act_avg: float) -> float:

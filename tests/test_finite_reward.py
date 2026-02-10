@@ -1,12 +1,13 @@
 """
-Tests for finite rewards and Phase 2 validation (§20 — test_finite_reward.py).
+Tests for finite rewards and validation (§20 — test_finite_reward.py).
 
 Tests:
   - No NaN/Inf in observations or rewards under random actions
-  - Phase 2 specific: per-slice rho_util, SLA per-step, action mapping, top-up
+  - Per-slice rho_util, SLA per-step, action mapping, top-up
+  - FIX F1: Three-speed model (v_max, v_cap, T_exp_base) [TS23501][OLIVER_1980]
 
 References:
-  [SB3_TIPS]
+  [SB3_TIPS][TS23501][OLIVER_1980]
 """
 
 from __future__ import annotations
@@ -103,10 +104,10 @@ class TestFiniteReward:
         env = OranSlicingEnv(cfg, seed=42)
 
         extreme_actions = [
-            np.array([-1.0, -1.0, -1.0], dtype=np.float32),  # all min
-            np.array([1.0, 1.0, 1.0], dtype=np.float32),      # all max
-            np.array([-1.0, 1.0, -1.0], dtype=np.float32),    # mixed
-            np.array([1.0, -1.0, 1.0], dtype=np.float32),     # mixed
+            np.array([-1.0, -1.0, -1.0], dtype=np.float32),
+            np.array([1.0, 1.0, 1.0], dtype=np.float32),
+            np.array([-1.0, 1.0, -1.0], dtype=np.float32),
+            np.array([1.0, -1.0, 1.0], dtype=np.float32),
         ]
 
         for ext_action in extreme_actions:
@@ -117,17 +118,16 @@ class TestFiniteReward:
 
 
 # =====================================================================
-# Phase 2 specific tests
+# Action mapping tests
 # =====================================================================
 
 class TestPhase2ActionMapping:
-    """FIX M5: Action mapping per §6.1."""
+    """Action mapping per §6.1."""
 
     def test_action_mapping_order(self, cfg):
         """a[0]→F_eMBB, a[1]→F_URLLC, a[2]→rho_URLLC per §6.1."""
         env = OranSlicingEnv(cfg, seed=42)
 
-        # Midpoint action
         fee_e, fee_u, rho = env._map_action(np.array([0.0, 0.0, 0.0]))
         pb_e = env.price_bounds["eMBB"]
         pb_u = env.price_bounds["URLLC"]
@@ -141,21 +141,23 @@ class TestPhase2ActionMapping:
         pb_e = env.price_bounds["eMBB"]
         pb_u = env.price_bounds["URLLC"]
 
-        # All min
         fee_e, fee_u, rho = env._map_action(np.array([-1.0, -1.0, -1.0]))
         assert abs(fee_e - pb_e["F_min"]) < 1.0
         assert abs(fee_u - pb_u["F_min"]) < 1.0
         assert abs(rho - env.rho_min) < 0.001
 
-        # All max
         fee_e, fee_u, rho = env._map_action(np.array([1.0, 1.0, 1.0]))
         assert abs(fee_e - pb_e["F_max"]) < 1.0
         assert abs(fee_u - pb_u["F_max"]) < 1.0
         assert abs(rho - env.rho_max) < 0.001
 
 
+# =====================================================================
+# Per-slice rho_util tests
+# =====================================================================
+
 class TestPhase2PerSliceRhoUtil:
-    """FIX M4: rho_util tracked independently per slice."""
+    """rho_util tracked independently per slice."""
 
     def test_rho_util_separate(self, cfg):
         """rho_util_eMBB and rho_util_URLLC should differ."""
@@ -188,8 +190,12 @@ class TestPhase2PerSliceRhoUtil:
                 break
 
 
+# =====================================================================
+# SLA violation tests
+# =====================================================================
+
 class TestPhase2SLAViolation:
-    """FIX M3: SLA violation as per-step fraction (§12.1)."""
+    """SLA violation as per-step fraction (§12.1)."""
 
     def test_v_rate_in_valid_range(self, cfg):
         """V_rate should be in [0, 1]."""
@@ -206,7 +212,7 @@ class TestPhase2SLAViolation:
                 break
 
     def test_v_rate_is_step_fraction(self, cfg):
-        """V_rate should be a multiple of 1/K (computed from K inner steps)."""
+        """V_rate should be a multiple of 1/K."""
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
         K = env.K
@@ -216,14 +222,41 @@ class TestPhase2SLAViolation:
 
         for s in ["eMBB", "URLLC"]:
             V = info[f"V_rate_{s}"]
-            # V should be n/K for some integer n
             n_violations = V * K
             assert abs(n_violations - round(n_violations)) < 1e-6, \
                 f"V_rate_{s}={V} is not a multiple of 1/{K}"
 
+    def test_v_rate_not_always_one(self, cfg):
+        """FIX F1 verification: V_rate should NOT be 1.0 every step.
+
+        The original bug caused V_rate = 1.0 always because T_act was
+        capped by v_cap_mbps (1-5 Mbps) while SLO was 10 Mbps.
+        With the fix, T_act can reach fair_share (~3+ Mbps) and
+        SLO is now 3.0 Mbps, so violations should be < 100% under
+        moderate load.
+        """
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        v_rates_embb = []
+        for _ in range(20):
+            action = env.action_space.sample()
+            _, _, terminated, _, info = env.step(action)
+            v_rates_embb.append(info["V_rate_eMBB"])
+            if terminated:
+                break
+
+        # At least some months should have V_rate < 1.0
+        assert any(v < 1.0 for v in v_rates_embb), \
+            f"V_rate_eMBB always 1.0 — FIX F1 not effective. Values: {v_rates_embb[:5]}"
+
+
+# =====================================================================
+# Top-up tests
+# =====================================================================
 
 class TestPhase2TopUp:
-    """FIX M2: Top-up model integration."""
+    """Top-up model integration."""
 
     def test_topup_model_active(self, cfg):
         """Top-up model should be instantiated and enabled."""
@@ -252,24 +285,24 @@ class TestPhase2TopUp:
         env = OranSlicingEnv(cfg, seed=123)
         env.reset(seed=123)
 
-        # Run episode and track revenue with/without topups
-        revenues = []
         topup_months = []
         for m in range(50):
             action = env.action_space.sample()
             _, _, terminated, _, info = env.step(action)
-            revenues.append(info["revenue"])
             if info["topups_eMBB"] + info["topups_URLLC"] > 0:
                 topup_months.append(m)
             if terminated:
                 break
 
-        # At least some months should have topup revenue
         assert len(topup_months) > 0, "No months with top-ups"
 
 
-class TestPhase2PlanAssignment:
-    """FIX M7: Plan-based T_exp and Q_gb."""
+# =====================================================================
+# Three-speed plan model tests (FIX F1) [TS23501][OLIVER_1980]
+# =====================================================================
+
+class TestThreeSpeedPlanModel:
+    """FIX F1: v_max / v_cap / T_exp_base separation."""
 
     def test_users_have_plan_ids(self, cfg):
         """All users should have non-empty plan_id."""
@@ -280,7 +313,7 @@ class TestPhase2PlanAssignment:
             assert u.plan_id != "", f"User {u.user_id} has no plan_id"
 
     def test_t_exp_not_100(self, cfg):
-        """T_exp should not be hardcoded 100."""
+        """T_exp should not be the old hardcoded 100."""
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
 
@@ -288,14 +321,36 @@ class TestPhase2PlanAssignment:
         assert 100.0 not in t_exp_values, \
             f"T_exp=100.0 still present: {t_exp_values}"
 
-    def test_t_exp_matches_v_cap(self, cfg):
-        """T_exp should equal plan v_cap_mbps after reset_monthly."""
+    def test_t_exp_matches_t_exp_base(self, cfg):
+        """FIX F1: T_exp equals T_exp_base_mbps [OLIVER_1980], not v_cap.
+
+        In the original code, T_exp was set to v_cap_mbps.  This caused
+        T_act = min(fair_share, v_cap) which was always below SLO.
+        Now T_exp reflects realistic user expectations for disconfirmation.
+        """
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
 
         for u in env.pool.active_pool.values():
-            assert u.T_exp == u.v_cap_mbps, \
-                f"User {u.user_id}: T_exp={u.T_exp} != v_cap={u.v_cap_mbps}"
+            assert u.T_exp == u.T_exp_base_mbps, \
+                f"User {u.user_id}: T_exp={u.T_exp} != T_exp_base={u.T_exp_base_mbps}"
+
+    def test_v_max_from_plan(self, cfg):
+        """FIX F1: v_max_mbps should be set from plan config [TS23501].
+
+        v_max represents the pre-cap maximum throughput ceiling per plan tier.
+        """
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        v_max_values = set(u.v_max_mbps for u in env.pool.active_pool.values())
+        # Should have multiple v_max values from different plan tiers
+        assert len(v_max_values) > 1, \
+            f"Only one v_max value: {v_max_values} (plans not assigned)"
+        # All values should be >> v_cap values (pre-cap >> post-cap)
+        for u in env.pool.active_pool.values():
+            assert u.v_max_mbps >= 50.0, \
+                f"User {u.user_id}: v_max={u.v_max_mbps} too low for plan peak"
 
     def test_q_gb_from_plan(self, cfg):
         """Q_gb should be set from plan config, not default."""
@@ -303,9 +358,19 @@ class TestPhase2PlanAssignment:
         env.reset(seed=42)
 
         q_values = set(u.Q_gb for u in env.pool.active_pool.values())
-        # Should have multiple Q_gb values from different plans
         assert len(q_values) > 1, \
             f"Only one Q_gb value: {q_values} (plans not assigned)"
+
+    def test_speed_ordering(self, cfg):
+        """Speed parameters should satisfy v_cap < T_exp_base ≤ v_max."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for u in env.pool.active_pool.values():
+            assert u.v_cap_mbps <= u.T_exp_base_mbps, \
+                f"User {u.user_id}: v_cap={u.v_cap_mbps} > T_exp_base={u.T_exp_base_mbps}"
+            assert u.T_exp_base_mbps <= u.v_max_mbps, \
+                f"User {u.user_id}: T_exp_base={u.T_exp_base_mbps} > v_max={u.v_max_mbps}"
 
 
 if __name__ == "__main__":

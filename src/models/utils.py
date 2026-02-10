@@ -48,10 +48,7 @@ def save_config(cfg: Dict[str, Any], path: str | Path) -> None:
 
 
 def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Deep-merge *override* into *base* (override wins on conflicts).
-
-    Returns a new dict (base is not mutated).
-    """
+    """Deep-merge *override* into *base* (override wins on conflicts)."""
     merged = copy.deepcopy(base)
     for key, val in override.items():
         if (
@@ -72,7 +69,7 @@ def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, A
 def compute_price_bounds(cfg: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
     """Return per-slice agent-controlled fee bounds.
 
-    F_s ∈ [0.8 * F_min_catalog, 1.2 * F_max_catalog]
+    F_s in [0.8 * F_min_catalog, 1.2 * F_max_catalog]
     """
     explore = cfg["action"]["price_explore_factor"]  # 0.2
     bounds: Dict[str, Dict[str, float]] = {}
@@ -93,7 +90,7 @@ def compute_price_bounds(cfg: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
 # ---------------------------------------------------------------------------
 
 def sigmoid(x: np.ndarray | float) -> np.ndarray | float:
-    """Numerically stable sigmoid σ(x)."""
+    """Numerically stable sigmoid."""
     x = np.asarray(x, dtype=np.float64)
     return np.where(
         x >= 0,
@@ -126,10 +123,7 @@ def safe_divide(numerator: np.ndarray | float,
 # ---------------------------------------------------------------------------
 
 def select_device() -> str:
-    """Return best available PyTorch device string.
-
-    Priority: mps > cpu  (CUDA not expected on MacBook target).
-    """
+    """Return best available PyTorch device string."""
     try:
         import torch
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():

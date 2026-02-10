@@ -24,10 +24,7 @@ logger = logging.getLogger("oran.train")
 
 
 class CSVLogCallback:
-    """SB3 callback that logs per-step info dict to CSV.
-
-    Works with SB3's BaseCallback interface.
-    """
+    """SB3 callback that logs per-step info dict to CSV."""
 
     def __init__(self, log_path: str) -> None:
         self.log_path = Path(log_path)
@@ -37,35 +34,22 @@ class CSVLogCallback:
         self._fieldnames: Optional[List[str]] = None
 
     def _on_step(self, info: Dict[str, Any], step: int) -> None:
-        """Log one step's info dict to CSV.
-
-        FIX C5: Read flat keys from info dict, not nested dicts.
-        The env returns flat keys like info["fee_eMBB"], info["N_active_eMBB"].
-        """
         record = {"step": step}
-
-        # ── FIX C5: Direct flat-key extraction ──
-        # Scalar fields
         for key in ["month", "rho_URLLC", "profit", "revenue",
                      "cost_total", "reward"]:
             if key in info:
                 record[key] = info[key]
-
-        # Per-slice flat fields
         for sname in ["eMBB", "URLLC"]:
             for prefix in ["fee", "N_active", "N_post_churn", "joins",
                            "churns", "V_rate", "avg_T", "rho_util", "topups"]:
                 flat_key = f"{prefix}_{sname}"
                 if flat_key in info:
                     record[flat_key] = info[flat_key]
-
-        # Initialize CSV on first write
         if self._writer is None:
             self._fieldnames = list(record.keys())
             self._file = open(self.log_path, "w", newline="")
             self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
             self._writer.writeheader()
-
         self._writer.writerow(record)
         self._file.flush()
 
@@ -93,20 +77,7 @@ class SB3CSVCallback:
 
 
 def train_sac(cfg: Dict[str, Any], run_dir: Path) -> Path:
-    """Train SAC agent and return path to saved model.
-
-    Parameters
-    ----------
-    cfg : dict
-        Full configuration (ideally calibrated.yaml).
-    run_dir : Path
-        Directory for artifacts.
-
-    Returns
-    -------
-    Path to saved best_model.zip
-    """
-    # ── FIX C1: Correct class name ──
+    """Train SAC agent and return path to saved model."""
     from src.envs.oran_slicing_env import OranSlicingEnv
     from src.models.utils import select_device
 
@@ -173,7 +144,6 @@ def train_sac(cfg: Dict[str, Any], run_dir: Path) -> Path:
                 "stable-baselines3 not installed. "
                 "Running random policy training loop instead."
             )
-            # Fallback: random policy for structure testing
             obs, info = env.reset()
             ep_rewards = []
             for step in tqdm(range(total_timesteps), desc=f"Rep {rep}"):
@@ -188,7 +158,6 @@ def train_sac(cfg: Dict[str, Any], run_dir: Path) -> Path:
         finally:
             csv_logger.close()
 
-    # Summary
     if all_rewards:
         means = [np.mean(r) for r in all_rewards]
         logger.info(
@@ -214,7 +183,6 @@ def main() -> None:
 
     cfg_path = args.config
     if not Path(cfg_path).exists():
-        # Fallback to default if calibrated doesn't exist
         cfg_path = "config/default.yaml"
         logger.warning("Calibrated config not found, using %s", cfg_path)
 

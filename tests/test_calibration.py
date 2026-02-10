@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Ensure project root on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.models.utils import load_config
@@ -32,8 +31,6 @@ from src.models.demand import DemandModel, DemandConfig
 
 logger = logging.getLogger("oran.test.calibration")
 
-
-# ── Fixture: load default config ──
 
 @pytest.fixture
 def cfg():
@@ -50,7 +47,6 @@ class TestCalibrateDemand:
     """Test demand parameter fitting via quantile matching."""
 
     def test_demand_calibration_returns_updates(self, cfg):
-        """calibrate_demand should return a dict with demand.{eMBB,URLLC}.{mu,sigma}."""
         updates = calibrate_demand(cfg)
 
         assert "demand" in updates
@@ -61,7 +57,6 @@ class TestCalibrateDemand:
             assert updates["demand"][sname]["sigma"] > 0
 
     def test_demand_params_match_targets(self, cfg):
-        """Fitted mu, sigma should produce p50/p90 within tolerance."""
         updates = calibrate_demand(cfg)
         tolerance = cfg.get("calibration", {}).get("demand_tolerance", 0.10)
 
@@ -80,7 +75,6 @@ class TestCalibrateDemand:
                 f"{sname} p90: {actual_p90:.2f} vs target {target_p90:.2f}"
 
     def test_demand_calibration_finite(self, cfg):
-        """Calibrated params must be finite."""
         updates = calibrate_demand(cfg)
         for sname in ["eMBB", "URLLC"]:
             mu = updates["demand"][sname]["mu"]
@@ -97,7 +91,6 @@ class TestCalibrateMarket:
     """Test market parameter calibration."""
 
     def test_baseline_churn_rate_computes(self, cfg):
-        """_baseline_churn_rate should return a float in [0, 1]."""
         seg_cfg = cfg.get("segments", {})
         seg_names = seg_cfg.get("names", ["light", "mid", "heavy", "qos_sensitive"])
         seg_probs = seg_cfg.get("proportions", [0.25, 0.40, 0.25, 0.10])
@@ -116,7 +109,6 @@ class TestCalibrateMarket:
         assert np.isfinite(rate), "Churn rate not finite"
 
     def test_market_calibration_returns_updates(self, cfg):
-        """calibrate_market should return dict with market params."""
         updates = calibrate_market(cfg)
 
         assert "market" in updates
@@ -125,7 +117,6 @@ class TestCalibrateMarket:
         assert isinstance(updates["market"]["U_outside_per_slice"], dict)
 
     def test_market_calibration_matches_targets(self, cfg):
-        """Calibrated U_outside should produce churn rates near targets."""
         updates = calibrate_market(cfg)
         tolerance = cfg.get("calibration", {}).get("market_tolerance", 0.15)
         seg_cfg = cfg.get("segments", {})
@@ -168,7 +159,6 @@ class TestCalibrateRewardScale:
     """Test reward_scale calibration."""
 
     def test_reward_scale_from_samples(self):
-        """calibrate_reward_scale_from_samples should return valid scale."""
         rng = np.random.default_rng(42)
         profits = rng.normal(500000, 200000, size=500)
 
@@ -181,20 +171,12 @@ class TestCalibrateRewardScale:
         assert np.isfinite(result["profit_scale"])
 
     def test_reward_scale_from_samples_empty(self):
-        """Should handle empty samples gracefully."""
         result = calibrate_reward_scale_from_samples(
             np.array([]), reward_type="log",
         )
         assert result["profit_scale"] >= 1.0
 
     def test_reward_scale_full_pipeline(self, cfg):
-        """FIX C7: calibrate_reward_scale(cfg) should accept config dict.
-
-        The original code passed cfg to a function expecting np.ndarray.
-        The fixed calibrate_reward_scale() now accepts a config dict
-        and internally runs rollouts + calls calibrate_reward_scale_from_samples().
-        """
-        # Use minimal rollouts for testing speed
         result = calibrate_reward_scale(cfg, n_episodes=2, seed=42)
 
         assert "economics" in result
@@ -211,22 +193,17 @@ class TestFullCalibration:
     """Test that all three calibrations compose correctly."""
 
     def test_full_pipeline_produces_valid_config(self, cfg):
-        """Running all calibrations should produce a valid merged config."""
         from src.models.utils import merge_configs
 
-        # Step 1: demand
         demand_updates = calibrate_demand(cfg)
         cfg_1 = merge_configs(cfg, demand_updates)
 
-        # Step 2: market
         market_updates = calibrate_market(cfg_1)
         cfg_2 = merge_configs(cfg_1, market_updates)
 
-        # Verify merged config has calibrated values
         assert cfg_2["demand"]["eMBB"]["mu"] == demand_updates["demand"]["eMBB"]["mu"]
         assert cfg_2["market"]["U_outside"] == market_updates["market"]["U_outside"]
 
-        # Step 3: reward scale (minimal rollouts)
         reward_updates = calibrate_reward_scale(cfg_2, n_episodes=1, seed=42)
         cfg_3 = merge_configs(cfg_2, reward_updates)
 

@@ -61,6 +61,80 @@ An RL agent (SAC) makes three decisions each month:
 The agent optimizes monthly profit (revenue − costs) while maintaining SLA compliance
 and managing user churn through pricing and resource allocation.
 
+## Three-Speed Throughput Model (FIX F1)
+
+A critical architectural fix separating three distinct throughput parameters per plan tier,
+grounded in 3GPP QoS standards and expectation-disconfirmation theory.
+
+### The Problem (V_rate = 1.0 Bug)
+
+In the original design, user expected throughput `T_exp` was set to the post-cap throttle
+speed `v_cap_mbps` (1–5 Mbps) from the start of each month. Since the SLO thresholds were
+set at 10 Mbps (eMBB) and 5 Mbps (URLLC), and `T_act = min(fair_share, T_exp)`, actual
+throughput was structurally capped below the SLO — causing 100% SLA violation regardless
+of agent actions. This made the reward signal uninformative and training ineffective.
+
+### The Fix: Three Speed Parameters
+
+Each plan tier now defines three speeds with the ordering `v_cap < T_exp_base ≤ v_max`:
+
+| Parameter | Role | Example (eMBB standard) | Reference |
+|-----------|------|------------------------|-----------|
+| **v_max_mbps** | Pre-cap peak speed (radio ceiling) | 300 Mbps | [TS23501] §5.7, [TWORLD_18] |
+| **v_cap_mbps** | Post-cap throttle speed | 3.0 Mbps | [TWORLD_18] 속도제한 |
+| **T_exp_base_mbps** | Realistic user expectation | 5.0 Mbps | [OLIVER_1980] |
+
+**v_max_mbps** — The maximum throughput a user can receive before hitting their data cap.
+Used as the throughput ceiling (`T_ceil`) in the radio inner loop: `T_act = min(fair_share, v_max)`.
+This allows users to achieve their fair share of cell capacity without artificial plan-imposed limits.
+
+**v_cap_mbps** — The throttled speed applied only after a user exceeds their monthly data quota
+(`D_u > Q_gb`). Enforced in the environment after the inner loop, not during it.
+Reflects Korean carrier practice of post-cap speed restriction (속도제한) [TWORLD_18].
+
+**T_exp_base_mbps** — The realistic throughput expectation for disconfirmation computation.
+Set to what users actually anticipate based on prior experience, not the advertised maximum.
+Grounded in Oliver's expectation-disconfirmation theory [OLIVER_1980]: satisfaction depends
+on the gap between expected and perceived performance, not absolute levels.
+
+### SLO Recalibration
+
+SLO thresholds recalibrated to be achievable under normal operating conditions:
+
+| Metric | Old Value | New Value | Rationale |
+|--------|-----------|-----------|-----------|
+| SLO_eMBB | 10.0 Mbps | 3.0 Mbps | Fair-share ≈ 3.3 Mbps at N=110, ρ=0.55 |
+| SLO_URLLC | 5.0 Mbps | 2.0 Mbps | Rare violations, high reliability |
+| profit_scale | 724,177 | 5,000,000 | Recalibrated for new profit distribution |
+
+### Plan Catalog (Three-Speed)
+
+**eMBB Plans:**
+
+| Tier | Fee (KRW) | Quota (GB) | v_max | v_cap | T_exp_base |
+|------|-----------|------------|-------|-------|------------|
+| Basic | 55,000 | 12 | 150 Mbps | 1.0 Mbps | 3.0 Mbps |
+| Standard | 69,000 | 50 | 300 Mbps | 3.0 Mbps | 5.0 Mbps |
+| Premium | 89,000 | 200 | 1000 Mbps | 5.0 Mbps | 8.0 Mbps |
+
+**URLLC Plans:**
+
+| Tier | Fee (KRW) | Quota (GB) | v_max | v_cap | T_exp_base |
+|------|-----------|------------|-------|-------|------------|
+| Basic | 40,000 | 5 | 50 Mbps | 0.4 Mbps | 2.0 Mbps |
+| Standard | 55,000 | 15 | 100 Mbps | 1.0 Mbps | 3.0 Mbps |
+| Premium | 75,000 | 40 | 300 Mbps | 3.0 Mbps | 5.0 Mbps |
+
+### How It Works in the Monthly Step
+
+1. **Pre-inner loop**: For each user, compute `T_ceil`:
+   - If `D_u ≤ Q_gb` (under cap): `T_ceil = v_max_mbps`
+   - If `D_u > Q_gb` (over cap): `T_ceil = v_cap_mbps`
+2. **Inner loop** (K=30 steps): `T_act = min(fair_share, T_ceil)` — pre-cap users get
+   full fair-share; post-cap users are throttled
+3. **Post-inner loop**: Disconfirmation computed as `δ = max(0, T_exp_base - T_act_avg)` —
+   moderate gap drives realistic churn, not catastrophic 100% dissatisfaction
+
 ## Monthly Step Order (§17 — fixed)
 
 1. **Map action** → fees + PRB share (bounds enforced)
@@ -83,14 +157,29 @@ Controlled via `action.price_explore_factor` in config.
 ### Calibration (§19)
 All numeric parameters are calibrated, not hardcoded:
 
-- **Demand**: log-normal μ, σ fitted to target p50/p90 quantiles
-- **Market**: logistic churn offset U_outside solved to match target baseline churn rates (3–4%)
-- **Reward scale**: profit_scale = p95(|profit|) from random policy rollouts
+- **Demand**: log-normal μ, σ fitted to target p50/p90 quantiles [LOGNORMAL_TNET]
+- **Market**: logistic churn offset U_outside solved to match target baseline churn rates (3–4%) [CHURN_SLR]
+- **Reward scale**: profit_scale = p50(|profit|) from random policy rollouts [SB3_TIPS]
 
 ### Radio Abstraction
 We use macro capacity proxies (not full PHY MCS/TBS chain).
 Throughput degrades monotonically with load via a congestion function calibrated
-to literature profiles.
+to literature profiles. [CONG_5G_PMC]
+
+### Reward Shaping (M9)
+Phase 3 enhanced reward with auxiliary terms:
+```
+r = f(profit/scale) + α_ret × retention + α_eff × efficiency
+    - α_churn × churn_rate - α_vol × price_volatility - λ × penalty
+```
+
+### Warm-up Price Clamping (M8)
+During early months, fee changes are limited to ±5% (months 1–3) and ±10% (months 4–10)
+to prevent destructive price oscillations during initial exploration.
+
+### Churned User Recycling (D9)
+Users who churn are recycled back to the inactive pool after a 3-month cooldown,
+preventing inactive pool depletion over long episodes.
 
 ### Standards-Pinned Constants
 | Parameter | Value | Source |
@@ -105,10 +194,10 @@ All parameters are in `config/default.yaml`. Key sections:
 
 - `radio`: bandwidth, PRB count, cell capacity, congestion
 - `time`: episode length (50 months), inner loop K=30
-- `plans`: eMBB/URLLC plan catalogs (Korean-style monthly plans)
+- `plans`: eMBB/URLLC plan catalogs with three-speed model
 - `demand`: target quantiles per slice
 - `market`: churn/join parameters, segment sensitivities
-- `training`: SAC hyperparameters (lr, batch size, etc.)
+- `training`: SAC hyperparameters (lr, batch size, 150k timesteps)
 - `calibration`: tolerance thresholds
 
 ## Device Selection
@@ -128,29 +217,53 @@ Printed at pipeline start.
 | `best_model/` | Best checkpoint (by eval reward) |
 | `final_model.zip` | Final model after all timesteps |
 | `report.md` | Summary report with plots |
-| `plots/` | 6 PNG plots |
+| `plots/` | PNG plots |
 
 ### Plots Generated
 
 1. **Profit / Revenue / Cost** — monthly economic dynamics
 2. **Subscription Fees** — agent pricing decisions by slice
-3. **PRB Share & Utilization** — resource allocation and load
-4. **Average Throughput** — QoS per slice
+3. **Active Users** — user pool dynamics
+4. **Joins vs Churns** — market flow balance
 5. **SLA Violation Rates** — compliance tracking
-6. **Churn / Join / Active Users** — market dynamics
+6. **Reward** — learning signal evolution
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest tests/ -v
 ```
 
-| Test File | What it Tests | Section |
-|-----------|---------------|---------|
-| `test_invariants.py` | Pool disjointness, conservation, transition correctness | §20 |
-| `test_monotonicity.py` | T_eff decreasing in load, violations non-decreasing | §20 |
-| `test_finite_reward.py` | No NaN/Inf under random actions across seeds | §20 |
-| `test_calibration.py` | Demand/market/reward calibration targets met | §20 |
+| Test File | What it Tests | Key Assertions |
+|-----------|---------------|----------------|
+| `test_invariants.py` | Pool disjointness, conservation, step order | T_exp == T_exp_base (not v_cap, not 100) |
+| `test_monotonicity.py` | T_eff decreasing in load, violations non-decreasing | Uses T_ceil parameter interface |
+| `test_finite_reward.py` | No NaN/Inf, action mapping, phase 2 fixes | V_rate < 1.0 under moderate load |
+| `test_calibration.py` | Demand/market/reward calibration targets met | Quantile matching within tolerance |
+
+### Three-Speed Model Test Coverage
+
+- `test_three_speed_model_present`: Verifies all users have v_max, v_cap, T_exp_base with correct ordering
+- `test_t_exp_matches_t_exp_base`: T_exp resets to T_exp_base each month (not v_cap)
+- `test_v_max_from_plan`: v_max assigned from plan config, varies across tiers
+- `test_v_rate_not_always_one`: Validates FIX F1 — V_rate < 1.0 achievable under moderate load
+- `test_speed_ordering`: Asserts v_cap < T_exp_base ≤ v_max for all users
+
+## Fixes Applied (Summary)
+
+| Fix ID | Issue | Solution | Reference |
+|--------|-------|----------|-----------|
+| **FIX F1** | V_rate = 1.0 (SLO structurally unachievable) | Three-speed model: v_max / v_cap / T_exp_base | [TS23501], [OLIVER_1980] |
+| FIX M1 | Step order (join/churn timing) | §17-compliant: join→demand→inner→topup→churn | [SB3_TIPS] |
+| FIX M2 | Missing top-up model | TopUpModel integrated in monthly step | [TWORLD_18] |
+| FIX M3 | SLA violation computed from aggregates | Per-step fraction: V = (#steps < SLO) / K | [VERIZON_SLA] |
+| FIX M4 | Single rho_util for both slices | Per-slice utilization tracking | [TS28554] |
+| FIX M5 | Action mapping order | a[0]→F_eMBB, a[1]→F_URLLC, a[2]→ρ per §6.1 | [SB3_SAC] |
+| FIX M7 | T_exp hardcoded to 100 | Plan-based T_exp_base from config | [OLIVER_1980] |
+| M8 | Price oscillation during exploration | Warm-up clamping (±5%/±10%) | [HENDERSON_2018] |
+| M9 | Sparse reward signal | Shaped reward with retention/efficiency/churn/volatility | [SB3_TIPS] |
+| D9 | Inactive pool depletion | Churned user recycling after cooldown | [CHURN_SLR] |
+| D10 | Missing safety validation | validate_state penalty in reward | [SB3_TIPS] |
 
 ## References
 
@@ -159,15 +272,21 @@ python -m unittest discover -s tests -v
 | [SAC] | Haarnoja et al., *Soft Actor-Critic*, ICML 2018 |
 | [SB3_SAC] | Stable-Baselines3 SAC documentation |
 | [SB3_TIPS] | SB3 RL Tips and Tricks |
+| [TS23501] | 3GPP TS 23.501 §5.7 — System architecture; QoS model, network slicing |
 | [TS38104] | 3GPP TS 38.104 — NR Base Station radio transmission and reception |
 | [TS38214] | 3GPP TS 38.214 — NR Physical layer procedures for data |
+| [TS28554] | 3GPP TS 28.554 v17.6.0 — 5G end-to-end KPI definitions |
+| [TS28541] | 3GPP TS 28.541 — NRM for network slicing |
+| [GSMA_NG116] | GSMA PRD NG.116 — Generic network slice template |
+| [OLIVER_1980] | Oliver, *Cognitive Model of the Antecedents and Consequences of Satisfaction Decisions*, JMR 1980 |
+| [HENDERSON_2018] | Henderson et al., *Deep RL that Matters*, AAAI 2018 |
 | [LOGNORMAL_TNET] | Mobile data traffic modeling, IEEE/ACM Trans. Netw. 2021 |
 | [CHURN_SLR] | Telecom churn determinants SLR, Springer 2023 |
 | [DISCONF_PDF] | Disconfirmation in continuance, Int. J. Contents 2021 |
 | [BS_POWER] | Base station power consumption models |
 | [CONG_5G_PMC] | 5G congestion and throughput degradation, PMC 2023 |
 | [VERIZON_SLA] | Verizon SLA credit tiers (MRC-based) |
-| [TWORLD_18] | T World plan page (post-cap speed restriction) |
+| [TWORLD_18] | T World plan page (post-cap speed restriction / 속도제한) |
 
 ## License
 

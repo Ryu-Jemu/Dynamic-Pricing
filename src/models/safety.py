@@ -69,7 +69,7 @@ def validate_state(N_active: Dict[str, int], rho_util: Dict[str, float],
 def safe_reward(raw_reward: float, penalty: float = 0.0,
                 lambda_penalty: float = 10.0, clip_abs: float = 2.0) -> float:
     if not np.isfinite(raw_reward):
-        logger.warning("Non-finite raw reward: %s → replaced with -clip", raw_reward)
+        logger.warning("Non-finite raw reward: %s -> replaced with -clip", raw_reward)
         raw_reward = -clip_abs
     r = raw_reward - lambda_penalty * penalty
     r = float(np.clip(r, -clip_abs, clip_abs))

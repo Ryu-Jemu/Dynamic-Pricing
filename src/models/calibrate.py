@@ -42,22 +42,7 @@ logger = logging.getLogger("oran.calibrate")
 # =====================================================================
 
 def calibrate_demand(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Fit lognormal (mu, sigma) per slice to target p50/p90 quantiles.
-
-    Uses DemandModel.fit_lognormal_quantiles() — closed-form solution:
-      mu    = ln(target_p50)
-      sigma = (ln(target_p90) - mu) / Phi^{-1}(0.90)
-
-    Parameters
-    ----------
-    cfg : dict
-        Full config with demand.{eMBB,URLLC}.target_p50_gb / target_p90_gb.
-
-    Returns
-    -------
-    dict : nested update dict suitable for merge_configs().
-        {"demand": {"eMBB": {"mu": ..., "sigma": ...}, "URLLC": {...}}}
-    """
+    """Fit lognormal (mu, sigma) per slice to target p50/p90 quantiles."""
     demand_cfg = cfg.get("demand", {})
     updates: Dict[str, Any] = {"demand": {}}
 
@@ -95,19 +80,7 @@ def _baseline_churn_rate(
     seg_probs: List[float],
     price_norm: float = 70000.0,
 ) -> float:
-    """Compute expected baseline monthly churn rate (analytical).
-
-    Averages P(churn) across segments using their proportions,
-    assuming zero disconfirmation (Δ_disc = 0) at baseline.
-
-    The logit for each segment is:
-      logit(P_stay) = b_u - β_price * w_price * (F / price_norm)
-                      + β_qos * w_qos * log(1 + T_act)
-                      - β_sw * sw_cost
-                      - U_outside
-
-    P(churn) = 1 - σ(logit)
-    """
+    """Compute expected baseline monthly churn rate (analytical)."""
     sensitivity = seg_cfg.get("sensitivity", {})
     weighted_churn = 0.0
 
@@ -122,7 +95,7 @@ def _baseline_churn_rate(
             b_u
             - beta_price * w_price * (F_baseline / price_norm)
             + beta_qos * w_qos * np.log1p(max(T_act_baseline, 0.0))
-            - beta_sw * sw_cost      # note: beta_disc * 0 = 0
+            - beta_sw * sw_cost
             - U_outside
         )
         p_stay = float(sigmoid(logit))
@@ -133,30 +106,7 @@ def _baseline_churn_rate(
 
 
 def calibrate_market(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Calibrate U_outside per slice to match target churn rates.
-
-    For each slice, solve:
-      _baseline_churn_rate(..., U_outside=x) == target_churn_rate_s
-
-    using scipy.optimize.brentq on the monotone residual.
-
-    Baseline conditions:
-      F_baseline = midpoint of agent price bounds
-      T_act_baseline = 2 × SLO target (reasonable "good service" proxy)
-      delta_disc = 0 (no disconfirmation at baseline)
-
-    Parameters
-    ----------
-    cfg : dict
-        Full config with market.target_churn_rate_{eMBB,URLLC},
-        sla.SLO_T_user_{eMBB,URLLC}_mbps, segments.*.
-
-    Returns
-    -------
-    dict : update dict with calibrated market parameters.
-        {"market": {"U_outside": ..., "U_outside_per_slice": {...},
-                     "beta_price": ..., "beta_qos": ...}}
-    """
+    """Calibrate U_outside per slice to match target churn rates."""
     mc = cfg.get("market", {})
     seg_cfg = cfg.get("segments", {})
     seg_names = seg_cfg.get("names", ["light", "mid", "heavy", "qos_sensitive"])
@@ -194,11 +144,9 @@ def calibrate_market(cfg: Dict[str, Any]) -> Dict[str, Any]:
             )
             return rate - target_churn
 
-        # Search over wide range — U_outside can be negative
         try:
             U_opt = float(optimize.brentq(residual, -20.0, 20.0, xtol=1e-6))
         except ValueError:
-            # If brentq fails (sign doesn't change), use bisection fallback
             logger.warning(
                 "brentq failed for %s; using U_outside=0.0 as fallback.",
                 sname,
@@ -220,7 +168,6 @@ def calibrate_market(cfg: Dict[str, Any]) -> Dict[str, Any]:
             sname, U_opt, actual_rate, target_churn,
         )
 
-    # Use mean of per-slice as the global default
     U_global = float(np.mean(list(U_outside_per_slice.values())))
 
     return {
@@ -244,23 +191,7 @@ def calibrate_reward_scale_from_samples(
     reward_clip: float = 2.0,
     min_scale: float = 1.0,
 ) -> Dict[str, Any]:
-    """Calibrate profit_scale from pre-collected profit samples.
-
-    Parameters
-    ----------
-    profit_samples : ndarray
-        Array of monthly profit values from random rollouts.
-    reward_type : str
-        "tanh", "linear", or "log"
-    reward_clip : float
-        Clipping bound
-    min_scale : float
-        Floor value
-
-    Returns
-    -------
-    dict with keys: profit_scale, method, stats
-    """
+    """Calibrate profit_scale from pre-collected profit samples."""
     if len(profit_samples) == 0:
         logger.warning("Empty profit_samples; returning min_scale=%.1f", min_scale)
         return {"profit_scale": min_scale, "method": "empty_fallback", "stats": {}}
@@ -330,23 +261,7 @@ def run_random_rollouts(
 def calibrate_reward_scale(cfg: Dict[str, Any],
                            n_episodes: Optional[int] = None,
                            seed: int = 42) -> Dict[str, Any]:
-    """Full reward-scale calibration pipeline: rollouts → profit_scale.
-
-    This is the config-level wrapper that test_calibration.py calls.
-
-    Parameters
-    ----------
-    cfg : dict
-        Full configuration dictionary.
-    n_episodes : int or None
-        Override calibration.reward_scale_episodes from config.
-    seed : int
-
-    Returns
-    -------
-    dict : update dict with {"economics": {"profit_scale": ...}}
-    """
-    # Lazy import to avoid circular dependency
+    """Full reward-scale calibration pipeline: rollouts → profit_scale."""
     from ..envs.oran_slicing_env import OranSlicingEnv
 
     cal_cfg = cfg.get("calibration", {})
@@ -375,12 +290,12 @@ def calibrate_reward_scale(cfg: Dict[str, Any],
     }
 
 
-# Backward-compatible alias used in calibrate_from_config
+# Backward-compatible alias
 calibrate_from_config = calibrate_reward_scale
 
 
 # =====================================================================
-# CLI entry point  (§21 — run.sh calls python -m src.models.calibrate)
+# CLI entry point
 # =====================================================================
 
 def main() -> None:
@@ -406,22 +321,18 @@ def main() -> None:
 
     cfg = load_config(args.config)
 
-    # ── Step 1: Demand calibration ────────────────────────────────
     logger.info("=== Step 1/3: Demand calibration ===")
     demand_updates = calibrate_demand(cfg)
     cfg = merge_configs(cfg, demand_updates)
 
-    # ── Step 2: Market calibration ────────────────────────────────
     logger.info("=== Step 2/3: Market calibration ===")
     market_updates = calibrate_market(cfg)
     cfg = merge_configs(cfg, market_updates)
 
-    # ── Step 3: Reward scale calibration ──────────────────────────
     logger.info("=== Step 3/3: Reward scale calibration ===")
     reward_updates = calibrate_reward_scale(cfg)
     cfg = merge_configs(cfg, reward_updates)
 
-    # ── Write calibrated config ───────────────────────────────────
     save_config(cfg, args.output)
     logger.info("Calibrated config saved: %s", args.output)
 

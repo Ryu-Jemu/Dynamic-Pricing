@@ -6,9 +6,10 @@ Tests:
   - Conservation: |inactive| + |active| + |churned| = total created
   - Transitions only at month boundaries
   - Step order: join before demand, churn after top-up (§17)
+  - FIX F1: T_exp set from T_exp_base_mbps [OLIVER_1980], not v_cap
 
 References:
-  [SB3_TIPS]
+  [SB3_TIPS][OLIVER_1980]
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class TestPoolInvariants:
         """Pools are pairwise disjoint after initialization."""
         rng = np.random.default_rng(42)
         pool = UserPoolManager.from_config(cfg, rng=rng)
-        pool.assert_invariants()  # raises if violated
+        pool.assert_invariants()
 
     def test_conservation_after_join(self, cfg):
         """Total user count is conserved after join operations."""
@@ -109,7 +110,6 @@ class TestPoolInvariants:
         pool = UserPoolManager.from_config(cfg, rng=rng)
 
         active_id = next(iter(pool.active_pool.keys()))
-        # Trying to join an already-active user should be a no-op
         joined = pool.join([active_id])
         assert len(joined) == 0, "Should not join from active pool"
         pool.assert_invariants()
@@ -120,21 +120,20 @@ class TestPoolInvariants:
         pool = UserPoolManager.from_config(cfg, rng=rng)
 
         inactive_id = next(iter(pool.inactive_pool.keys()))
-        # Trying to churn an inactive user should be a no-op
         churned = pool.churn([inactive_id])
         assert len(churned) == 0, "Should not churn from inactive pool"
         pool.assert_invariants()
 
 
 # =====================================================================
-# Step order tests (§17 compliance — FIX M1)
+# Step order tests (§17 compliance)
 # =====================================================================
 
 class TestStepOrder:
-    """Verify §17-compliant step order after Phase 2 M1 fix."""
+    """Verify §17-compliant step order."""
 
     def test_joins_included_in_n_active(self, cfg):
-        """N_active in info should include newly joined users (join at step 2)."""
+        """N_active in info should include newly joined users."""
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
         n_before = env.pool.active_count("eMBB")
@@ -142,13 +141,12 @@ class TestStepOrder:
         action = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         _, _, _, _, info = env.step(action)
 
-        # N_active should = pre-step active + joins (since join happens first)
         expected = n_before + info["joins_eMBB"]
         assert info["N_active_eMBB"] == expected, \
             f"N_active={info['N_active_eMBB']} != {n_before}+{info['joins_eMBB']}={expected}"
 
     def test_post_churn_less_than_active(self, cfg):
-        """N_post_churn should be <= N_active (churn removes users)."""
+        """N_post_churn should be <= N_active."""
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
 
@@ -160,15 +158,44 @@ class TestStepOrder:
                     f"Post-churn > active+joins for {s}"
 
     def test_plan_based_t_exp(self, cfg):
-        """T_exp should be set from plan v_cap, not hardcoded 100 (FIX M7)."""
+        """FIX F1: T_exp set from T_exp_base_mbps [OLIVER_1980], not v_cap.
+
+        In the three-speed model:
+          - v_max_mbps: plan peak speed (radio ceiling)
+          - v_cap_mbps: post-cap throttle speed
+          - T_exp_base_mbps: realistic user expectation
+
+        T_exp should equal T_exp_base_mbps after reset_monthly(),
+        NOT v_cap_mbps and NOT the old hardcoded 100.
+        """
         env = OranSlicingEnv(cfg, seed=42)
         env.reset(seed=42)
 
         for u in env.pool.active_pool.values():
-            assert u.T_exp != 100.0 or u.v_cap_mbps == 100.0, \
-                f"User {u.user_id}: T_exp={u.T_exp} (should be {u.v_cap_mbps})"
-            assert u.T_exp == u.v_cap_mbps, \
-                f"User {u.user_id}: T_exp={u.T_exp} != v_cap={u.v_cap_mbps}"
+            # T_exp should NOT be the old hardcoded 100
+            assert u.T_exp != 100.0 or u.T_exp_base_mbps == 100.0, \
+                f"User {u.user_id}: T_exp={u.T_exp} (old hardcoded value)"
+            # T_exp should equal T_exp_base_mbps (realistic expectation)
+            assert u.T_exp == u.T_exp_base_mbps, \
+                f"User {u.user_id}: T_exp={u.T_exp} != T_exp_base={u.T_exp_base_mbps}"
+            # v_max should be much larger than v_cap (pre-cap vs post-cap)
+            assert u.v_max_mbps > u.v_cap_mbps, \
+                f"User {u.user_id}: v_max={u.v_max_mbps} <= v_cap={u.v_cap_mbps}"
+
+    def test_three_speed_model_present(self, cfg):
+        """All users should have the three speed parameters from FIX F1."""
+        env = OranSlicingEnv(cfg, seed=42)
+        env.reset(seed=42)
+
+        for u in env.pool.active_pool.values():
+            assert hasattr(u, 'v_max_mbps'), f"User {u.user_id} missing v_max_mbps"
+            assert hasattr(u, 'v_cap_mbps'), f"User {u.user_id} missing v_cap_mbps"
+            assert hasattr(u, 'T_exp_base_mbps'), f"User {u.user_id} missing T_exp_base_mbps"
+            # Verify ordering: v_cap < T_exp_base < v_max
+            assert u.v_cap_mbps <= u.T_exp_base_mbps, \
+                f"User {u.user_id}: v_cap > T_exp_base"
+            assert u.T_exp_base_mbps <= u.v_max_mbps, \
+                f"User {u.user_id}: T_exp_base > v_max"
 
 
 if __name__ == "__main__":

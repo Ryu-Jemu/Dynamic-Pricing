@@ -5,6 +5,9 @@ Tests:
   - Increasing N_active (thus rho_util) must not increase T_eff
   - Violations must not decrease when offered load increases
 
+FIX F1: inner_step parameter renamed from T_exp_users_* to T_ceil_users_*
+to clarify that these are throughput ceilings (v_max_mbps).
+
 References:
   [CONG_5G_PMC][LTE_LOAD_TPUT]
 """
@@ -41,18 +44,18 @@ class TestThroughputMonotonicity:
     def test_t_eff_decreases_with_n_active(self, radio):
         """More users sharing fixed PRBs → lower per-user throughput."""
         rho_URLLC = 0.3
-        T_exp = np.array([5.0])  # single user, plan-based T_exp
 
         prev_avg = float("inf")
         for n_eMBB in [10, 30, 60, 100, 150, 200]:
-            T_exp_arr = np.array([5.0] * n_eMBB)
-            T_exp_urllc = np.array([3.0] * 10)
+            # FIX F1: T_ceil = v_max_mbps (pre-cap peak), not v_cap
+            T_ceil_arr = np.array([150.0] * n_eMBB)  # eMBB basic v_max
+            T_ceil_urllc = np.array([100.0] * 10)     # URLLC standard v_max
             result = radio.inner_step(
                 N_active_eMBB=n_eMBB,
                 N_active_URLLC=10,
                 rho_URLLC=rho_URLLC,
-                T_exp_users_eMBB=T_exp_arr,
-                T_exp_users_URLLC=T_exp_urllc,
+                T_ceil_users_eMBB=T_ceil_arr,
+                T_ceil_users_URLLC=T_ceil_urllc,
             )
             avg_T = result["avg_T_act_eMBB"]
             assert avg_T <= prev_avg + 1e-6, \
@@ -65,14 +68,14 @@ class TestThroughputMonotonicity:
         prev_rho = -1.0
 
         for n_eMBB in [10, 30, 60, 100, 150]:
-            T_exp_arr = np.array([5.0] * n_eMBB)
-            T_exp_urllc = np.array([3.0] * 10)
+            T_ceil_arr = np.array([150.0] * n_eMBB)
+            T_ceil_urllc = np.array([100.0] * 10)
             result = radio.inner_step(
                 N_active_eMBB=n_eMBB,
                 N_active_URLLC=10,
                 rho_URLLC=rho_URLLC,
-                T_exp_users_eMBB=T_exp_arr,
-                T_exp_users_URLLC=T_exp_urllc,
+                T_ceil_users_eMBB=T_ceil_arr,
+                T_ceil_users_URLLC=T_ceil_urllc,
             )
             rho = result["rho_util_eMBB"]
             assert rho >= prev_rho - 1e-6, \
@@ -83,8 +86,8 @@ class TestThroughputMonotonicity:
         """Increasing rho_URLLC → more PRBs for URLLC, fewer for eMBB."""
         n_eMBB = 80
         n_URLLC = 20
-        T_exp_e = np.array([5.0] * n_eMBB)
-        T_exp_u = np.array([3.0] * n_URLLC)
+        T_ceil_e = np.array([300.0] * n_eMBB)   # eMBB standard v_max
+        T_ceil_u = np.array([100.0] * n_URLLC)   # URLLC standard v_max
 
         prev_T_urllc = 0.0
         prev_T_embb = float("inf")
@@ -94,16 +97,14 @@ class TestThroughputMonotonicity:
                 N_active_eMBB=n_eMBB,
                 N_active_URLLC=n_URLLC,
                 rho_URLLC=rho,
-                T_exp_users_eMBB=T_exp_e,
-                T_exp_users_URLLC=T_exp_u,
+                T_ceil_users_eMBB=T_ceil_e,
+                T_ceil_users_URLLC=T_ceil_u,
             )
             T_urllc = result["avg_T_act_URLLC"]
             T_embb = result["avg_T_act_eMBB"]
 
-            # URLLC throughput should increase with more PRBs
             assert T_urllc >= prev_T_urllc - 1e-6, \
                 f"URLLC T decreased at rho={rho}"
-            # eMBB throughput should decrease with fewer PRBs
             assert T_embb <= prev_T_embb + 1e-6, \
                 f"eMBB T increased at rho={rho}"
             prev_T_urllc = T_urllc
@@ -114,7 +115,7 @@ class TestViolationMonotonicity:
     """SLA violations should not decrease when load increases."""
 
     def test_violation_increases_with_load(self, cfg, radio):
-        """More users → higher violation rate (lower per-user throughput)."""
+        """More users → higher violation rate."""
         from src.models.economics import SLAModel
         sla = SLAModel(cfg)
         rho_URLLC = 0.3
@@ -123,16 +124,17 @@ class TestViolationMonotonicity:
         prev_V = -1.0
         for n_eMBB in [10, 50, 100, 150, 200]:
             step_avgs = np.zeros(K)
-            T_exp_e = np.array([5.0] * n_eMBB)
-            T_exp_u = np.array([3.0] * 10)
+            # FIX F1: Use v_max as ceiling (high enough to not constrain)
+            T_ceil_e = np.array([150.0] * n_eMBB)
+            T_ceil_u = np.array([100.0] * 10)
 
             for k in range(K):
                 result = radio.inner_step(
                     N_active_eMBB=n_eMBB,
                     N_active_URLLC=10,
                     rho_URLLC=rho_URLLC,
-                    T_exp_users_eMBB=T_exp_e,
-                    T_exp_users_URLLC=T_exp_u,
+                    T_ceil_users_eMBB=T_ceil_e,
+                    T_ceil_users_URLLC=T_ceil_u,
                 )
                 step_avgs[k] = result["avg_T_act_eMBB"]
 

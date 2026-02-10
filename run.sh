@@ -34,7 +34,6 @@ python -m src.train_sac --config config/calibrated.yaml
 # ── Step 4: Evaluate ──
 echo ""
 echo "===== Step 4: Evaluation ====="
-# Find most recent artifacts directory
 RUN_DIR=$(ls -td artifacts/*/ 2>/dev/null | head -1)
 if [ -z "$RUN_DIR" ]; then
     RUN_DIR="artifacts/latest"
