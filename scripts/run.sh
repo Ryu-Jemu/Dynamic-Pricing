@@ -11,7 +11,7 @@
 #   5) Generate dashboard
 #
 # Usage:
-#   chmod +x scripts/run_all.sh && ./scripts/run_all.sh
+#   chmod +x scripts/run.sh && ./scripts/run.sh
 # ==============================================================================
 set -euo pipefail
 

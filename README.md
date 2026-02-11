@@ -7,7 +7,7 @@ revenue model (base fee + allowance + overage pricing).
 ## Quick Start
 
 ```bash
-chmod +x scripts/run_all.sh && ./scripts/run_all.sh
+chmod +x scripts/run.sh && ./scripts/run.sh
 ```
 
 This executes the full pipeline: venv → user generation → tests → SAC training → evaluation → dashboard.
@@ -45,7 +45,7 @@ oran3pt/
 │   ├── train.py               # SB3 SAC training (§14)
 │   ├── eval.py                # Evaluation + CLV computation (§15)
 │   └── dashboard_app.py       # Streamlit/Matplotlib dashboard (§16)
-├── scripts/run_all.sh         # End-to-end pipeline
+├── scripts/run.sh             # End-to-end pipeline
 ├── tests/test_env.py          # Unit tests
 ├── data/                      # Generated users_init.csv
 ├── outputs/                   # Models, logs, plots
