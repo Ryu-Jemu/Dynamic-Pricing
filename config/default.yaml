@@ -1,366 +1,124 @@
 # ================================================================
-# O-RAN 1-Cell Slicing + Pricing — Default Configuration
+# 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
-# All numeric scenario parameters are configurable.
-# Standards-pinned values are marked [TS38104] etc.
-# Calibrated values are overwritten by calibrate.py → calibrated.yaml
+# Every numeric value is either:
+#   (a) standards-pinned  [TS 38.104 / TS 23.503], or
+#   (b) calibrated to a named target statistic (see inline notes)
 # ================================================================
 
-# --- Section 4: Standards-pinned radio constants [TS38104][TSDI_KEYNOTE] ---
-radio:
-  bandwidth_mhz: 100          # [TS38104] NR Band n78 100 MHz
-  scs_khz: 30                 # [TS38104] SubCarrier Spacing
-  prb_total: 273              # [TS38104][TSDI_KEYNOTE] NRB for 100MHz@30kHz
+# ── §1  Scenario ──
+scenario:
+  name: "5G_ORAN_1Cell_3PT"
+  slices: ["URLLC", "eMBB"]
 
-# --- Section 5: Time model ---
+# ── §3.1  Time axis ──
 time:
-  step_months: 1
-  episode_len_months: 50
-  inner_loop_K: 30             # intra-month micro-steps (engineering choice)
+  steps_per_cycle: 30        # 1 step ≈ 1 day; 30 steps ≈ 1 month
+  episode_cycles: 12         # 12 billing cycles per episode  (→ 360 steps)
 
-# --- Section 6: Slices & action space [SB3_SAC] ---
-slices:
-  names: ["eMBB", "URLLC"]
-
+# ── §4  Action bounds (5-D continuous) ──
 action:
-  rho_urllc_min: 0.05          # avoid 0-PRB [SB3_TIPS]
-  rho_urllc_max: 0.95
-  price_explore_factor: 0.2    # ±20% around catalog bounds
+  F_U_min: 30000.0           # URLLC base fee min  (KRW/cycle)
+  F_U_max: 90000.0
+  F_E_min: 40000.0           # eMBB  base fee min
+  F_E_max: 110000.0
+  p_over_U_min: 500.0        # URLLC overage price min (KRW/GB)
+  p_over_U_max: 5000.0
+  p_over_E_min: 200.0        # eMBB  overage price min
+  p_over_E_max: 3000.0
+  rho_U_min: 0.05            # PRB share for URLLC — floor
+  rho_U_max: 0.60            # PRB share for URLLC — ceiling
 
-# --- Section 7: Plan catalog (Korea-style monthly; anonymized) ---
-#
-# Each plan has three speed parameters [TWORLD_18][TS23501]:
-#   v_max_mbps      — Normal (pre-cap) maximum throughput per plan tier.
-#                     In Korean 5G tariffs, higher-tier plans access faster
-#                     network layers.  [TWORLD_18] pages list tier-dependent
-#                     peak rates (e.g., 기본 ~150 Mbps, 프리미엄 "최고속도").
-#                     Used as the throughput ceiling in the radio inner loop
-#                     for users who have NOT exceeded their data quota.
-#
-#   v_cap_mbps      — Post-cap throttle speed.  After Q_gb_month is consumed,
-#                     the carrier throttles the user to v_cap.  [TWORLD_18]
-#                     documents "속도제한" (speed restriction) values of 1–5 Mbps.
-#
-#   T_exp_base_mbps — Realistic user expectation of throughput.
-#                     In expectation-disconfirmation theory [OLIVER_1980],
-#                     users form expectations from prior experience, NOT from
-#                     advertised peak speed.  We set this to a moderate value
-#                     between v_cap and the typical per-user fair-share, so
-#                     disconfirmation is small under normal conditions but
-#                     increases under congestion or after throttling.
-#
-# Source URLs in plan_source_url.txt; do NOT name carriers in code.
-#
-# References:
-#   [TS23501]    3GPP TS 23.501 §5.7  — QoS model and network slicing
-#   [TWORLD_18]  T World plan pages   — post-cap speed restriction
-#   [OLIVER_1980] Oliver, "A Cognitive Model of the Antecedents and
-#                  Consequences of Satisfaction Decisions," JMR 1980
-plans:
-  eMBB:
-    - plan_id: "eMBB_basic"
-      F_krw_month: 55000
-      Q_gb_month: 12
-      v_max_mbps: 150.0        # [TWORLD_18] basic tier peak
-      v_cap_mbps: 1.0          # [TWORLD_18] post-cap throttle
-      T_exp_base_mbps: 3.0     # [OLIVER_1980] realistic user expectation
-    - plan_id: "eMBB_standard"
-      F_krw_month: 69000
-      Q_gb_month: 50
-      v_max_mbps: 300.0        # [TWORLD_18] standard tier peak
-      v_cap_mbps: 3.0
-      T_exp_base_mbps: 5.0
-    - plan_id: "eMBB_premium"
-      F_krw_month: 89000
-      Q_gb_month: 200
-      v_max_mbps: 1000.0       # [TWORLD_18] premium "최고속도"
-      v_cap_mbps: 5.0
-      T_exp_base_mbps: 8.0
+# ── §5  3-Part tariff allowances  [Grubb AER 2009][Nevo 2015][TS 23.503] ──
+tariff:
+  Q_U_gb: 5.0                # URLLC monthly allowance (GB)
+  Q_E_gb: 50.0               # eMBB  monthly allowance (GB)
+
+# ── §6  Traffic  [Nevo 2015 — usage coupled with billing] ──
+traffic:
   URLLC:
-    - plan_id: "URLLC_basic"
-      F_krw_month: 40000
-      Q_gb_month: 5
-      v_max_mbps: 50.0
-      v_cap_mbps: 0.4
-      T_exp_base_mbps: 2.0
-    - plan_id: "URLLC_standard"
-      F_krw_month: 55000
-      Q_gb_month: 15
-      v_max_mbps: 100.0
-      v_cap_mbps: 1.0
-      T_exp_base_mbps: 3.0
-    - plan_id: "URLLC_premium"
-      F_krw_month: 75000
-      Q_gb_month: 40
-      v_max_mbps: 300.0
-      v_cap_mbps: 3.0
-      T_exp_base_mbps: 5.0
-
-# Derived price bounds (computed at runtime from catalog)
-# F_s ∈ [0.8*F_min_s, 1.2*F_max_s]  (Section 6.2)
-
-# --- Section 8: User population & pool management ---
-population:
-  N0_eMBB: 120
-  N0_URLLC: 30
-  inactive_pool_size: 2000
-
-# Segments (max 4) [LOGNORMAL_TNET]
-segments:
-  names: ["light", "mid", "heavy", "qos_sensitive"]
-  proportions: [0.25, 0.40, 0.25, 0.10]
-  # demand_scale per segment (multiplier on base lognormal)
-  demand_scale:
-    light: 0.5
-    mid: 1.0
-    heavy: 2.0
-    qos_sensitive: 1.0
-  # sensitivity profiles (w_price, w_qos, sw_cost, b_u base)
-  sensitivity:
-    light:
-      w_price: 1.2
-      w_qos: 0.6
-      sw_cost: 0.3
-      b_u: 0.5
-    mid:
-      w_price: 1.0
-      w_qos: 1.0
-      sw_cost: 0.5
-      b_u: 0.0
-    heavy:
-      w_price: 0.7
-      w_qos: 1.3
-      sw_cost: 0.6
-      b_u: -0.3
-    qos_sensitive:
-      w_price: 0.8
-      w_qos: 1.8
-      sw_cost: 0.7
-      b_u: -0.5
-
-# --- Section 9: Demand model [LOGNORMAL_TNET] ---
-# mu, sigma are CALIBRATED (not hardcoded); these are initial guesses
-# overwritten by calibrate.py
-demand:
+    target_p50_gb_day: 0.15   # calibration target: median daily URLLC usage
+    target_p90_gb_day: 0.50
+    D_min_gb: 0.001
+    D_max_gb: 5.0
   eMBB:
-    # Calibration targets (scenario)
-    target_mean_gb: 15.0
-    target_p50_gb: 10.0
-    target_p90_gb: 35.0
-    D_min_gb: 0.2
-    D_max_gb: 300.0
-    # Initial guess (overwritten by calibration)
-    mu: 2.3
-    sigma: 0.8
-  URLLC:
-    target_mean_gb: 3.0
-    target_p50_gb: 2.0
-    target_p90_gb: 7.0
-    D_min_gb: 0.05
+    target_p50_gb_day: 1.5
+    target_p90_gb_day: 5.0
+    D_min_gb: 0.01
     D_max_gb: 50.0
-    mu: 0.7
-    sigma: 0.7
 
-# --- Section 10: Radio capacity proxy [TS38214][CONG_5G_PMC][LTE_LOAD_TPUT] ---
-radio_model:
-  T_cell_cap_mbps: 1000.0      # macro cell baseline capacity (scenario; calibratable)
-  c_load: 1.0                   # load coefficient for rho_util mapping
-  N_ref_eMBB: 200               # reference user count for utilization normalization
-  N_ref_URLLC: 100
-  rho_util_max: 0.98            # clip ceiling
+# ── §7  RAN / PRB capacity  [TS 38.104][Huang IoT-J 2020] ──
+radio:
+  bandwidth_mhz: 100         # [TS 38.104] Band n78
+  scs_khz: 30                # [TS 38.104]
+  prb_total: 273             # [TS 38.104] NRB for 100 MHz @ 30 kHz SCS
+  C_total_gb_per_step: 50.0  # macro cell daily capacity proxy (GB/day)
+  kappa_U: 1.2               # URLLC priority factor ≥ 1  [Huang 2020]
 
-# --- Section 11: Data cap + throttle + top-up ---
-topup:
-  enabled: true
-  topup_once_per_month: true
-  price_krw: 11000              # scenario default top-up pack price
-  data_gb: 5.0                  # top-up pack size
-  # Logit calibration params (calibrated)
-  kappa_top: 1.0                # calibrated
-  w_price_topup: 0.5
-  target_adoption_rate: 0.30    # among exceeders
+# ── §8  QoS / SLA violation ──
+qos:
+  alpha_congestion: 10.0     # sigmoid steepness
+  lambda_U: 500000.0         # SLA penalty weight URLLC (KRW)
+  lambda_E: 50000.0          # SLA penalty weight eMBB
 
-# --- Section 12: SLA/SLO ---
-#
-# FIX: SLO targets aligned with achievable per-user throughput.
-#
-# Previous SLO values (10 Mbps eMBB, 5 Mbps URLLC) exceeded the
-# plan-imposed v_cap ceiling (max 5 / 3 Mbps), causing V_rate = 1.0
-# for every inner step — the SLA was structurally unachievable.
-#
-# New SLO values are set so that violations are *informative*:
-#   - Violations ≈ 0%  under low-to-moderate load
-#   - Violations > 0%  under high load or when many users are throttled
-#
-# Derivation (at converged policy, N_eMBB≈110, ρ_URLLC≈0.20):
-#   ρ_util_eMBB  = 110/200 = 0.55
-#   T_eff        = 1000 × (1 − 0.55) = 450 Mbps
-#   fair_share   = 450 × 0.80 / 110 ≈ 3.3 Mbps  [pre-cap, not capped by v_max]
-#
-#   SLO_eMBB = 3.0 Mbps → violations when fair_share < 3.0
-#     i.e. when N_eMBB > ~120 or ρ_URLLC increases → meaningful gradient.
-#
-#   SLO_URLLC = 2.0 Mbps → violations rare for URLLC (high reliability),
-#     triggered mainly under extreme load.
-#
-# References:
-#   [TS28554]    3GPP TS 28.554 v17.6.0 — 5G end-to-end KPI definitions
-#   [TS28541]    3GPP TS 28.541 — NRM for network slicing (SLA attributes)
-#   [GSMA_NG116] GSMA PRD NG.116 — Network Slicing Connectivity Service SLA
-#   [VERIZON_SLA] Verizon SLA credit tiers (MRC-based)
-sla:
-  SLO_T_user_eMBB_mbps: 3.0    # [TS28554] achievable SLO for eMBB slice
-  SLO_T_user_URLLC_mbps: 2.0   # [TS28554] stricter threshold for URLLC reliability
-  # Credit tier table (scenario; MRC-based) [VERIZON_SLA]
-  credit_tiers:
-    - threshold: 0.05
-      fraction: 0.00
-    - threshold: 0.15
-      fraction: 0.05
-    - threshold: 0.30
-      fraction: 0.10
-    - threshold: 1.00
-      fraction: 0.20
-  credit_cap_fraction: 0.30     # max 30% of MRC
+# ── §9  Cost (Capex excluded) ──
+cost:
+  c_opex_per_user: 1200.0    # daily OPEX per active user ≈ 36 000 KRW/mo
+  c_energy_per_gb: 50.0      # energy proxy per GB
+  c_cac_per_join: 80000.0    # customer acquisition cost  [CLV_KUMAR]
 
-# --- Section 13: Market model [CHURN_SLR][DISCONF_PDF] ---
+# ── §10  Market — join / churn  [CHURN logit][ITU Teletraffic] ──
 market:
-  # Churn logistic coefficients (CALIBRATED; initial guesses)
-  beta_price: 0.5
-  beta_qos: 0.3
-  beta_disc: 0.4
-  beta_sw: 0.2
-  U_outside: 0.0
-  delta_max: 50.0               # soft-saturate disconfirmation (Mbps)
-  # Join model (Poisson) [CHURN_SLR]
-  lambda_join_eMBB: 8.0
-  lambda_join_URLLC: 3.0
-  join_cap_eMBB: 25
-  join_cap_URLLC: 10
-  # Calibration targets
-  target_churn_rate_eMBB: 0.03
-  target_churn_rate_URLLC: 0.04
-  # D7: Price normalization — should match actual fee scale
-  # With fees ~44k-107k KRW, use midpoint (~70k) so price term doesn't dominate logit
+  beta0_churn: -2.5          # intercept (calibrated → ~3 % monthly churn)
+  beta_p_churn: 0.00003      # price sensitivity in logit
+  beta_q_churn: 2.0          # QoS sensitivity
+  beta_sw_churn: 1.5         # switching-cost weight
+  beta0_join: -3.0           # intercept (calibrated → ~5 % monthly join)
+  beta_p_join: 0.00002
+  beta_q_join: 1.5
+  mode: "stochastic"         # "stochastic" or "expectation"
   price_norm: 70000.0
-  # D9: Churned user recycling cooldown (months before churned can rejoin)
-  churn_recycle_cooldown: 3
 
-# --- Section 14: Energy model [BS_POWER][BS_POWER_MEAS] ---
-energy:
-  P0_kw: 0.8                    # idle power (kW); literature-reasonable range
-  P1_kw: 1.4                    # full-load power (kW)
-  hours_per_month: 730.0        # ~365.25*24/12
-  elec_price_krw_per_kwh: 120.0 # fixed unit price (no TOU)
+# ── §11  CLV  [Gupta JSR 2006] ──
+clv:
+  horizon_months: 24
+  discount_rate_monthly: 0.01
+  enabled: true
 
-# --- Section 15: Economics & reward ---
-#
-# FIX F5/F6/F7: Enhanced cost model and churn penalty.
-#
-# FIX F5 — Quadratic churn penalty  [BERRY_1994][CHURN_SLR]
-#   Previous linear penalty max(0, rate − 0.05) produced weak gradients,
-#   allowing churn to persist at 2.6× target.  Quadratic scaling:
-#     penalty = scale × Σ_s max(0, rate_s − threshold_s)²
-#   penalizes large deviations disproportionately, creating steeper
-#   gradients that push the agent away from high-churn regimes.
-#
-# FIX F6 — Per-user OPEX  [OUGHTON_2021][JOHANSSON_2004]
-#   Added per-subscriber operating expenditure (backhaul, core network,
-#   customer management) at 35,000 KRW/user/month.  Without OPEX, the
-#   model showed an unrealistic 97.7% profit margin; with OPEX, the
-#   margin drops to ~20–35%, matching real operator economics.
-#
-# FIX F7 — Customer Acquisition Cost  [CLV_KUMAR]
-#   Added one-time CAC of 80,000 KRW per new subscriber (subsidies,
-#   marketing, dealer commissions).  This makes the CLV framework
-#   explicit: retention is cheaper than acquisition, so the agent
-#   learns to balance pricing against customer lifetime value.
-#
-# References:
-#   [BERRY_1994]     Berry & Linoff, "Data Mining Techniques," Wiley 1994
-#   [CHURN_SLR]      Ahmad et al., "Churn Prediction SLR," MRQE 2023
-#   [OUGHTON_2021]   Oughton & Frias, "5G Infrastructure Assessment,"
-#                    IEEE Access 2021
-#   [JOHANSSON_2004] Johansson & Nilsson, "Telecom OPEX Modeling," 2004
-#   [CLV_KUMAR]      Kumar & Reinartz, "Customer Relationship
-#                    Management," Springer 2018
-#   [SB3_TIPS]       SB3 RL Tips and Tricks — reward normalization
-#   [HENDERSON_2018] Henderson et al., "Deep RL that Matters," AAAI 2018
-economics:
-  reward_type: "log"
-  # Issue 3: Increased from 50 to 500 so PRB allocation decisions
-  # have meaningful economic impact [CONG_5G_PMC]
-  unit_cost_prb_krw: 500.0
-  profit_scale: 5000000.0       # [HENDERSON_2018] calibrated for reward ∈ [−2, 2]
-  lambda_penalty: 10.0
-  reward_clip: 2.0
+# ── §13  Population ──
+population:
+  N_total: 500
+  N_active_init: 200
+  frac_urllc: 0.20
+  segments:
+    names: ["price_sensitive", "balanced", "qos_sensitive"]
+    proportions: [0.30, 0.45, 0.25]
+    price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
+    qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
+    switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
 
-  # FIX F6: Per-user operating expenditure [OUGHTON_2021][JOHANSSON_2004]
-  opex:
-    per_user_krw: 35000          # monthly OPEX per active subscriber (KRW)
-
-  # FIX F7: Customer acquisition cost [CLV_KUMAR]
-  cac_per_join_krw: 80000        # one-time cost per new subscriber (KRW)
-
-  # Reward shaping weights (M9 + FIX F3/F4/F5)
-  reward_shaping:
-    alpha_retention: 0.15
-    alpha_efficiency: 0.10
-    # FIX F5: alpha_churn 0.40 → 0.80 [CHURN_SLR][BERRY_1994]
-    alpha_churn: 0.80
-    alpha_volatility: 0.10
-    # FIX F3: explicit V_rate penalty [NG_1999]
-    # Issue 5: increased 0.30 → 0.50 for tighter SLA control
-    alpha_vrate: 0.50
-    # FIX F5: Quadratic churn penalty config [BERRY_1994]
-    churn_penalty_quadratic: true
-    churn_quadratic_scale: 10.0
-    churn_thresholds:
-      eMBB: 0.03                 # matches calibration target
-      URLLC: 0.04               # matches calibration target
-
-# --- Section 16: Observation space ---
-observation:
-  # Obs vector dimension is computed at runtime
-  clip_min: -10.0
-  clip_max: 10.0
-
-# --- Section 18: Training [SAC][SB3_SAC][SB3_TIPS] ---
-#
-# FIX: total_timesteps reduced from 150,000 to 75,000.
-#
-# Analysis showed agent convergence (reward plateau within 1σ of final
-# mean) by episode ~500, which corresponds to 25,000 timesteps at
-# 50 steps/episode.  The remaining 125,000 steps produced <2%
-# improvement in mean reward.  Reducing to 75,000 steps (1,500
-# episodes) provides ~3× the convergence budget for exploration +
-# exploitation while cutting training time by 50%.
-#
-# References:
-#   [SAC]            Haarnoja et al., "Soft Actor-Critic," ICML 2018
-#   [HENDERSON_2018] Henderson et al., "Deep RL that Matters," AAAI 2018
+# ── §12  Training  [Haarnoja 2018 — SAC][SB3] ──
 training:
-  total_timesteps: 75000         # reduced from 150K (agent converges by ~25K)
+  total_timesteps: 200000
   learning_rate: 0.0003
   batch_size: 256
   buffer_size: 100000
   gamma: 0.99
   tau: 0.005
-  ent_coef: "auto"
+  ent_coef: "auto"            # [SB3 SAC] automatic entropy tuning
   train_freq: 1
   gradient_steps: 1
-  eval_episodes: 5
-  eval_freq_steps: 5000
-  n_repeats: 3
-  log_interval: 10
+  eval_freq: 10000
+  n_eval_episodes: 5
 
-# --- Section 19: Calibration ---
+# ── §3.2  Observation ──
+observation:
+  dim: 16
+  clip_min: -10.0
+  clip_max: 10.0
+
+# ── Calibration targets ──
 calibration:
-  demand_tolerance: 0.10        # 10% relative tolerance
-  market_tolerance: 0.15        # 15% relative tolerance
-  reward_scale_episodes: 20     # random rollouts for profit_scale
-  max_optim_iter: 500
-
-# --- Artifacts ---
-artifacts:
-  base_dir: "artifacts"
+  demand_tolerance: 0.10
+  churn_target_monthly: 0.03
+  join_target_monthly: 0.05
