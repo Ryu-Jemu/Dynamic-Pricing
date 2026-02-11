@@ -1,328 +1,293 @@
-# 5G O-RAN Network Slicing RL Simulation
+# O-RAN 1-Cell Slicing + Pricing with SB3 SAC (Monthly)
 
-**Dynamic Pricing Optimization using Constrained MDP and SAC**
+Reference-grade simulation for joint network slice pricing and PRB allocation
+using Soft Actor-Critic reinforcement learning.
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## Quick Start
 
-## Overview
+```bash
+chmod +x run.sh && ./run.sh
+```
 
-This project implements a research-ready simulation framework for **5G O-RAN network slicing** with **Three-Part Tariff pricing optimization** using **Constrained Markov Decision Process (CMDP)** and **Soft Actor-Critic (SAC)** reinforcement learning.
-
-### Key Features
-
-- **Standards-Compliant**: 3GPP TR 38.901 channel model, NR PRB tables from 3GPP 38.101
-- **Three-Part Tariff**: Access fee (F) + Allowance (D) + Overage price (p) per slice
-- **CMDP Framework**: Primal-dual Lagrangian optimization with constraint satisfaction
-- **Online User Dynamics**: NHPP/Hawkes arrivals + hazard-based churn with overage burden
-- **Realistic Cost Model**: Energy, spectrum, backhaul decomposition
-- **Calibration Pipeline**: MLE/Bayesian parameter estimation with confidence intervals
+This executes the full pipeline: venv setup → calibration → tests → training → evaluation → report.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Near-RT RIC (O-RAN)                         │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │              Pricing xApp (CMDP-SAC Agent)                │  │
-│  │  • Observation: Users, QoS, Prices, Allowance state       │  │
-│  │  • Action: [F_urllc, p_urllc, F_embb, p_embb]            │  │
-│  │  • Constraints: URLLC/eMBB violation rates                │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ E2 Interface
-┌────────────────────────────▼────────────────────────────────────┐
-│                        gNB (5G Base Station)                    │
-│  ┌────────────────────┐  ┌────────────────────┐                │
-│  │   URLLC Slice      │  │    eMBB Slice      │                │
-│  │   (B2B, 99.999%)   │  │    (B2C, 99.9%)    │                │
-│  └────────────────────┘  └────────────────────┘                │
-│  • 20 MHz @ 30 kHz SCS → 51 PRBs (3GPP 38.101)                 │
-│  • Two-stage scheduling: Slice-level + In-slice PF/Priority    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Installation
-
-### 맥북 (Apple Silicon - 권장)
-
-```bash
-# 한 번에 설치 및 실행
-chmod +x setup_and_run.sh
-./setup_and_run.sh --fast   # 빠른 테스트 (10K 스텝)
-
-# 또는 전체 학습
-./setup_and_run.sh --full   # 전체 학습 (500K 스텝)
-```
-
-### 수동 설치
-
-```bash
-# Clone repository
-git clone <repository-url>
-cd 5G_ORAN_RL_Simulation
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Quick Start (한 번에 실행)
-
-```bash
-# 방법 1: 스크립트 사용 (권장)
-./setup_and_run.sh --fast
-
-# 방법 2: Python 직접 실행
-python run_training.py --timesteps 100000
-
-# 방법 3: 빠른 테스트 (계산량 최적화)
-python run_training.py --timesteps 10000 --fast
-
-# 방법 4: 전체 학습
-python run_training.py --timesteps 500000
-```
-
-### 명령어 옵션
-
-| 옵션 | 설명 | 예시 |
-|------|------|------|
-| `--timesteps`, `-t` | 학습 스텝 수 | `-t 100000` |
-| `--fast`, `-f` | 빠른 모드 (계산량 감소) | `--fast` |
-| `--device`, `-d` | 디바이스 선택 | `-d mps` |
-| `--seed`, `-s` | 랜덤 시드 | `-s 42` |
-
-### 하드웨어 가속
-
-| 환경 | 가속 | 설정 |
-|------|------|------|
-| MacBook (M1/M2/M3) | MPS | 자동 감지 |
-| NVIDIA GPU | CUDA | 자동 감지 |
-| CPU | 없음 | `--device cpu` |
-
-### Requirements
-
-- Python 3.9+
-- numpy >= 1.24.0
-- scipy >= 1.10.0
-- gymnasium >= 0.29.0
-- stable-baselines3 >= 2.2.0
-- torch >= 2.0.0 (MPS 지원)
-- tqdm >= 4.65.0 (진행률 표시)
-- pandas >= 2.0.0
-- matplotlib >= 3.7.0
-
-## Project Structure
-
-```
-5G_ORAN_RL_Simulation/
 ├── config/
-│   └── scenario_config.py      # All parameters (no hardcoded constants)
-├── env/
-│   ├── nr_prb_table.py         # 3GPP 38.101 PRB derivation
-│   ├── channel_38901.py        # 3GPP TR 38.901 UMi channel
-│   ├── qos_fbl.py              # URLLC FBL reliability
-│   ├── qos_embb.py             # eMBB throughput/MCS
-│   ├── scheduler.py            # Two-stage PRB allocation
-│   └── network_slicing_cmdp_env.py  # Gymnasium CMDP environment
-├── models/
-│   ├── tariff_three_part.py    # Three-Part Tariff billing
-│   ├── arrivals_nhpp.py        # NHPP user arrivals
-│   ├── arrivals_hawkes.py      # Hawkes process (optional)
-│   ├── churn_hazard.py         # Hazard-based churn
-│   └── costs.py                # Cost decomposition
-├── training/
-│   └── train_cmdp_sac.py       # Primal-dual Lagrangian SAC
-├── calibration/
-│   ├── fit_demand.py           # Arrival parameter estimation
-│   ├── fit_churn.py            # Churn coefficient estimation
-│   └── fit_energy.py           # Energy model calibration
-├── evaluation/
-│   └── plots.py                # Visualization and analysis
-├── utils/
-│   ├── logger.py               # Logging and metrics tracking
-│   └── helpers.py              # Common utilities
-├── logs/                       # Training logs
-├── results/                    # Evaluation outputs
+│   ├── default.yaml          # All scenario parameters (configurable)
+│   └── calibrated.yaml       # Auto-generated by calibration
+├── src/
+│   ├── models/
+│   │   ├── utils.py          # Config I/O, price bounds, math utilities
+│   │   ├── radio.py          # PRB allocation, congestion model (§10)
+│   │   ├── demand.py         # Log-normal demand with quantile fitting (§9)
+│   │   ├── pools.py          # User pool management with strict invariants (§8)
+│   │   ├── topup.py          # Throttle logic, probabilistic top-up (§11)
+│   │   ├── market.py         # Join/churn with disconfirmation (§13)
+│   │   ├── economics.py      # SLA, energy, profit, reward (§12,14,15)
+│   │   ├── safety.py         # NaN/Inf detection, violation penalties
+│   │   └── calibrate.py      # Demand/market/reward calibration (§19)
+│   ├── envs/
+│   │   └── oran_slicing_env.py   # Gymnasium environment (§16-17)
+│   ├── train_sac.py          # SB3 SAC training (§18)
+│   ├── eval.py               # Multi-repeat evaluation (§18)
+│   └── report.py             # Plots + report.md generation (§18)
+├── tests/
+│   ├── test_invariants.py    # Pool disjointness + conservation (§20)
+│   ├── test_monotonicity.py  # Radio monotone degradation (§20)
+│   ├── test_finite_reward.py # No NaN/Inf under random actions (§20)
+│   └── test_calibration.py   # Calibration target verification (§20)
+├── run.sh                    # End-to-end pipeline (§21)
 ├── requirements.txt
 └── README.md
 ```
 
-## Usage
+## Problem Description
 
-### 1. Configuration
+A single 5G NR base station (100 MHz @ 30 kHz SCS, 273 PRBs) serves two network slices:
 
-Edit `config/scenario_config.py` to customize:
+- **eMBB** (enhanced Mobile Broadband): high-throughput consumer data
+- **URLLC** (Ultra-Reliable Low-Latency): mission-critical services
 
-```python
-# Bandwidth and PRB configuration
-BANDWIDTH_MHZ = 20
-SCS_KHZ = 30  # → 51 PRBs derived from 3GPP table
+An RL agent (SAC) makes three decisions each month:
 
-# Service parameters
-URLLC_LATENCY_DEADLINE_MS = 1.0
-URLLC_TARGET_BLER = 1e-5
-EMBB_TARGET_THROUGHPUT_MBPS = 50.0
+| Action | Description | Range |
+|--------|-------------|-------|
+| `a[0]` | Monthly fee F_eMBB | [0.8×F_min, 1.2×F_max] KRW |
+| `a[1]` | Monthly fee F_URLLC | [0.8×F_min, 1.2×F_max] KRW |
+| `a[2]` | URLLC PRB share ρ_URLLC | [0.05, 0.95] |
 
-# Pricing bounds
-URLLC_FEE_BOUNDS = (40.0, 60.0)  # $/hour
-EMBB_FEE_BOUNDS = (3.0, 8.0)     # $/hour
+The agent optimizes monthly profit (revenue − costs) while maintaining SLA compliance
+and managing user churn through pricing and resource allocation.
 
-# Constraint thresholds
-URLLC_VIOLATION_THRESHOLD = 0.001
-EMBB_VIOLATION_THRESHOLD = 0.01
+## Three-Speed Throughput Model (FIX F1)
+
+A critical architectural fix separating three distinct throughput parameters per plan tier,
+grounded in 3GPP QoS standards and expectation-disconfirmation theory.
+
+### The Problem (V_rate = 1.0 Bug)
+
+In the original design, user expected throughput `T_exp` was set to the post-cap throttle
+speed `v_cap_mbps` (1–5 Mbps) from the start of each month. Since the SLO thresholds were
+set at 10 Mbps (eMBB) and 5 Mbps (URLLC), and `T_act = min(fair_share, T_exp)`, actual
+throughput was structurally capped below the SLO — causing 100% SLA violation regardless
+of agent actions. This made the reward signal uninformative and training ineffective.
+
+### The Fix: Three Speed Parameters
+
+Each plan tier now defines three speeds with the ordering `v_cap < T_exp_base ≤ v_max`:
+
+| Parameter | Role | Example (eMBB standard) | Reference |
+|-----------|------|------------------------|-----------|
+| **v_max_mbps** | Pre-cap peak speed (radio ceiling) | 300 Mbps | [TS23501] §5.7, [TWORLD_18] |
+| **v_cap_mbps** | Post-cap throttle speed | 3.0 Mbps | [TWORLD_18] 속도제한 |
+| **T_exp_base_mbps** | Realistic user expectation | 5.0 Mbps | [OLIVER_1980] |
+
+**v_max_mbps** — The maximum throughput a user can receive before hitting their data cap.
+Used as the throughput ceiling (`T_ceil`) in the radio inner loop: `T_act = min(fair_share, v_max)`.
+This allows users to achieve their fair share of cell capacity without artificial plan-imposed limits.
+
+**v_cap_mbps** — The throttled speed applied only after a user exceeds their monthly data quota
+(`D_u > Q_gb`). Enforced in the environment after the inner loop, not during it.
+Reflects Korean carrier practice of post-cap speed restriction (속도제한) [TWORLD_18].
+
+**T_exp_base_mbps** — The realistic throughput expectation for disconfirmation computation.
+Set to what users actually anticipate based on prior experience, not the advertised maximum.
+Grounded in Oliver's expectation-disconfirmation theory [OLIVER_1980]: satisfaction depends
+on the gap between expected and perceived performance, not absolute levels.
+
+### SLO Recalibration
+
+SLO thresholds recalibrated to be achievable under normal operating conditions:
+
+| Metric | Old Value | New Value | Rationale |
+|--------|-----------|-----------|-----------|
+| SLO_eMBB | 10.0 Mbps | 3.0 Mbps | Fair-share ≈ 3.3 Mbps at N=110, ρ=0.55 |
+| SLO_URLLC | 5.0 Mbps | 2.0 Mbps | Rare violations, high reliability |
+| profit_scale | 724,177 | 5,000,000 | Recalibrated for new profit distribution |
+
+### Plan Catalog (Three-Speed)
+
+**eMBB Plans:**
+
+| Tier | Fee (KRW) | Quota (GB) | v_max | v_cap | T_exp_base |
+|------|-----------|------------|-------|-------|------------|
+| Basic | 55,000 | 12 | 150 Mbps | 1.0 Mbps | 3.0 Mbps |
+| Standard | 69,000 | 50 | 300 Mbps | 3.0 Mbps | 5.0 Mbps |
+| Premium | 89,000 | 200 | 1000 Mbps | 5.0 Mbps | 8.0 Mbps |
+
+**URLLC Plans:**
+
+| Tier | Fee (KRW) | Quota (GB) | v_max | v_cap | T_exp_base |
+|------|-----------|------------|-------|-------|------------|
+| Basic | 40,000 | 5 | 50 Mbps | 0.4 Mbps | 2.0 Mbps |
+| Standard | 55,000 | 15 | 100 Mbps | 1.0 Mbps | 3.0 Mbps |
+| Premium | 75,000 | 40 | 300 Mbps | 3.0 Mbps | 5.0 Mbps |
+
+### How It Works in the Monthly Step
+
+1. **Pre-inner loop**: For each user, compute `T_ceil`:
+   - If `D_u ≤ Q_gb` (under cap): `T_ceil = v_max_mbps`
+   - If `D_u > Q_gb` (over cap): `T_ceil = v_cap_mbps`
+2. **Inner loop** (K=30 steps): `T_act = min(fair_share, T_ceil)` — pre-cap users get
+   full fair-share; post-cap users are throttled
+3. **Post-inner loop**: Disconfirmation computed as `δ = max(0, T_exp_base - T_act_avg)` —
+   moderate gap drives realistic churn, not catastrophic 100% dissatisfaction
+
+## Monthly Step Order (§17 — fixed)
+
+1. **Map action** → fees + PRB share (bounds enforced)
+2. **Join**: new users arrive (Poisson), inactive → active
+3. **Demand**: sample monthly data volumes (log-normal)
+4. **Inner loop** (K=30 micro-steps): compute utilization, throughput, violations
+5. **Aggregate** monthly KPIs
+6. **Top-up** + disconfirmation update
+7. **Churn**: dissatisfied users leave, active → churned
+8. **Profit/reward** computation
+9. **Log** all metrics
+
+## Key Design Decisions
+
+### Price Bounds (±20% exploration)
+Agent-controlled fees range ±20% beyond the plan catalog bounds.
+This is a *learning stabilization assumption* for the scenario — not a market constraint.
+Controlled via `action.price_explore_factor` in config.
+
+### Calibration (§19)
+All numeric parameters are calibrated, not hardcoded:
+
+- **Demand**: log-normal μ, σ fitted to target p50/p90 quantiles [LOGNORMAL_TNET]
+- **Market**: logistic churn offset U_outside solved to match target baseline churn rates (3–4%) [CHURN_SLR]
+- **Reward scale**: profit_scale = p50(|profit|) from random policy rollouts [SB3_TIPS]
+
+### Radio Abstraction
+We use macro capacity proxies (not full PHY MCS/TBS chain).
+Throughput degrades monotonically with load via a congestion function calibrated
+to literature profiles. [CONG_5G_PMC]
+
+### Reward Shaping (M9)
+Phase 3 enhanced reward with auxiliary terms:
+```
+r = f(profit/scale) + α_ret × retention + α_eff × efficiency
+    - α_churn × churn_rate - α_vol × price_volatility - λ × penalty
 ```
 
-### 2. Training
+### Warm-up Price Clamping (M8)
+During early months, fee changes are limited to ±5% (months 1–3) and ±10% (months 4–10)
+to prevent destructive price oscillations during initial exploration.
+
+### Churned User Recycling (D9)
+Users who churn are recycled back to the inactive pool after a 3-month cooldown,
+preventing inactive pool depletion over long episodes.
+
+### Standards-Pinned Constants
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Bandwidth | 100 MHz | TS 38.104 |
+| SCS | 30 kHz | TS 38.104 |
+| PRB total | 273 | TS 38.104 (NRB table) |
+
+## Configuration
+
+All parameters are in `config/default.yaml`. Key sections:
+
+- `radio`: bandwidth, PRB count, cell capacity, congestion
+- `time`: episode length (50 months), inner loop K=30
+- `plans`: eMBB/URLLC plan catalogs with three-speed model
+- `demand`: target quantiles per slice
+- `market`: churn/join parameters, segment sensitivities
+- `training`: SAC hyperparameters (lr, batch size, 150k timesteps)
+- `calibration`: tolerance thresholds
+
+## Device Selection
+
+Prefers MPS (Apple Silicon GPU) if available; falls back to CPU.
+Printed at pipeline start.
+
+## Outputs (per run in `artifacts/<run_id>/`)
+
+| File | Description |
+|------|-------------|
+| `config.yaml` | Config snapshot |
+| `meta.json` | Run metadata (device, timing) |
+| `train_log.csv` | Per-episode training metrics |
+| `eval_monthly.csv` | Per-month eval metrics (all repeats) |
+| `eval_summary.json` | Mean±std across repeats |
+| `best_model/` | Best checkpoint (by eval reward) |
+| `final_model.zip` | Final model after all timesteps |
+| `report.md` | Summary report with plots |
+| `plots/` | PNG plots |
+
+### Plots Generated
+
+1. **Profit / Revenue / Cost** — monthly economic dynamics
+2. **Subscription Fees** — agent pricing decisions by slice
+3. **Active Users** — user pool dynamics
+4. **Joins vs Churns** — market flow balance
+5. **SLA Violation Rates** — compliance tracking
+6. **Reward** — learning signal evolution
+
+## Tests
 
 ```bash
-# Train CMDP-SAC agent
-python -m training.train_cmdp_sac \
-    --total_timesteps 750000 \
-    --seed 42 \
-    --experiment_name my_experiment
-
-# With custom configuration
-python -m training.train_cmdp_sac \
-    --learning_rate 2e-4 \
-    --batch_size 512 \
-    --constraint_threshold_urllc 0.001 \
-    --constraint_threshold_embb 0.01
+python -m pytest tests/ -v
 ```
 
-### 3. Calibration (Optional)
+| Test File | What it Tests | Key Assertions |
+|-----------|---------------|----------------|
+| `test_invariants.py` | Pool disjointness, conservation, step order | T_exp == T_exp_base (not v_cap, not 100) |
+| `test_monotonicity.py` | T_eff decreasing in load, violations non-decreasing | Uses T_ceil parameter interface |
+| `test_finite_reward.py` | No NaN/Inf, action mapping, phase 2 fixes | V_rate < 1.0 under moderate load |
+| `test_calibration.py` | Demand/market/reward calibration targets met | Quantile matching within tolerance |
 
-```bash
-# Fit demand model from data
-python -m calibration.fit_demand \
-    --data_path data/arrivals.csv \
-    --service_type eMBB
+### Three-Speed Model Test Coverage
 
-# Fit churn model
-python -m calibration.fit_churn \
-    --target_annual_rate 0.15
+- `test_three_speed_model_present`: Verifies all users have v_max, v_cap, T_exp_base with correct ordering
+- `test_t_exp_matches_t_exp_base`: T_exp resets to T_exp_base each month (not v_cap)
+- `test_v_max_from_plan`: v_max assigned from plan config, varies across tiers
+- `test_v_rate_not_always_one`: Validates FIX F1 — V_rate < 1.0 achievable under moderate load
+- `test_speed_ordering`: Asserts v_cap < T_exp_base ≤ v_max for all users
 
-# Fit energy model
-python -m calibration.fit_energy \
-    --use_literature
-```
+## Fixes Applied (Summary)
 
-### 4. Evaluation
-
-```bash
-# Generate evaluation report
-python -m evaluation.plots \
-    --log_dir logs/my_experiment \
-    --output_dir results/
-```
-
-## Experiments
-
-### Baselines
-
-1. **Fixed Pricing**: Static Three-Part Tariff (no RL)
-2. **Penalty SAC**: Fixed λ weights for constraints
-3. **CMDP SAC**: Primal-dual with learned multipliers (main method)
-
-### Ablations
-
-- NHPP vs Hawkes arrivals
-- With/without allowance state in observation
-- With/without overage term in churn model
-- Cost model variants: energy-only vs full decomposition
-
-### Metrics
-
-| Metric | Description |
-|--------|-------------|
-| Profit | Revenue - Cost per episode |
-| URLLC Violation | % hours violating 99.999% reliability |
-| eMBB Violation | % hours below throughput target |
-| Churn Rate | User departures per hour |
-| Constraint Satisfaction | % episodes meeting all constraints |
-
-## Technical Details
-
-### Three-Part Tariff
-
-For each slice s ∈ {URLLC, eMBB}:
-
-```
-Bill_i(s,t) = F_s × α_F + max(0, U_i - D_remaining) × p_s × α_p
-```
-
-Where:
-- F_s: Base access fee
-- D_remaining: Remaining allowance in billing cycle
-- p_s: Overage price per MB
-- α_F, α_p: RL-controlled price factors ∈ [0.8, 1.2]
-
-### CMDP Formulation
-
-```
-max E[Σ γᵗ (R_t - C_t)]
-s.t. E[Viol_URLLC] ≤ δ_u
-     E[Viol_eMBB] ≤ δ_e
-```
-
-Solved via Lagrangian relaxation:
-```
-L(π, λ) = J(π) - λ_u × (E[V_u] - δ_u) - λ_e × (E[V_e] - δ_e)
-```
-
-### Channel Model
-
-3GPP TR 38.901 UMi-Street Canyon:
-- Path loss: PL = 32.4 + 21×log₁₀(d₃D) + 20×log₁₀(fc)
-- Shadowing: σ_SF = 4.0 dB (LOS), 7.82 dB (NLOS)
-- LOS probability: P_LOS = min(18/d, 1) × (1 - exp(-d/36)) + exp(-d/36)
-
-### QoS Models
-
-**URLLC (Finite Block Length)**:
-```
-ε = Q(√n × (C - R) / √V)
-```
-Where n = blocklength, C = Shannon capacity, V = channel dispersion.
-
-**eMBB (Throughput)**:
-```
-Throughput = PRB_allocated × SE × BW_per_PRB
-SE = f(SINR) via MCS table (3GPP 38.214)
-```
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@article{yourname2026oran,
-  title={Dynamic Pricing for 5G O-RAN Network Slicing using
-         Constrained Reinforcement Learning},
-  author={Your Name},
-  journal={IEEE Transactions on Mobile Computing},
-  year={2026}
-}
-```
+| Fix ID | Issue | Solution | Reference |
+|--------|-------|----------|-----------|
+| **FIX F1** | V_rate = 1.0 (SLO structurally unachievable) | Three-speed model: v_max / v_cap / T_exp_base | [TS23501], [OLIVER_1980] |
+| FIX M1 | Step order (join/churn timing) | §17-compliant: join→demand→inner→topup→churn | [SB3_TIPS] |
+| FIX M2 | Missing top-up model | TopUpModel integrated in monthly step | [TWORLD_18] |
+| FIX M3 | SLA violation computed from aggregates | Per-step fraction: V = (#steps < SLO) / K | [VERIZON_SLA] |
+| FIX M4 | Single rho_util for both slices | Per-slice utilization tracking | [TS28554] |
+| FIX M5 | Action mapping order | a[0]→F_eMBB, a[1]→F_URLLC, a[2]→ρ per §6.1 | [SB3_SAC] |
+| FIX M7 | T_exp hardcoded to 100 | Plan-based T_exp_base from config | [OLIVER_1980] |
+| M8 | Price oscillation during exploration | Warm-up clamping (±5%/±10%) | [HENDERSON_2018] |
+| M9 | Sparse reward signal | Shaped reward with retention/efficiency/churn/volatility | [SB3_TIPS] |
+| D9 | Inactive pool depletion | Churned user recycling after cooldown | [CHURN_SLR] |
+| D10 | Missing safety validation | validate_state penalty in reward | [SB3_TIPS] |
 
 ## References
 
-1. 3GPP TS 38.101-1: NR User Equipment radio transmission and reception
-2. 3GPP TR 38.901: Study on channel model for frequencies from 0.5 to 100 GHz
-3. 3GPP TS 38.214: NR Physical layer procedures for data
-4. Haarnoja et al., "Soft Actor-Critic," ICML 2018
-5. Altman, "Constrained Markov Decision Processes," 1999
-6. Fibich et al., "Optimal Three-Part Tariff Plans," Operations Research 2017
+| Tag | Source |
+|-----|--------|
+| [SAC] | Haarnoja et al., *Soft Actor-Critic*, ICML 2018 |
+| [SB3_SAC] | Stable-Baselines3 SAC documentation |
+| [SB3_TIPS] | SB3 RL Tips and Tricks |
+| [TS23501] | 3GPP TS 23.501 §5.7 — System architecture; QoS model, network slicing |
+| [TS38104] | 3GPP TS 38.104 — NR Base Station radio transmission and reception |
+| [TS38214] | 3GPP TS 38.214 — NR Physical layer procedures for data |
+| [TS28554] | 3GPP TS 28.554 v17.6.0 — 5G end-to-end KPI definitions |
+| [TS28541] | 3GPP TS 28.541 — NRM for network slicing |
+| [GSMA_NG116] | GSMA PRD NG.116 — Generic network slice template |
+| [OLIVER_1980] | Oliver, *Cognitive Model of the Antecedents and Consequences of Satisfaction Decisions*, JMR 1980 |
+| [HENDERSON_2018] | Henderson et al., *Deep RL that Matters*, AAAI 2018 |
+| [LOGNORMAL_TNET] | Mobile data traffic modeling, IEEE/ACM Trans. Netw. 2021 |
+| [CHURN_SLR] | Telecom churn determinants SLR, Springer 2023 |
+| [DISCONF_PDF] | Disconfirmation in continuance, Int. J. Contents 2021 |
+| [BS_POWER] | Base station power consumption models |
+| [CONG_5G_PMC] | 5G congestion and throughput degradation, PMC 2023 |
+| [VERIZON_SLA] | Verizon SLA credit tiers (MRC-based) |
+| [TWORLD_18] | T World plan page (post-cap speed restriction / 속도제한) |
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-- 3GPP for standardization documents
-- O-RAN Alliance for architecture specifications
-- Stable-Baselines3 team for RL implementations
+Research / educational use. Not for production deployment.
