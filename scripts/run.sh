@@ -3,12 +3,17 @@
 # O-RAN 3-Part Tariff Pricing — End-to-End Pipeline  (Requirement 15)
 #
 # Steps:
-#   0) Create venv & install dependencies
+#   0) Create venv & install dependencies (with SB3 verification)
 #   1) Generate synthetic user CSV
 #   2) Run unit tests
 #   3) Train SAC agent
 #   4) Evaluate & export logs + CLV
 #   5) Generate dashboard
+#
+# REVISION 3 — Fixes:
+#   [F1] pip install no longer suppresses errors (was hiding SB3 failure)
+#   [F2] Explicit SB3 import check before training
+#   [F3] Fallback: attempt SB3 install from PyPI if missing
 #
 # Usage:
 #   chmod +x scripts/run.sh && ./scripts/run.sh
@@ -33,14 +38,62 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/activate
 pip install --upgrade pip -q
-pip install -r requirements.txt -q 2>&1 | tail -3
-echo "Dependencies installed."
 
-# Device info
+# [F1] FIX: Do NOT suppress pip output — show errors clearly
+echo "Installing dependencies..."
+pip install -r requirements.txt 2>&1 | tee /tmp/pip_install.log | tail -5
+echo ""
+
+# [F2] FIX: Verify SB3 is importable before proceeding
+echo "Verifying critical packages..."
 python -c "
-from oran3pt.utils import select_device
-print(f'  PyTorch device: {select_device()}')
-"
+import sys
+errors = []
+
+# Check SB3
+try:
+    import stable_baselines3
+    print(f'  ✅ stable-baselines3 {stable_baselines3.__version__}')
+except ImportError as e:
+    errors.append(f'stable-baselines3: {e}')
+    print(f'  ❌ stable-baselines3 MISSING: {e}')
+
+# Check PyTorch
+try:
+    import torch
+    from oran3pt.utils import select_device
+    dev = select_device()
+    print(f'  ✅ torch {torch.__version__} (device: {dev})')
+except ImportError as e:
+    errors.append(f'torch: {e}')
+    print(f'  ❌ torch MISSING: {e}')
+
+# Check gymnasium
+try:
+    import gymnasium
+    print(f'  ✅ gymnasium {gymnasium.__version__}')
+except ImportError as e:
+    errors.append(f'gymnasium: {e}')
+    print(f'  ❌ gymnasium MISSING: {e}')
+
+if errors:
+    print()
+    print('  ⚠️  Some packages failed to install.')
+    print('  Attempting targeted install of missing packages...')
+    sys.exit(1)
+else:
+    print('  All critical packages verified.')
+" || {
+    # [F3] FIX: Attempt targeted reinstall of SB3
+    echo ""
+    echo "Attempting targeted SB3 install..."
+    pip install "stable-baselines3[extra]>=2.3.0" --force-reinstall 2>&1 | tail -5
+    python -c "import stable_baselines3; print(f'  ✅ SB3 {stable_baselines3.__version__} installed successfully')" || {
+        echo "  ❌ SB3 install failed. Training will use random baseline."
+        echo "  Common causes: incompatible torch version, missing C++ compiler"
+        echo "  Try: pip install stable-baselines3 --verbose"
+    }
+}
 echo ""
 
 # ── Step 1: Generate user CSV ──
@@ -66,13 +119,15 @@ echo ""
 echo "===== Step 4: Evaluation ====="
 MODEL_PATH="outputs/best_model.zip"
 if [ -f "$MODEL_PATH" ]; then
+    echo "Found trained model: $MODEL_PATH"
     python -m oran3pt.eval \
         --config config/default.yaml \
         --users data/users_init.csv \
         --model "$MODEL_PATH" \
         --repeats 5
 else
-    echo "No trained model found; evaluating with random policy"
+    echo "⚠️  No trained model found at $MODEL_PATH"
+    echo "   Evaluating with random policy (results will be baseline only)"
     python -m oran3pt.eval \
         --config config/default.yaml \
         --users data/users_init.csv \

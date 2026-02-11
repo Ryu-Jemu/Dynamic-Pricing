@@ -1,6 +1,9 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
+REVISION 3 — Fixes:
+  [F3] Fixed pandas FutureWarning in CLV groupby.apply (include_groups=False)
+
 Outputs:
   outputs/rollout_log.csv   — per-step metrics across repeats
   outputs/eval_summary.csv  — aggregate statistics
@@ -104,8 +107,11 @@ def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
 
     # Estimate monthly cash-flow per user ≈ monthly profit / N_active
     T = cfg["time"]["steps_per_cycle"]
+
+    # [F3] FIX: Added include_groups=False to avoid pandas FutureWarning
     monthly_profit = df.groupby("repeat").apply(
-        lambda g: g.groupby(g["step"].apply(lambda s: (s - 1) // T))["profit"].sum().mean()
+        lambda g: g.groupby(g["step"].apply(lambda s: (s - 1) // T))["profit"].sum().mean(),
+        include_groups=False,
     )
     mean_monthly_profit = float(monthly_profit.mean())
 

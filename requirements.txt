@@ -1,18 +1,25 @@
 # 5G O-RAN 3-Part Tariff Pricing — SB3 SAC
-# RL
-stable-baselines3>=2.3.0
+# REVISION 3 — [F1] Changed to sb3[extra] for complete dependencies
+
+# RL — [F1] use [extra] to pull in tensorboard, autorom, etc.
+stable-baselines3[extra]>=2.3.0
 gymnasium>=0.29.0
+
 # Scientific
 numpy>=1.24.0
 scipy>=1.11.0
 pandas>=2.0.0
+
 # Config
 pyyaml>=6.0
+
 # Plotting / dashboard
 matplotlib>=3.7.0
 streamlit>=1.30.0
 plotly>=5.18.0
+
 # Progress
 tqdm>=4.65.0
+
 # PyTorch (MPS on Apple Silicon)
 torch>=2.0.0

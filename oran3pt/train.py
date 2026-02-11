@@ -1,6 +1,10 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
+REVISION 3 — Fixes:
+  [F1] Explicit SB3 import diagnostic (not silent fallback)
+  [F2] Structured logging of training metrics
+
 Features:
   - Automatic device selection: MPS (Apple) → CUDA → CPU  [MPS_PYTORCH]
   - ent_coef="auto"  [SB3 SAC documentation]
@@ -15,6 +19,8 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +31,17 @@ from .utils import load_config, select_device
 from .env import OranSlicingPricingEnv
 
 logger = logging.getLogger("oran3pt.train")
+
+
+# [F1] Check SB3 availability at module level with diagnostic info
+_SB3_AVAILABLE = False
+_SB3_IMPORT_ERROR = None
+try:
+    from stable_baselines3 import SAC
+    from stable_baselines3.common.callbacks import BaseCallback
+    _SB3_AVAILABLE = True
+except ImportError as e:
+    _SB3_IMPORT_ERROR = str(e)
 
 
 class CSVLogger:
@@ -62,7 +79,11 @@ def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
     csvlog = CSVLogger(csv_path)
     rewards: List[float] = []
 
-    for step in tqdm(range(total_steps), desc="Random baseline"):
+    for step in tqdm(
+        range(total_steps),
+        desc="Random baseline",
+        disable=not _should_render_progress_bar(),
+    ):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
         csvlog.log(info)
@@ -75,6 +96,13 @@ def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
         "mean_reward": float(np.mean(rewards)),
         "std_reward": float(np.std(rewards)),
     }
+
+
+def _should_render_progress_bar() -> bool:
+    """Render progress bars only on interactive TTY terminals."""
+    if os.environ.get("CI"):
+        return False
+    return sys.stderr.isatty()
 
 
 def train(cfg: Dict[str, Any],
@@ -92,24 +120,43 @@ def train(cfg: Dict[str, Any],
 
     csv_path = str(out / "train_log.csv")
 
+    # [F1] FIX: Explicit check with clear error message
+    if not _SB3_AVAILABLE:
+        logger.error(
+            "═══════════════════════════════════════════════════════════\n"
+            "  stable-baselines3 is NOT installed.\n"
+            "  Import error: %s\n"
+            "  \n"
+            "  To fix, run:\n"
+            "    pip install 'stable-baselines3[extra]>=2.3.0'\n"
+            "  \n"
+            "  Falling back to random baseline (NO LEARNING).\n"
+            "═══════════════════════════════════════════════════════════",
+            _SB3_IMPORT_ERROR
+        )
+        stats = _run_random_baseline(cfg, total_timesteps, csv_path,
+                                     users_csv=users_csv)
+        logger.info("Random baseline stats: %s", stats)
+        return out / "train_log.csv"
+
+    # SB3 is available — proceed with SAC training
+    logger.info("SB3 available — training SAC for %d timesteps", total_timesteps)
+
+    env = OranSlicingPricingEnv(cfg, users_csv=users_csv)
+    csvlog = CSVLogger(csv_path)
+
+    class _LogCallback(BaseCallback):
+        def __init__(self, csvl: CSVLogger):
+            super().__init__()
+            self.csvl = csvl
+
+        def _on_step(self) -> bool:
+            infos = self.locals.get("infos", [])
+            if infos:
+                self.csvl.log(infos[0])
+            return True
+
     try:
-        from stable_baselines3 import SAC
-        from stable_baselines3.common.callbacks import BaseCallback
-
-        env = OranSlicingPricingEnv(cfg, users_csv=users_csv)
-        csvlog = CSVLogger(csv_path)
-
-        class _LogCallback(BaseCallback):
-            def __init__(self, csvl: CSVLogger):
-                super().__init__()
-                self.csvl = csvl
-
-            def _on_step(self) -> bool:
-                infos = self.locals.get("infos", [])
-                if infos:
-                    self.csvl.log(infos[0])
-                return True
-
         model = SAC(
             "MlpPolicy", env,
             learning_rate=tc.get("learning_rate", 3e-4),
@@ -126,19 +173,21 @@ def train(cfg: Dict[str, Any],
 
         cb = _LogCallback(csvlog)
         model.learn(total_timesteps=total_timesteps,
-                    callback=cb, progress_bar=True)
+                    callback=cb, progress_bar=_should_render_progress_bar())
 
         model_path = out / "best_model"
         model.save(str(model_path))
         csvlog.close()
-        logger.info("Model saved → %s", model_path)
+        logger.info("Model saved → %s.zip", model_path)
         return model_path
 
-    except ImportError:
-        logger.warning("SB3 not installed — running random baseline.")
+    except Exception as e:
+        csvlog.close()
+        logger.error("SAC training failed: %s", e)
+        logger.info("Falling back to random baseline.")
         stats = _run_random_baseline(cfg, total_timesteps, csv_path,
                                      users_csv=users_csv)
-        logger.info("Random baseline: %s", stats)
+        logger.info("Random baseline stats: %s", stats)
         return out / "train_log.csv"
 
 
@@ -151,6 +200,14 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO,
                         format="[%(asctime)s][%(name)s] %(message)s")
+
+    # [F1] Print SB3 availability at startup
+    if _SB3_AVAILABLE:
+        import stable_baselines3
+        logger.info("SB3 version: %s", stable_baselines3.__version__)
+    else:
+        logger.warning("SB3 NOT available: %s", _SB3_IMPORT_ERROR)
+
     cfg = load_config(args.config)
     users_csv = args.users if Path(args.users).exists() else None
     train(cfg, users_csv=users_csv, output_dir=args.output)

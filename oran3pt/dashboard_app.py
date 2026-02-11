@@ -1,6 +1,10 @@
 """
 Streamlit evaluation dashboard (Requirement 14).
 
+REVISION 3 — Fixes:
+  [F4] Replaced deprecated `use_container_width=True` with `width="stretch"`
+       (Streamlit deprecation after 2025-12-31)
+
 Panels:
   1. Profit / Revenue / Cost time series
   2. Active users / Join / Churn
@@ -146,7 +150,8 @@ def _run_streamlit(csv_path: str) -> None:
     fig.add_trace(go.Scatter(x=g.index, y=g["cost_total"]/1e6, name="Cost", line=dict(color=RED)))
     fig.add_trace(go.Scatter(x=g.index, y=g["profit"]/1e6, name="Profit", line=dict(color=GREEN)))
     fig.update_layout(xaxis_title="Step", yaxis_title="M KRW", height=350)
-    st.plotly_chart(fig, use_container_width=True)
+    # [F4] FIX: Replaced deprecated use_container_width with width
+    st.plotly_chart(fig, width="stretch")
 
     # ── P2 / P3 side by side ──
     c1, c2 = st.columns(2)
@@ -157,7 +162,7 @@ def _run_streamlit(csv_path: str) -> None:
         fig2.add_trace(go.Scatter(x=g.index, y=g["n_join"], name="Joins", line=dict(color=GREEN, dash="dot")), secondary_y=True)
         fig2.add_trace(go.Scatter(x=g.index, y=g["n_churn"], name="Churns", line=dict(color=RED, dash="dot")), secondary_y=True)
         fig2.update_layout(height=300)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     with c2:
         st.subheader("P3  QoS Violation Probability")
@@ -165,7 +170,7 @@ def _run_streamlit(csv_path: str) -> None:
         fig3.add_trace(go.Scatter(x=g.index, y=g["pviol_U"], name="p_viol URLLC", line=dict(color=RED)))
         fig3.add_trace(go.Scatter(x=g.index, y=g["pviol_E"], name="p_viol eMBB", line=dict(color=BLUE)))
         fig3.update_layout(yaxis_range=[0, 1], height=300)
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")
 
     # ── P4: Action trajectories ──
     st.subheader("P4  Action Trajectories")
@@ -177,7 +182,7 @@ def _run_streamlit(csv_path: str) -> None:
             fig_a = go.Figure()
             fig_a.add_trace(go.Scatter(x=g.index, y=g[col], line=dict(color=color)))
             fig_a.update_layout(xaxis_title="Step", yaxis_title=col, height=250)
-            st.plotly_chart(fig_a, use_container_width=True)
+            st.plotly_chart(fig_a, width="stretch")
 
     # ── P5 / P6: Distributions ──
     c1, c2 = st.columns(2)
@@ -186,13 +191,13 @@ def _run_streamlit(csv_path: str) -> None:
         fig5 = go.Figure(data=[go.Histogram(x=df["profit"]/1e6, nbinsx=50,
                                              marker_color=GREEN, opacity=0.75)])
         fig5.update_layout(xaxis_title="Profit (M KRW)", height=300)
-        st.plotly_chart(fig5, use_container_width=True)
+        st.plotly_chart(fig5, width="stretch")
     with c2:
         st.subheader("P6  ρ_U Distribution")
         fig6 = go.Figure(data=[go.Histogram(x=df["rho_U"], nbinsx=50,
                                              marker_color=CYAN, opacity=0.75)])
         fig6.update_layout(xaxis_title="ρ_U", height=300)
-        st.plotly_chart(fig6, use_container_width=True)
+        st.plotly_chart(fig6, width="stretch")
 
     # ── P7: CLV table ──
     clv_path = Path(csv_path).parent / "clv_report.csv"
