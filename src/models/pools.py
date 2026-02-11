@@ -103,6 +103,7 @@ class User:
 
 class UserPoolManager:
     """Manages the three disjoint user pools."""
+    _init_log_emitted: bool = False
 
     def __init__(self) -> None:
         self._inactive: Dict[int, User] = {}
@@ -301,8 +302,15 @@ class UserPoolManager:
         _make_users(n_inactive_urllc, "URLLC", "inactive")
 
         manager.assert_invariants()
-        logger.info(
-            "Pools initialized: active(eMBB=%d, URLLC=%d), inactive=%d",
-            N0_eMBB, N0_URLLC, inactive_size,
-        )
+        if not cls._init_log_emitted:
+            logger.info(
+                "Pools initialized: active(eMBB=%d, URLLC=%d), inactive=%d",
+                N0_eMBB, N0_URLLC, inactive_size,
+            )
+            cls._init_log_emitted = True
+        else:
+            logger.debug(
+                "Pools initialized: active(eMBB=%d, URLLC=%d), inactive=%d",
+                N0_eMBB, N0_URLLC, inactive_size,
+            )
         return manager
