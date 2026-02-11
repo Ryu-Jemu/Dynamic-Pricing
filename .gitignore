@@ -49,6 +49,7 @@ htmlcov/
 *.swp
 *.swo
 .DS_Store
+**/.DS_Store
 
 # ============================================================
 # Packaging / build outputs
