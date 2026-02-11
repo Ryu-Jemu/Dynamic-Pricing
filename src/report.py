@@ -151,227 +151,269 @@ def generate_report(run_dir: str) -> None:
         logger.warning("matplotlib not available; skipping plots")
         return
 
-    fig, axes = plt.subplots(3, 2, figsize=(16, 16))
-    fig.suptitle("O-RAN Slicing + Pricing — Evaluation Dashboard",
-                 fontsize=15, fontweight="bold", y=0.98)
-
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 1: Convergence Tracking (Reward + Profit dual-axis)
-    # ══════════════════════════════════════════════════════════════════
-    ax1 = axes[0, 0]
-    _setup_axes_style(ax1, "① Convergence: Reward & Profit",
-                      "Month", "Reward")
-
-    # Per-repeat reward traces (faded)
-    for rep in df["repeat"].unique():
-        rd = df[df["repeat"] == rep]
-        ax1.plot(rd["month"], rd["reward"], alpha=0.2,
-                 color=COLORS["blue"], linewidth=0.8)
-
-    # Rolling mean reward
-    window = max(3, len(monthly_mean) // 10)
-    reward_roll = monthly_mean["reward"].rolling(window, min_periods=1).mean()
-    ax1.plot(monthly_mean.index, reward_roll,
-             color=COLORS["blue"], linewidth=2.5, label="Reward (rolling)")
-
-    # Dual axis: profit
-    ax1b = ax1.twinx()
-    profit_roll = monthly_mean["profit"].rolling(window, min_periods=1).mean()
-    ax1b.plot(monthly_mean.index, profit_roll / 1e6,
-              color=COLORS["orange"], linewidth=2.0, linestyle="--",
-              label="Profit (M₩, rolling)")
-    ax1b.set_ylabel("Profit (M KRW)", fontsize=10, color=COLORS["orange"])
-    ax1b.tick_params(axis="y", labelcolor=COLORS["orange"], labelsize=9)
-    ax1b.spines["top"].set_visible(False)
-
-    # Combined legend
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax1b.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2,
-               loc="lower right", fontsize=8, framealpha=0.8)
-
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 2: Churn Analysis (per-slice rate vs targets)
-    # ══════════════════════════════════════════════════════════════════
-    ax2 = axes[0, 1]
-    _setup_axes_style(ax2, "② Churn Rate vs Calibration Targets",
-                      "Month", "Churn Rate")
-
-    # Compute per-month churn rate
-    for s, color, target in [("eMBB", COLORS["blue"], 0.03),
-                              ("URLLC", COLORS["red"], 0.04)]:
-        churn_col = f"churns_{s}"
-        n_col = f"N_active_{s}"
-        if churn_col in monthly_mean.columns and n_col in monthly_mean.columns:
-            churn_rate = monthly_mean[churn_col] / monthly_mean[n_col].clip(lower=1)
-            ax2.plot(monthly_mean.index, churn_rate,
-                     color=color, linewidth=1.8, label=f"{s} actual")
-            ax2.axhline(y=target, color=color, linewidth=1.2,
-                        linestyle=":", alpha=0.7, label=f"{s} target ({target:.0%})")
-
-    ax2.set_ylim(bottom=0)
-    ax2.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0%}"))
-    ax2.legend(fontsize=8, loc="upper right", framealpha=0.8)
-
-    # Shade violation zone
-    ax2.axhspan(0.04, ax2.get_ylim()[1] if ax2.get_ylim()[1] > 0.04 else 0.10,
-                alpha=0.08, color=COLORS["red"], label="_nolegend_")
-
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 3: Cost Breakdown (stacked area)
-    # ══════════════════════════════════════════════════════════════════
-    ax3 = axes[1, 0]
-    _setup_axes_style(ax3, "③ Monthly Cost Breakdown",
-                      "Month", "Cost (M KRW)")
-
+    fig, axes = plt.subplots(4, 3, figsize=(22, 20))
+    fig.suptitle("O-RAN Slicing + Pricing — Dense Evaluation Dashboard",
+                 fontsize=17, fontweight="bold", y=0.995)
     months = monthly_mean.index
+    window = max(3, len(monthly_mean) // 12)
 
-    # Build cost components (use available columns)
-    cost_components = {}
-    cost_colors = []
-    cost_labels = []
+    def _has(*cols: str) -> bool:
+        return all(c in monthly_mean.columns for c in cols)
 
-    if "cost_opex" in monthly_mean.columns:
-        cost_components["OPEX"] = monthly_mean["cost_opex"].values / 1e6
-        cost_colors.append(COLORS["blue"])
-        cost_labels.append("OPEX [F6]")
+    def _mark_unavailable(ax, title: str) -> None:
+        _setup_axes_style(ax, title, "Month", "Value")
+        ax.text(
+            0.5, 0.5, "No compatible columns in eval.csv",
+            ha="center", va="center", fontsize=10,
+            transform=ax.transAxes, color=COLORS["gray"],
+        )
 
-    if "cost_cac" in monthly_mean.columns:
-        cost_components["CAC"] = monthly_mean["cost_cac"].values / 1e6
-        cost_colors.append(COLORS["orange"])
-        cost_labels.append("CAC [F7]")
+    # P1 KPI snapshot (text card)
+    ax = axes[0, 0]
+    ax.set_axis_off()
+    last_month = int(df["month"].max())
+    final_month_df = df[df["month"] == last_month]
+    rev_final = final_month_df["revenue"].mean() if "revenue" in final_month_df else np.nan
+    profit_final = final_month_df["profit"].mean() if "profit" in final_month_df else np.nan
+    cost_final = final_month_df["cost_total"].mean() if "cost_total" in final_month_df else np.nan
+    margin_final = (
+        (profit_final / max(rev_final, 1.0)) * 100.0
+        if np.isfinite(rev_final) and np.isfinite(profit_final) else np.nan
+    )
+    kpi_lines = [
+        "P1 KPI Snapshot",
+        f"Records          : {len(df):,}",
+        f"Repeats          : {df['repeat'].nunique()}",
+        f"Months           : {int(df['month'].min())}..{last_month}",
+        "",
+        f"Final Revenue    : {rev_final/1e6:,.2f} M KRW" if np.isfinite(rev_final) else "Final Revenue    : N/A",
+        f"Final Cost       : {cost_final/1e6:,.2f} M KRW" if np.isfinite(cost_final) else "Final Cost       : N/A",
+        f"Final Profit     : {profit_final/1e6:,.2f} M KRW" if np.isfinite(profit_final) else "Final Profit     : N/A",
+        f"Final Margin     : {margin_final:,.2f} %" if np.isfinite(margin_final) else "Final Margin     : N/A",
+        "",
+        f"Reward Mean±Std  : {df['reward'].mean():.4f} ± {df['reward'].std():.4f}" if "reward" in df else "Reward Mean±Std  : N/A",
+        f"Profit Mean±Std  : {df['profit'].mean()/1e6:,.2f} ± {df['profit'].std()/1e6:,.2f} M KRW" if "profit" in df else "Profit Mean±Std  : N/A",
+    ]
+    ax.text(
+        0.02, 0.98, "\n".join(kpi_lines), ha="left", va="top",
+        fontsize=10.5, family="monospace",
+        bbox={"facecolor": "#F7F7F7", "edgecolor": COLORS["lightgray"], "pad": 10},
+        transform=ax.transAxes,
+    )
 
-    # Derive energy and SLA from total if individual columns missing
-    # Use revenue - profit = cost_total for reference
-    if "cost_total" in monthly_mean.columns:
-        total_cost = monthly_mean["cost_total"].values / 1e6
-        accounted = sum(cost_components.values()) if cost_components else np.zeros(len(months))
-        remaining = total_cost - accounted
-        remaining = np.maximum(remaining, 0)
-
-        cost_components["Energy+SLA+Resource"] = remaining
-        cost_colors.append(COLORS["green"])
-        cost_labels.append("Energy+SLA+Resource")
-
-    if cost_components:
-        stacked = np.row_stack(list(cost_components.values()))
-        ax3.stackplot(months, stacked, labels=cost_labels,
-                      colors=cost_colors, alpha=0.7)
-        ax3.legend(fontsize=8, loc="upper left", framealpha=0.8)
+    # P2 Reward + Profit convergence
+    ax = axes[0, 1]
+    if _has("reward", "profit"):
+        _setup_axes_style(ax, "P2 Convergence: Reward + Profit", "Month", "Reward")
+        for rep in df["repeat"].unique():
+            rd = df[df["repeat"] == rep]
+            ax.plot(rd["month"], rd["reward"], alpha=0.15, color=COLORS["blue"], linewidth=0.8)
+        reward_roll = monthly_mean["reward"].rolling(window, min_periods=1).mean()
+        ax.plot(months, reward_roll, color=COLORS["blue"], linewidth=2.4, label="Reward rolling")
+        ax2 = ax.twinx()
+        profit_roll = monthly_mean["profit"].rolling(window, min_periods=1).mean()
+        ax2.plot(months, profit_roll / 1e6, color=COLORS["orange"], linewidth=2.0, linestyle="--", label="Profit rolling")
+        ax2.set_ylabel("Profit (M KRW)", color=COLORS["orange"], fontsize=10)
+        ax2.tick_params(axis="y", labelcolor=COLORS["orange"], labelsize=9)
+        l1, lb1 = ax.get_legend_handles_labels()
+        l2, lb2 = ax2.get_legend_handles_labels()
+        ax.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="lower right", framealpha=0.85)
     else:
-        # Fallback: single cost line
-        if "cost_total" in monthly_mean.columns:
-            ax3.plot(months, monthly_mean["cost_total"] / 1e6,
-                     color=COLORS["red"], linewidth=2, label="Total Cost")
-            ax3.legend(fontsize=8)
+        _mark_unavailable(ax, "P2 Convergence: Reward + Profit")
 
-    ax3.set_ylim(bottom=0)
+    # P3 Economic flow: revenue/cost/profit
+    ax = axes[0, 2]
+    if _has("revenue", "cost_total", "profit"):
+        _setup_axes_style(ax, "P3 Revenue vs Cost vs Profit", "Month", "M KRW")
+        rev = monthly_mean["revenue"] / 1e6
+        cost = monthly_mean["cost_total"] / 1e6
+        profit = monthly_mean["profit"] / 1e6
+        ax.plot(months, rev, color=COLORS["blue"], linewidth=2.0, label="Revenue")
+        ax.plot(months, cost, color=COLORS["red"], linewidth=2.0, label="Cost")
+        ax.plot(months, profit, color=COLORS["green"], linewidth=1.8, linestyle="-.", label="Profit")
+        ax.fill_between(months, 0, profit, where=(profit >= 0), alpha=0.12, color=COLORS["green"])
+        ax.fill_between(months, 0, profit, where=(profit < 0), alpha=0.12, color=COLORS["red"])
+        ax.axhline(0.0, color=COLORS["gray"], linewidth=0.8, linestyle=":")
+        ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P3 Revenue vs Cost vs Profit")
 
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 4: PRB Efficiency (utilization + allocation)
-    # ══════════════════════════════════════════════════════════════════
-    ax4 = axes[1, 1]
-    _setup_axes_style(ax4, "④ PRB Utilization & URLLC Allocation",
-                      "Month", "Utilization / Share")
+    # P4 Fee policy + spread
+    ax = axes[1, 0]
+    if _has("fee_eMBB", "fee_URLLC"):
+        _setup_axes_style(ax, "P4 Subscription Fees + Spread", "Month", "Fee (KRW)")
+        fee_e = monthly_mean["fee_eMBB"]
+        fee_u = monthly_mean["fee_URLLC"]
+        ax.plot(months, fee_e, color=COLORS["blue"], linewidth=2.0, label="fee eMBB")
+        ax.plot(months, fee_u, color=COLORS["red"], linewidth=2.0, label="fee URLLC")
+        spread = fee_u - fee_e
+        ax2 = ax.twinx()
+        ax2.plot(months, spread, color=COLORS["purple"], linewidth=1.6, linestyle="--", label="URLLC - eMBB")
+        ax2.set_ylabel("Spread (KRW)", fontsize=10, color=COLORS["purple"])
+        ax2.tick_params(axis="y", labelcolor=COLORS["purple"], labelsize=9)
+        l1, lb1 = ax.get_legend_handles_labels()
+        l2, lb2 = ax2.get_legend_handles_labels()
+        ax.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P4 Subscription Fees + Spread")
 
-    if "rho_util_eMBB" in monthly_mean.columns:
-        ax4.plot(months, monthly_mean["rho_util_eMBB"],
-                 color=COLORS["blue"], linewidth=1.8, label="ρ_util eMBB")
-    if "rho_util_URLLC" in monthly_mean.columns:
-        ax4.plot(months, monthly_mean["rho_util_URLLC"],
-                 color=COLORS["red"], linewidth=1.8, label="ρ_util URLLC")
-    if "rho_URLLC" in monthly_mean.columns:
-        ax4.plot(months, monthly_mean["rho_URLLC"],
-                 color=COLORS["green"], linewidth=2.0, linestyle="--",
-                 label="ρ_URLLC (allocation)")
+    # P5 Active users + post-churn
+    ax = axes[1, 1]
+    if _has("N_active_eMBB", "N_active_URLLC"):
+        _setup_axes_style(ax, "P5 Active Users & Post-churn Population", "Month", "Users")
+        ne = monthly_mean["N_active_eMBB"]
+        nu = monthly_mean["N_active_URLLC"]
+        ax.plot(months, ne, color=COLORS["blue"], linewidth=1.8, label="N_active eMBB")
+        ax.plot(months, nu, color=COLORS["red"], linewidth=1.8, label="N_active URLLC")
+        ax.plot(months, ne + nu, color=COLORS["black"], linewidth=2.0, linestyle="--", label="N_active total")
+        if _has("N_post_churn_eMBB", "N_post_churn_URLLC"):
+            npc = monthly_mean["N_post_churn_eMBB"] + monthly_mean["N_post_churn_URLLC"]
+            ax.plot(months, npc, color=COLORS["gray"], linewidth=1.6, linestyle=":", label="N_post_churn total")
+        ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P5 Active Users & Post-churn Population")
 
-    # Ideal utilization band (0.3–0.8)
-    ax4.axhspan(0.3, 0.8, alpha=0.06, color=COLORS["green"],
-                label="Efficient zone (0.3–0.8)")
-    ax4.set_ylim(0, 1.0)
-    ax4.legend(fontsize=8, loc="upper right", framealpha=0.8)
+    # P6 Flow dynamics: joins vs churns
+    ax = axes[1, 2]
+    if _has("joins_eMBB", "joins_URLLC", "churns_eMBB", "churns_URLLC"):
+        _setup_axes_style(ax, "P6 User Flow: Joins vs Churns", "Month", "Users")
+        joins_tot = monthly_mean["joins_eMBB"] + monthly_mean["joins_URLLC"]
+        churn_tot = monthly_mean["churns_eMBB"] + monthly_mean["churns_URLLC"]
+        net = joins_tot - churn_tot
+        ax.plot(months, joins_tot, color=COLORS["green"], linewidth=2.0, label="Joins total")
+        ax.plot(months, churn_tot, color=COLORS["red"], linewidth=2.0, label="Churns total")
+        ax.bar(months, net, color=np.where(net >= 0, COLORS["cyan"], COLORS["orange"]), alpha=0.3, width=0.8, label="Net flow")
+        ax.axhline(0.0, color=COLORS["gray"], linewidth=0.8, linestyle=":")
+        ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P6 User Flow: Joins vs Churns")
 
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 5: Economic Metrics (Revenue vs Cost, Margin %)
-    # ══════════════════════════════════════════════════════════════════
-    ax5 = axes[2, 0]
-    _setup_axes_style(ax5, "⑤ Revenue, Cost & Profit Margin",
-                      "Month", "Amount (M KRW)")
+    # P7 Churn rate vs targets
+    ax = axes[2, 0]
+    if _has("churns_eMBB", "churns_URLLC", "N_active_eMBB", "N_active_URLLC"):
+        _setup_axes_style(ax, "P7 Churn Rate vs Calibration Targets", "Month", "Churn rate")
+        churn_e = monthly_mean["churns_eMBB"] / monthly_mean["N_active_eMBB"].clip(lower=1)
+        churn_u = monthly_mean["churns_URLLC"] / monthly_mean["N_active_URLLC"].clip(lower=1)
+        ax.plot(months, churn_e, color=COLORS["blue"], linewidth=1.8, label="eMBB actual")
+        ax.plot(months, churn_u, color=COLORS["red"], linewidth=1.8, label="URLLC actual")
+        ax.axhline(0.03, color=COLORS["blue"], linewidth=1.0, linestyle=":", alpha=0.8, label="eMBB target 3%")
+        ax.axhline(0.04, color=COLORS["red"], linewidth=1.0, linestyle=":", alpha=0.8, label="URLLC target 4%")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0%}"))
+        ax.set_ylim(bottom=0.0)
+        ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P7 Churn Rate vs Calibration Targets")
 
-    if "revenue" in monthly_mean.columns:
-        ax5.plot(months, monthly_mean["revenue"] / 1e6,
-                 color=COLORS["blue"], linewidth=2.0, label="Revenue")
-    if "cost_total" in monthly_mean.columns:
-        ax5.plot(months, monthly_mean["cost_total"] / 1e6,
-                 color=COLORS["red"], linewidth=2.0, label="Cost")
+    # P8 SLA + throughput
+    ax = axes[2, 1]
+    if _has("V_rate_eMBB", "V_rate_URLLC"):
+        _setup_axes_style(ax, "P8 SLA Violation + Throughput", "Month", "V_rate")
+        ax.plot(months, monthly_mean["V_rate_eMBB"], color=COLORS["blue"], linewidth=1.8, label="V_rate eMBB")
+        ax.plot(months, monthly_mean["V_rate_URLLC"], color=COLORS["red"], linewidth=1.8, label="V_rate URLLC")
+        ax.axhline(0.05, color=COLORS["gray"], linewidth=1.0, linestyle=":", alpha=0.7, label="Credit tier 1")
+        ax.axhline(0.15, color=COLORS["gray"], linewidth=1.0, linestyle="-.", alpha=0.6, label="Credit tier 2")
+        ax.set_ylim(0, 1.0)
+        if _has("avg_T_eMBB", "avg_T_URLLC"):
+            ax2 = ax.twinx()
+            ax2.plot(months, monthly_mean["avg_T_eMBB"], color=COLORS["cyan"], linewidth=1.6, linestyle="--", label="T_avg eMBB")
+            ax2.plot(months, monthly_mean["avg_T_URLLC"], color=COLORS["purple"], linewidth=1.6, linestyle="--", label="T_avg URLLC")
+            ax2.set_ylabel("Throughput (Mbps)", fontsize=10)
+            l1, lb1 = ax.get_legend_handles_labels()
+            l2, lb2 = ax2.get_legend_handles_labels()
+            ax.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="best", framealpha=0.85)
+        else:
+            ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P8 SLA Violation + Throughput")
 
-    # Fill profit area
-    if "revenue" in monthly_mean.columns and "cost_total" in monthly_mean.columns:
-        rev = monthly_mean["revenue"].values / 1e6
-        cost = monthly_mean["cost_total"].values / 1e6
-        ax5.fill_between(months, cost, rev,
-                         where=(rev >= cost), alpha=0.15,
-                         color=COLORS["green"], label="Profit (+)")
-        ax5.fill_between(months, cost, rev,
-                         where=(rev < cost), alpha=0.15,
-                         color=COLORS["red"], label="Loss (−)")
+    # P9 PRB utilization + allocation
+    ax = axes[2, 2]
+    if _has("rho_util_eMBB", "rho_util_URLLC", "rho_URLLC"):
+        _setup_axes_style(ax, "P9 PRB Utilization & Allocation", "Month", "Utilization / Share")
+        ax.plot(months, monthly_mean["rho_util_eMBB"], color=COLORS["blue"], linewidth=1.8, label="rho_util eMBB")
+        ax.plot(months, monthly_mean["rho_util_URLLC"], color=COLORS["red"], linewidth=1.8, label="rho_util URLLC")
+        ax.plot(months, monthly_mean["rho_URLLC"], color=COLORS["green"], linewidth=2.0, linestyle="--", label="rho_URLLC alloc")
+        total_util = (monthly_mean["rho_util_eMBB"] + monthly_mean["rho_util_URLLC"]).clip(lower=0, upper=1.5)
+        ax.plot(months, total_util, color=COLORS["black"], linewidth=1.4, linestyle=":", label="util total")
+        ax.axhspan(0.3, 0.8, alpha=0.06, color=COLORS["green"])
+        ax.set_ylim(0, 1.2)
+        ax.legend(fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P9 PRB Utilization & Allocation")
 
-    ax5.set_ylim(bottom=0)
-    ax5.legend(fontsize=8, loc="upper left", framealpha=0.8)
+    # P10 Top-up behavior
+    ax = axes[3, 0]
+    if _has("topups_eMBB", "topups_URLLC", "N_active_eMBB", "N_active_URLLC"):
+        _setup_axes_style(ax, "P10 Top-up Counts + Top-up Ratio", "Month", "Count")
+        te = monthly_mean["topups_eMBB"]
+        tu = monthly_mean["topups_URLLC"]
+        tt = te + tu
+        na = monthly_mean["N_active_eMBB"] + monthly_mean["N_active_URLLC"]
+        topup_ratio = tt / na.clip(lower=1)
+        ax.plot(months, te, color=COLORS["blue"], linewidth=1.6, label="topups eMBB")
+        ax.plot(months, tu, color=COLORS["red"], linewidth=1.6, label="topups URLLC")
+        ax.plot(months, tt, color=COLORS["black"], linewidth=1.8, linestyle="--", label="topups total")
+        ax2 = ax.twinx()
+        ax2.plot(months, topup_ratio, color=COLORS["orange"], linewidth=1.6, linestyle=":", label="topup ratio")
+        ax2.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:.0%}"))
+        ax2.set_ylabel("Ratio", fontsize=10, color=COLORS["orange"])
+        ax2.tick_params(axis="y", labelcolor=COLORS["orange"], labelsize=9)
+        l1, lb1 = ax.get_legend_handles_labels()
+        l2, lb2 = ax2.get_legend_handles_labels()
+        ax.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P10 Top-up Counts + Top-up Ratio")
 
-    # Dual axis: margin %
-    ax5b = ax5.twinx()
-    if "revenue" in monthly_mean.columns and "profit" in monthly_mean.columns:
-        margin = (monthly_mean["profit"] / monthly_mean["revenue"].clip(lower=1)) * 100
-        ax5b.plot(months, margin,
-                  color=COLORS["purple"], linewidth=1.5, linestyle=":",
-                  label="Margin %")
-        ax5b.set_ylabel("Profit Margin (%)", fontsize=10,
-                        color=COLORS["purple"])
-        ax5b.tick_params(axis="y", labelcolor=COLORS["purple"], labelsize=9)
-        ax5b.spines["top"].set_visible(False)
-        ax5b.legend(fontsize=8, loc="upper right", framealpha=0.8)
+    # P11 Cross-repeat stability
+    ax = axes[3, 1]
+    if _has("reward", "profit"):
+        _setup_axes_style(ax, "P11 Cross-repeat Stability (std)", "Month", "Reward std")
+        by_month = df.groupby("month")
+        reward_std = by_month["reward"].std().fillna(0.0)
+        profit_std = (by_month["profit"].std() / 1e6).fillna(0.0)
+        ax.plot(reward_std.index, reward_std.values, color=COLORS["blue"], linewidth=2.0, label="Reward std")
+        ax.fill_between(reward_std.index, 0, reward_std.values, color=COLORS["blue"], alpha=0.12)
+        ax2 = ax.twinx()
+        ax2.plot(profit_std.index, profit_std.values, color=COLORS["red"], linewidth=2.0, linestyle="--", label="Profit std (M KRW)")
+        ax2.set_ylabel("Profit std (M KRW)", fontsize=10, color=COLORS["red"])
+        ax2.tick_params(axis="y", labelcolor=COLORS["red"], labelsize=9)
+        l1, lb1 = ax.get_legend_handles_labels()
+        l2, lb2 = ax2.get_legend_handles_labels()
+        ax.legend(l1 + l2, lb1 + lb2, fontsize=8, loc="best", framealpha=0.85)
+    else:
+        _mark_unavailable(ax, "P11 Cross-repeat Stability (std)")
 
-    # ══════════════════════════════════════════════════════════════════
-    # Panel 6: SLA Compliance (V_rate + Throughput vs SLO)
-    # ══════════════════════════════════════════════════════════════════
-    ax6 = axes[2, 1]
-    _setup_axes_style(ax6, "⑥ SLA Violation Rates",
-                      "Month", "V_rate")
+    # P12 Correlation matrix
+    ax = axes[3, 2]
+    corr_cols = [
+        "reward", "profit", "revenue", "cost_total",
+        "fee_eMBB", "fee_URLLC",
+        "N_active_eMBB", "N_active_URLLC",
+        "V_rate_eMBB", "V_rate_URLLC",
+        "rho_URLLC", "rho_util_eMBB", "rho_util_URLLC",
+    ]
+    corr_cols = [c for c in corr_cols if c in df.columns]
+    if len(corr_cols) >= 4:
+        cmat = df[corr_cols].corr(numeric_only=True)
+        im = ax.imshow(cmat.values, vmin=-1, vmax=1, cmap="RdBu_r", aspect="auto")
+        ax.set_title("P12 Metric Correlation Heatmap", fontsize=12, fontweight="bold", pad=10)
+        ax.set_xticks(np.arange(len(corr_cols)))
+        ax.set_yticks(np.arange(len(corr_cols)))
+        ax.set_xticklabels(corr_cols, rotation=75, ha="right", fontsize=7)
+        ax.set_yticklabels(corr_cols, fontsize=7)
+        for i in range(len(corr_cols)):
+            for j in range(len(corr_cols)):
+                v = cmat.values[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=5.5, color="black")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+        cbar.ax.tick_params(labelsize=7)
+    else:
+        _mark_unavailable(ax, "P12 Metric Correlation Heatmap")
 
-    if "V_rate_eMBB" in monthly_mean.columns:
-        ax6.plot(months, monthly_mean["V_rate_eMBB"],
-                 color=COLORS["blue"], linewidth=1.8, label="V_rate eMBB")
-
-        # Shade per-repeat spread
-        for rep in df["repeat"].unique():
-            rd = df[df["repeat"] == rep]
-            ax6.plot(rd["month"], rd["V_rate_eMBB"],
-                     alpha=0.12, color=COLORS["blue"], linewidth=0.5)
-
-    if "V_rate_URLLC" in monthly_mean.columns:
-        ax6.plot(months, monthly_mean["V_rate_URLLC"],
-                 color=COLORS["red"], linewidth=1.8, label="V_rate URLLC")
-
-        for rep in df["repeat"].unique():
-            rd = df[df["repeat"] == rep]
-            ax6.plot(rd["month"], rd["V_rate_URLLC"],
-                     alpha=0.12, color=COLORS["red"], linewidth=0.5)
-
-    # SLA credit activation thresholds
-    ax6.axhline(y=0.05, color=COLORS["gray"], linewidth=1.0,
-                linestyle=":", alpha=0.6, label="Credit tier 1 (5%)")
-    ax6.axhline(y=0.15, color=COLORS["gray"], linewidth=1.0,
-                linestyle="-.", alpha=0.5, label="Credit tier 2 (15%)")
-
-    ax6.set_ylim(0, 1.0)
-    ax6.legend(fontsize=8, loc="upper right", framealpha=0.8)
-
-    # ══════════════════════════════════════════════════════════════════
     # Final layout
-    # ══════════════════════════════════════════════════════════════════
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.subplots_adjust(hspace=0.35, wspace=0.35)
+    plt.tight_layout(rect=[0, 0, 1, 0.982])
+    plt.subplots_adjust(hspace=0.38, wspace=0.28)
 
     plot_path = run_path / "eval_dashboard.png"
     plt.savefig(plot_path, dpi=180, bbox_inches="tight",
