@@ -14,22 +14,12 @@ Observation space (float32, shape=(16,) — §16):
 FIX F1 (Critical — V_rate=1.0 resolution):
   The radio inner loop now uses v_max_mbps (pre-cap plan peak speed) as
   each user's throughput ceiling, NOT v_cap_mbps (post-cap throttle).
-  This means:
-    BEFORE: T_act = min(fair_share, v_cap ≤ 5 Mbps) → always < SLO=10
-    AFTER:  T_act = min(fair_share, v_max ≤ 1000 Mbps) → exceeds SLO
-            when load is moderate
-
-  The post-cap throttle (v_cap_mbps) is applied ONLY in step 6 (top-up)
-  when a user exceeds their data quota Q_gb.  This separation matches
-  real 5G network behavior:
-    - RAN layer delivers fair-share throughput up to plan peak rate
-    - Policy layer (OCS/PCRF) enforces data-cap throttle separately
-
-  Combined with lowered SLO targets (3.0 / 2.0 Mbps), V_rate now
-  varies meaningfully between 0.0 and 1.0 based on load and allocation.
 
 FIX F3: vrate_penalty added to reward shaping.
 FIX F4: alpha_churn increased; churn threshold lowered.
+FIX F5: Quadratic churn penalty with per-slice thresholds.  [BERRY_1994]
+FIX F6: Per-user OPEX integrated into profit computation.  [OUGHTON_2021]
+FIX F7: Customer acquisition cost (CAC) for new joins.  [CLV_KUMAR]
 
 References:
   [SAC][SB3_SAC][SB3_TIPS][TS38104][TS38214][TSDI_KEYNOTE]
@@ -42,6 +32,9 @@ References:
   [OLIVER_1980] — Expectation-disconfirmation theory
   [NG_1999] — Reward shaping
   [HENDERSON_2018] — Deep RL that Matters
+  [BERRY_1994] — Quadratic loss for churn penalty
+  [OUGHTON_2021] — 5G techno-economic OPEX
+  [CLV_KUMAR] — Customer lifetime value / acquisition cost
 """
 
 from __future__ import annotations
@@ -192,7 +185,7 @@ class OranSlicingEnv(gym.Env):
         return float(np.clip(fee, prev_fee - max_delta, prev_fee + max_delta))
 
     # ------------------------------------------------------------------
-    # Main monthly step — §17 compliant + FIX F1/F3/F4
+    # Main monthly step — §17 compliant + FIX F1/F3/F4/F5/F6/F7
     # ------------------------------------------------------------------
     def _run_month(self, action: np.ndarray) -> Dict[str, Any]:
         """Execute one monthly step per §17 step order.
@@ -208,7 +201,10 @@ class OranSlicingEnv(gym.Env):
              [FIX F1] Throttle applied HERE only when D_u > Q_gb
           7) Churn (active → churned)
           8) Profit/reward
-             [FIX F3] vrate_penalty in reward shaping
+             [FIX F3] vrate_penalty
+             [FIX F5] quadratic churn penalty
+             [FIX F6] OPEX cost  [OUGHTON_2021]
+             [FIX F7] CAC cost   [CLV_KUMAR]
         """
 
         # ══════════════════════════════════════════════════════════════
@@ -275,11 +271,6 @@ class OranSlicingEnv(gym.Env):
         # ══════════════════════════════════════════════════════════════
         # 4) Inner loop k=1..K
         #    [FIX F1] CRITICAL: Use v_max_mbps as throughput ceiling.
-        #    The radio model computes:
-        #      T_act = min(fair_share, T_ceil)
-        #    where T_ceil = v_max_mbps (pre-cap plan peak), NOT v_cap.
-        #    This means under moderate load, T_act CAN exceed the SLO,
-        #    making V_rate an informative signal (0 < V < 1).
         # ══════════════════════════════════════════════════════════════
         T_ceil_eMBB = np.array(
             [u.v_max_mbps for u in users_eMBB], dtype=np.float64,
@@ -351,8 +342,6 @@ class OranSlicingEnv(gym.Env):
 
         # ══════════════════════════════════════════════════════════════
         # 6) Top-up + throttle + disconfirmation  [FIX F1]
-        #    Post-cap throttle is applied HERE (not in inner loop).
-        #    Users who exceeded Q_gb get throttled to v_cap_mbps.
         # ══════════════════════════════════════════════════════════════
         n_topups_eMBB = 0
         n_topups_URLLC = 0
@@ -360,18 +349,14 @@ class OranSlicingEnv(gym.Env):
         if self.topup.enabled:
             for u in users_eMBB:
                 if u.D_u > u.Q_gb:
-                    # Mark user as throttled
                     u.throttled = True
-                    # Reduce user's effective throughput expectation
-                    # to reflect the throttle impact on their experience
                     u.T_exp = u.v_cap_mbps
-                    # Top-up decision
                     delta_util = u.T_act_avg - u.v_cap_mbps
                     if not u.topup_flag and self.topup.decide_topup(
                         delta_util, u.w_price, rng=self._rng,
                     ):
                         u.topup_flag = True
-                        u.T_exp = u.T_exp_base_mbps  # restore expectation
+                        u.T_exp = u.T_exp_base_mbps
                         u.Q_gb += self.topup.data_gb
                         u.throttled = False
                         n_topups_eMBB += 1
@@ -417,7 +402,7 @@ class OranSlicingEnv(gym.Env):
         )
 
         # ══════════════════════════════════════════════════════════════
-        # 8) Profit & reward  [FIX F3: vrate_penalty]
+        # 8) Profit & reward  [FIX F3/F5/F6/F7]
         # ══════════════════════════════════════════════════════════════
         rho_eMBB_share = 1.0 - rho_URLLC
         total_cell_util = (
@@ -425,6 +410,12 @@ class OranSlicingEnv(gym.Env):
             + mean_rho_util_URLLC * rho_URLLC
         )
         mean_rho_util_combined = (mean_rho_util_eMBB + mean_rho_util_URLLC) / 2.0
+
+        # [FIX F6/F7] Pass n_joins for CAC computation [CLV_KUMAR]
+        n_joins_dict = {
+            "eMBB": len(join_ids_eMBB),
+            "URLLC": len(join_ids_URLLC),
+        }
 
         profit_result = self.economics.compute_profit(
             fees={"eMBB": fee_eMBB, "URLLC": fee_URLLC},
@@ -434,6 +425,7 @@ class OranSlicingEnv(gym.Env):
             V_rates={"eMBB": V_rate_eMBB, "URLLC": V_rate_URLLC},
             mean_rho_util=mean_rho_util_combined,
             avg_load=total_cell_util,
+            n_joins=n_joins_dict,  # [FIX F7]
         )
 
         profit = profit_result["profit"]
@@ -446,13 +438,14 @@ class OranSlicingEnv(gym.Env):
             rho_urllc=rho_URLLC,
         )
 
-        # M9 + FIX F3: Compute reward shaping terms
+        # M9 + FIX F3/F5: Compute reward shaping terms
         retention_bonus = self.economics.compute_retention_bonus(
             N_active={"eMBB": n_post_eMBB, "URLLC": n_post_URLLC},
         )
         efficiency_bonus = self.economics.compute_efficiency_bonus(
             rho_util={"eMBB": mean_rho_util_eMBB, "URLLC": mean_rho_util_URLLC},
         )
+        # [FIX F5] Quadratic per-slice churn penalty [BERRY_1994]
         churn_penalty = self.economics.compute_churn_penalty(
             n_churns={"eMBB": n_churn_eMBB, "URLLC": n_churn_URLLC},
             N_active={"eMBB": n_eMBB, "URLLC": n_URLLC},
@@ -463,7 +456,7 @@ class OranSlicingEnv(gym.Env):
                 "URLLC": fee_URLLC - self._prev_fee_URLLC,
             },
         )
-        # FIX F3: NEW — V_rate penalty
+        # FIX F3: V_rate penalty [NG_1999]
         vrate_penalty = self.economics.compute_vrate_penalty(
             V_rates={"eMBB": V_rate_eMBB, "URLLC": V_rate_URLLC},
         )
@@ -475,7 +468,7 @@ class OranSlicingEnv(gym.Env):
                 "efficiency_bonus": efficiency_bonus,
                 "churn_penalty": churn_penalty,
                 "volatility_penalty": volatility_penalty,
-                "vrate_penalty": vrate_penalty,  # [FIX F3]
+                "vrate_penalty": vrate_penalty,
             },
         )
 
@@ -515,10 +508,15 @@ class OranSlicingEnv(gym.Env):
             "efficiency_bonus": efficiency_bonus,
             "churn_penalty_val": churn_penalty,
             "volatility_penalty": volatility_penalty,
-            "vrate_penalty": vrate_penalty,  # [FIX F3]
+            "vrate_penalty": vrate_penalty,
             "safety_penalty": safety_penalty,
             "revenue": profit_result["revenue"],
             "cost_total": profit_result["cost_total"],
+            "cost_opex": profit_result["cost_opex"],      # [FIX F6]
+            "cost_cac": profit_result["cost_cac"],         # [FIX F7]
+            "cost_energy": profit_result["cost_energy"],
+            "cost_sla_total": profit_result["cost_sla_total"],
+            "cost_resource": profit_result["cost_resource"],
             "profit": profit,
             "reward": reward,
         }

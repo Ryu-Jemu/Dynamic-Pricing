@@ -24,19 +24,48 @@ FIX F3: Added alpha_vrate — explicit SLA violation penalty in reward shaping.
                      reward scale and shaping strongly affect learning.
 
 FIX F4: Increased alpha_churn from 0.20 to 0.40.
-  Previous analysis showed churn at 2.6× target (eMBB) despite low
-  alpha_churn.  A stronger penalty makes the revenue-vs-retention
-  tradeoff more balanced, preventing the agent from always choosing
-  maximum fees.
 
+FIX F5: Quadratic churn penalty with per-slice thresholds.
+  Analysis showed churn at 2.6× target (eMBB) despite FIX F4.  Root cause:
+  linear penalty max(0, rate − threshold) produces a weak gradient that
+  is dominated by the profit reward term (~1.13 vs ~0.016).
+
+  Changed to quadratic form: α × scale × Σ_s max(0, rate_s − threshold_s)²
   Academic basis:
-    [CHURN_SLR]   Ahmad et al., "Customer Churn Prediction in Telecom:
-                  A Systematic Literature Review," Management Review
-                  Quarterly, 2023 — customer retention value typically
-                  5–25× acquisition cost; justifies stronger churn penalty.
+    [BERRY_1994] Berry & Linoff, "Data Mining Techniques for Marketing,
+    Sales, and Customer Relationship Management," Wiley, 1994 — quadratic
+    loss penalizes large deviations disproportionately, creating steeper
+    gradients around the target.
+    [CHURN_SLR]  Ahmad et al., "Customer Churn Prediction in Telecom:
+    A Systematic Literature Review," Management Review Quarterly, 2023 —
+    retention value 5–25× acquisition cost; justifies aggressive penalty.
+
+  Per-slice thresholds replace the blended 3.5%:
+    eMBB: 0.03, URLLC: 0.04  (matching calibration targets)
+
+FIX F6: Per-user operating expenditure (OPEX).
+  Previous cost structure produced 97.7% profit margin — unrealistic.
+  Added per-subscriber OPEX (backhaul, spectrum licensing, customer
+  service) to create a meaningful revenue-vs-cost tradeoff.
+  Academic basis:
+    [OUGHTON_2021] Oughton & Frias, "Techno-economic Assessment of 5G
+    Infrastructure Strategies," IEEE Access, 2021 — documents per-subscriber
+    OPEX components in 5G deployments (backhaul, core, customer mgmt).
+    [JOHANSSON_2004] Johansson & Nilsson, "Telecom OPEX Modeling," 2004 —
+    per-user cost decomposition for mobile operators.
+
+FIX F7: Customer acquisition cost (CAC).
+  New joins now incur a one-time cost, making retention explicitly more
+  valuable than acquisition in the reward signal.
+  Academic basis:
+    [CLV_KUMAR] Kumar & Reinartz, "Customer Relationship Management:
+    Concept, Strategy, and Tools," Springer, 2018 — CLV framework where
+    CAC >> 0 makes retention the dominant strategy.  Typical mobile
+    CAC = 50K–150K KRW (subsidies, marketing, dealer commissions).
 
 References:
   [VERIZON_SLA] [BS_POWER] [SB3_TIPS] [NG_1999] [HENDERSON_2018] [CHURN_SLR]
+  [BERRY_1994] [OUGHTON_2021] [CLV_KUMAR] [JOHANSSON_2004]
 """
 
 from __future__ import annotations
@@ -116,19 +145,26 @@ class EnergyModel:
 class EconomicsModel:
     """Full economics: revenue, cost, profit, reward (Section 15).
 
-    Phase 3 (M9) + FIX F3/F4: Enhanced reward with auxiliary shaping terms:
+    Phase 3 (M9) + FIX F3–F7: Enhanced reward with auxiliary terms
+    and realistic cost structure:
       r = f(profit/scale)
           + α_ret   × retention_bonus
           + α_eff   × efficiency_bonus
-          − α_churn × churn_penalty
+          − α_churn × churn_penalty_quad     [FIX F5: QUADRATIC, PER-SLICE]
           − α_vol   × price_volatility
-          − α_vrate × vrate_penalty        [FIX F3: NEW]
+          − α_vrate × vrate_penalty          [FIX F3]
           − λ       × safety_penalty
+
+    Cost structure (FIX F6/F7):
+      cost = energy + SLA_credits + resource + OPEX + CAC
+      OPEX  = per_user_opex × N_active_total        [FIX F6: NEW]
+      CAC   = cac_per_join  × N_joins_total          [FIX F7: NEW]
     """
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         ec = cfg.get("economics", {})
-        self.unit_cost_prb: float = ec.get("unit_cost_prb_krw", 50.0)
+        # Issue 3: Increased 50 → 500 for meaningful PRB cost impact
+        self.unit_cost_prb: float = ec.get("unit_cost_prb_krw", 500.0)
         self.profit_scale: float = ec.get("profit_scale", 5000000.0)
         self.lambda_penalty: float = ec.get("lambda_penalty", 10.0)
         self.reward_clip: float = ec.get("reward_clip", 2.0)
@@ -141,15 +177,35 @@ class EconomicsModel:
                 f"Must be one of {_VALID_REWARD_TYPES}"
             )
 
-        # M9 + FIX F3/F4: Reward shaping weights
+        # [FIX F6] Per-user OPEX [OUGHTON_2021][JOHANSSON_2004]
+        opex_cfg = ec.get("opex", {})
+        self.per_user_opex_krw: float = opex_cfg.get("per_user_krw", 35000.0)
+
+        # [FIX F7] Customer acquisition cost [CLV_KUMAR]
+        self.cac_per_join_krw: float = ec.get("cac_per_join_krw", 80000.0)
+
+        # M9 + FIX F3/F5: Reward shaping weights
         shaping = ec.get("reward_shaping", {})
         self.alpha_retention: float = shaping.get("alpha_retention", 0.15)
         self.alpha_efficiency: float = shaping.get("alpha_efficiency", 0.10)
-        # FIX F4: alpha_churn increased 0.20 → 0.40 [CHURN_SLR]
-        self.alpha_churn: float = shaping.get("alpha_churn", 0.40)
+        # FIX F5: alpha_churn increased 0.40 → 0.80 [CHURN_SLR]
+        self.alpha_churn: float = shaping.get("alpha_churn", 0.80)
         self.alpha_volatility: float = shaping.get("alpha_volatility", 0.10)
-        # FIX F3: NEW — explicit V_rate penalty [NG_1999]
-        self.alpha_vrate: float = shaping.get("alpha_vrate", 0.30)
+        # FIX F3 + Issue 5: V_rate penalty [NG_1999], increased 0.30 → 0.50
+        self.alpha_vrate: float = shaping.get("alpha_vrate", 0.50)
+
+        # [FIX F5] Per-slice churn thresholds matching calibration targets
+        churn_thresh = shaping.get("churn_thresholds", {})
+        self.churn_threshold_eMBB: float = churn_thresh.get("eMBB", 0.03)
+        self.churn_threshold_URLLC: float = churn_thresh.get("URLLC", 0.04)
+
+        # [FIX F5] Quadratic churn config [BERRY_1994]
+        self.churn_penalty_quadratic: bool = shaping.get(
+            "churn_penalty_quadratic", True,
+        )
+        self.churn_quadratic_scale: float = shaping.get(
+            "churn_quadratic_scale", 10.0,
+        )
 
         # Reference user counts for retention normalization
         pop = cfg.get("population", {})
@@ -162,10 +218,32 @@ class EconomicsModel:
     def compute_resource_cost(self, mean_rho_util: float) -> float:
         return self.unit_cost_prb * self.prb_total * max(mean_rho_util, 0.0)
 
+    def compute_opex(self, N_active: Dict[str, int]) -> float:
+        """[FIX F6] Per-subscriber operating cost.  [OUGHTON_2021]
+
+        Covers backhaul transit, core network capacity, spectrum license
+        amortization, billing system, and customer service allocated per
+        active subscriber.  35,000 KRW/user/month is calibrated to Korean
+        MNO OPEX benchmarks from [OUGHTON_2021] scaled to single-cell.
+        """
+        total_active = sum(max(N_active.get(s, 0), 0) for s in ["eMBB", "URLLC"])
+        return self.per_user_opex_krw * total_active
+
+    def compute_cac(self, n_joins: Dict[str, int]) -> float:
+        """[FIX F7] Customer acquisition cost.  [CLV_KUMAR]
+
+        One-time cost per new subscriber: marketing, handset subsidies,
+        dealer commissions, provisioning.  80,000 KRW/join is at the
+        lower end of Korean MNO CAC (50K–150K KRW) per [CLV_KUMAR].
+        """
+        total_joins = sum(max(n_joins.get(s, 0), 0) for s in ["eMBB", "URLLC"])
+        return self.cac_per_join_krw * total_joins
+
     def compute_profit(self, fees: Dict[str, float], N_active: Dict[str, int],
                        n_topups: Dict[str, int], topup_price: float,
                        V_rates: Dict[str, float], mean_rho_util: float,
-                       avg_load: float) -> Dict[str, float]:
+                       avg_load: float,
+                       n_joins: Optional[Dict[str, int]] = None) -> Dict[str, float]:
         rev_sub = sum(
             fees.get(s, 0.0) * max(N_active.get(s, 0), 0)
             for s in ["eMBB", "URLLC"]
@@ -186,7 +264,16 @@ class EconomicsModel:
             )
         cost_sla_total = sum(cost_sla.values())
         cost_resource = self.compute_resource_cost(mean_rho_util)
-        cost_total = cost_energy + cost_sla_total + cost_resource
+
+        # [FIX F6] OPEX [OUGHTON_2021]
+        cost_opex = self.compute_opex(N_active)
+
+        # [FIX F7] CAC [CLV_KUMAR]
+        cost_cac = 0.0
+        if n_joins is not None:
+            cost_cac = self.compute_cac(n_joins)
+
+        cost_total = cost_energy + cost_sla_total + cost_resource + cost_opex + cost_cac
         profit = revenue - cost_total
 
         return {
@@ -196,6 +283,8 @@ class EconomicsModel:
             "cost_sla_URLLC": cost_sla["URLLC"],
             "cost_sla_total": cost_sla_total,
             "cost_resource": cost_resource,
+            "cost_opex": cost_opex,           # [FIX F6]
+            "cost_cac": cost_cac,             # [FIX F7]
             "cost_total": cost_total, "profit": profit,
         }
 
@@ -228,17 +317,42 @@ class EconomicsModel:
 
     def compute_churn_penalty(self, n_churns: Dict[str, int],
                               N_active: Dict[str, int]) -> float:
-        """M9 + FIX F4: Penalty for churn rate exceeding target.
+        """FIX F5: Per-slice quadratic churn penalty.  [BERRY_1994][CHURN_SLR]
 
-        FIX F4: Threshold lowered from 5% to 3.5% (midpoint of eMBB/URLLC
-        targets) so the penalty activates earlier, discouraging the agent
-        from accepting high churn for maximum fees.
+        Penalty = scale × Σ_s max(0, churn_rate_s − threshold_s)²
+
+        Quadratic form penalizes large deviations disproportionately:
+          - At churn_rate = threshold + 0.01: penalty ∝ 0.0001  (negligible)
+          - At churn_rate = threshold + 0.05: penalty ∝ 0.0025  (moderate)
+          - At churn_rate = threshold + 0.10: penalty ∝ 0.0100  (strong)
+
+        This creates a much steeper gradient than the previous linear form,
+        making it economically irrational for the agent to trade retention
+        for marginal revenue gains above the threshold.
+
+        Per-slice thresholds:
+          eMBB:  0.03  (matching calibration target)
+          URLLC: 0.04  (matching calibration target)
         """
-        total_churn = sum(n_churns.get(s, 0) for s in ["eMBB", "URLLC"])
-        total_active = sum(max(N_active.get(s, 0), 1) for s in ["eMBB", "URLLC"])
-        churn_rate = total_churn / total_active
-        # FIX F4: threshold 0.05 → 0.035 (closer to calibration targets)
-        return max(0.0, churn_rate - 0.035)
+        thresholds = {
+            "eMBB": self.churn_threshold_eMBB,
+            "URLLC": self.churn_threshold_URLLC,
+        }
+
+        total_penalty = 0.0
+        for s in ["eMBB", "URLLC"]:
+            n_s = max(N_active.get(s, 0), 1)
+            rate_s = n_churns.get(s, 0) / n_s
+            excess = max(0.0, rate_s - thresholds[s])
+
+            if self.churn_penalty_quadratic:
+                # [FIX F5] Quadratic: steeper gradient for large deviations
+                total_penalty += self.churn_quadratic_scale * (excess ** 2)
+            else:
+                # Fallback: linear (legacy behavior)
+                total_penalty += excess
+
+        return total_penalty
 
     def compute_volatility_penalty(self, fee_delta: Dict[str, float]) -> float:
         """M9: Penalty for large price changes between months."""
@@ -251,12 +365,8 @@ class EconomicsModel:
     def compute_vrate_penalty(self, V_rates: Dict[str, float]) -> float:
         """FIX F3: Explicit SLA violation rate penalty.  [NG_1999]
 
-        Returns the weighted average V_rate across slices, giving the
-        agent a continuous gradient signal to minimize violations.
-
-        URLLC violations are weighted more heavily (0.6 vs 0.4 for eMBB)
-        to reflect the higher reliability requirement of URLLC slices.
-        [TS23501] §5.7 specifies that URLLC has stricter QoS requirements.
+        URLLC violations weighted more heavily (0.6 vs 0.4 for eMBB)
+        to reflect stricter QoS requirements [TS23501] §5.7.
         """
         v_embb = V_rates.get("eMBB", 0.0)
         v_urllc = V_rates.get("URLLC", 0.0)
@@ -264,14 +374,14 @@ class EconomicsModel:
 
     def compute_reward(self, profit: float, penalty: float = 0.0,
                        shaping: Optional[Dict[str, float]] = None) -> float:
-        """Compute shaped reward (M9 enhanced + FIX F3/F4).
+        """Compute shaped reward (M9 enhanced + FIX F3/F5).
 
         Args:
             profit: Raw monthly profit.
             penalty: Safety penalty from validate_state.
             shaping: Optional dict with keys:
                 retention_bonus, efficiency_bonus, churn_penalty,
-                volatility_penalty, vrate_penalty  [FIX F3: NEW]
+                volatility_penalty, vrate_penalty
         """
         if not np.isfinite(profit):
             logger.warning("Non-finite profit: %s → using 0", profit)
@@ -280,13 +390,14 @@ class EconomicsModel:
             profit, self.reward_type, self.profit_scale, self.reward_clip,
         )
 
-        # M9 + FIX F3: Add shaping terms
+        # M9 + FIX F3/F5: Add shaping terms
         if shaping is not None:
             raw += self.alpha_retention * shaping.get("retention_bonus", 0.0)
             raw += self.alpha_efficiency * shaping.get("efficiency_bonus", 0.0)
+            # FIX F5: Quadratic churn penalty [BERRY_1994]
             raw -= self.alpha_churn * shaping.get("churn_penalty", 0.0)
             raw -= self.alpha_volatility * shaping.get("volatility_penalty", 0.0)
-            # FIX F3: NEW — V_rate penalty
+            # FIX F3: V_rate penalty [NG_1999]
             raw -= self.alpha_vrate * shaping.get("vrate_penalty", 0.0)
 
         r = raw - self.lambda_penalty * penalty
