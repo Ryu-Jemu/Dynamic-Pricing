@@ -1,6 +1,11 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Online MDP  (§§3–11)
 
+REVISION 2 — Calibration corrections:
+  [C3] Removed price_norm re-multiplication in churn/join logits
+  [C4] Added demand-price elasticity  [Nevo et al., Econometrica 2016]
+  [C5] Added action smoothing penalty  [Dulac-Arnold et al., JMLR 2021]
+
 Gymnasium-compatible environment for SB3 SAC.
 
 Action (5-D continuous, §4):
@@ -22,11 +27,13 @@ Market (§10):
 References:
   [Haarnoja 2018]    SAC
   [Grubb AER 2009]   3-part tariff
-  [Nevo 2015]        Broadband tariffs / usage coupling
+  [Nevo 2016]        Broadband tariffs / usage coupling  (Econometrica)
   [TS 23.503]        Usage monitoring thresholds
   [Huang IoT-J 2020] URLLC priority / coexistence
   [Gupta JSR 2006]   CLV
   [ITU Teletraffic]  Poisson arrivals
+  [Dulac-Arnold 2021] Challenges of Real-World RL
+  [Ahn 2006]         Telecom churn determinants
 """
 from __future__ import annotations
 
@@ -117,6 +124,20 @@ class OranSlicingPricingEnv(gym.Env):
         self.bq_join: float = mc["beta_q_join"]
         self.market_mode: str = mc.get("mode", "stochastic")
         self._price_norm: float = mc.get("price_norm", 70000.0)
+
+        # Demand-price elasticity (§6b)  [C4]  [Nevo 2016]
+        de = cfg.get("demand_elasticity", {})
+        self._demand_elast_enabled: bool = de.get("enabled", False)
+        self._eps_U: float = de.get("epsilon_U", 0.15)
+        self._eps_E: float = de.get("epsilon_E", 0.30)
+        self._pref_U: float = de.get("p_ref_U", 2500.0)
+        self._pref_E: float = de.get("p_ref_E", 1500.0)
+        self._demand_floor: float = de.get("floor", 0.5)
+
+        # Action smoothing (§15b)  [C5]  [Dulac-Arnold 2021]
+        sm = cfg.get("action_smoothing", {})
+        self._smooth_enabled: bool = sm.get("enabled", False)
+        self._smooth_weight: float = sm.get("weight", 0.01)
 
         # CLV (§11)
         clv_cfg = cfg.get("clv", {})
@@ -241,8 +262,8 @@ class OranSlicingPricingEnv(gym.Env):
         N_U = int((self._active_mask * self._slice_is_U).sum())
         N_E = N_act - N_U
 
-        # ── traffic (§6) ──
-        L_U, L_E = self._generate_traffic()
+        # ── traffic (§6) with demand-price elasticity [C4] ──
+        L_U, L_E = self._generate_traffic(p_over_U, p_over_E)
 
         # ── cumulative cycle usage ──
         self._cycle_usage_U += L_U
@@ -280,7 +301,18 @@ class OranSlicingPricingEnv(gym.Env):
 
         # ── profit + reward ──
         profit = revenue - cost_total
-        reward = self._compute_reward(profit)
+
+        # ── action smoothing penalty [C5] [Dulac-Arnold 2021] ──
+        smooth_penalty = 0.0
+        if self._smooth_enabled and self.t > 1:
+            # Normalise each action dimension to [0,1] before computing change
+            a_norm = (a - self._a_lo) / np.maximum(self._a_hi - self._a_lo, 1e-8)
+            prev_norm = (self._prev_action - self._a_lo) / np.maximum(
+                self._a_hi - self._a_lo, 1e-8)
+            smooth_penalty = self._smooth_weight * float(
+                np.sum((a_norm - prev_norm) ** 2))
+
+        reward = self._compute_reward(profit, smooth_penalty)
 
         # ── cache for obs ──
         self._prev_action = a.copy()
@@ -311,13 +343,20 @@ class OranSlicingPricingEnv(gym.Env):
             "cost_cac": cost_cac, "sla_penalty": sla_penalty,
             "cost_total": cost_total,
             "profit": profit, "reward": reward,
+            "smooth_penalty": smooth_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
         }
 
-    # ── traffic generation (§6) ───────────────────────────────────────
-    def _generate_traffic(self) -> Tuple[float, float]:
-        """Sample per-user lognormal daily usage, aggregate by slice."""
+    # ── traffic generation (§6 + §6b demand elasticity) ───────────────
+    def _generate_traffic(self, p_over_U: float = 0.0,
+                          p_over_E: float = 0.0) -> Tuple[float, float]:
+        """Sample per-user lognormal daily usage, aggregate by slice.
+
+        [C4] Demand-price elasticity  [Nevo et al., Econometrica 2016]:
+          D_u *= max(floor, 1 − ε × (p_over/p_ref − 1))
+        Users reduce consumption when overage price exceeds reference.
+        """
         act = self._active_mask
         n = int(act.sum())
         if n == 0:
@@ -329,32 +368,49 @@ class OranSlicingPricingEnv(gym.Env):
         # Sample URLLC usage for all users, zero out inactive & eMBB
         raw_u = self._rng.lognormal(self._mu_u, self._sig_u)
         raw_u = np.clip(raw_u, traf_cfg_u["D_min_gb"], traf_cfg_u["D_max_gb"])
-        raw_u *= act * self._slice_is_U
 
         # Sample eMBB usage
         raw_e = self._rng.lognormal(self._mu_e, self._sig_e)
         raw_e = np.clip(raw_e, traf_cfg_e["D_min_gb"], traf_cfg_e["D_max_gb"])
+
+        # [C4] Apply demand-price elasticity
+        if self._demand_elast_enabled:
+            mult_u = max(self._demand_floor,
+                         1.0 - self._eps_U * (p_over_U / self._pref_U - 1.0))
+            mult_e = max(self._demand_floor,
+                         1.0 - self._eps_E * (p_over_E / self._pref_E - 1.0))
+            raw_u *= mult_u
+            raw_e *= mult_e
+
+        raw_u *= act * self._slice_is_U
         raw_e *= act * self._slice_is_E
 
         return float(raw_u.sum()), float(raw_e.sum())
 
-    # ── market dynamics (§10) ─────────────────────────────────────────
+    # ── market dynamics (§10) — [C3] FIX ──────────────────────────────
     def _market_step(self, F_U: float, p_over_U: float,
                      F_E: float, p_over_E: float
                      ) -> Tuple[int, int]:
-        """Compute join/churn for this step; update _active_mask."""
+        """Compute join/churn for this step; update _active_mask.
+
+        [C3] BUG FIX: Removed redundant `* self._price_norm` from logit.
+        Previous code computed  β_p × psens × P_sig × price_norm,
+        which re-inflated the normalised P_sig back to the raw price
+        scale, producing churn logits ~2.0 instead of the intended ~0.03.
+        Now β_p operates directly on P_sig ∈ [0, 1].
+        """
         N_act = int(self._active_mask.sum())
         N_inact = self.N_total - N_act
 
-        # Price & QoS signals (population-wide, normalised)
+        # Price & QoS signals (population-wide, normalised to [0,1])
         P_sig = (F_U + F_E) / (2.0 * self._price_norm)
         Q_sig = 1.0 - (self._prev_pviol_U + self._prev_pviol_E) / 2.0
 
         # ── churn (§10.1) ──
-        # Per-user logit with heterogeneous sensitivities
+        # [C3] Per-user logit — β_p now works on normalised P_sig directly
         churn_logits = (
             self.b0_churn
-            + self.bp_churn * self._psens * P_sig * self._price_norm
+            + self.bp_churn * self._psens * P_sig      # [C3] removed × price_norm
             - self.bq_churn * self._qsens * Q_sig
             - self.bsw_churn * self._swcost
         )
@@ -365,9 +421,10 @@ class OranSlicingPricingEnv(gym.Env):
         E_churn = float(p_churn_active.sum())
 
         # ── join (§10.2) ──
+        # [C3] Same fix — β_p_join on normalised scale
         join_logits = (
             self.b0_join
-            - self.bp_join * self._psens * P_sig * self._price_norm
+            - self.bp_join * self._psens * P_sig        # [C3] removed × price_norm
             + self.bq_join * self._qsens * Q_sig
         )
         p_join_all = sigmoid(join_logits)
@@ -418,12 +475,19 @@ class OranSlicingPricingEnv(gym.Env):
 
         return n_join, n_churn
 
-    # ── reward (§5 objective + §16.2 potential-based safety) ──────────
-    def _compute_reward(self, profit: float) -> float:
+    # ── reward (§5 objective + §15b smoothing) ────────────────────────
+    def _compute_reward(self, profit: float,
+                        smooth_penalty: float = 0.0) -> float:
+        """Log-transformed profit reward with optional action smoothing.
+
+        [C5] Smooth penalty  [Dulac-Arnold et al., JMLR 2021]:
+          Penalises large step-to-step action changes.
+        """
         if not np.isfinite(profit):
             profit = 0.0
         # log-transform for stability  [SB3_TIPS]
         r = float(np.sign(profit) * np.log1p(abs(profit) / self._reward_scale))
+        r -= smooth_penalty
         return float(np.clip(r, -2.0, 2.0))
 
     # ── observation (§3.2) ────────────────────────────────────────────
@@ -432,8 +496,8 @@ class OranSlicingPricingEnv(gym.Env):
         obs = np.array([
             N_act / max(self.N_total, 1),                          # 0
             (self.N_total - N_act) / max(self.N_total, 1),         # 1
-            self._prev_n_join / 20.0,                              # 2
-            self._prev_n_churn / 20.0,                             # 3
+            self._prev_n_join / max(self.N_total * 0.05, 1.0),    # 2  [FIX] adaptive norm
+            self._prev_n_churn / max(self.N_total * 0.05, 1.0),   # 3  [FIX] adaptive norm
             self._prev_pviol_U,                                    # 4 (already [0,1])
             self._prev_pviol_E,                                    # 5
             self._prev_revenue / max(self._reward_scale, 1.0),     # 6

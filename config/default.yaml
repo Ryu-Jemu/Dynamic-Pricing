@@ -1,9 +1,14 @@
 # ================================================================
 # 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
-# Every numeric value is either:
-#   (a) standards-pinned  [TS 38.104 / TS 23.503], or
-#   (b) calibrated to a named target statistic (see inline notes)
+# REVISION 2 — Calibration corrections backed by academic evidence.
+# Change log vs. v1:
+#   [C1] C_total_gb_per_step 50 → 400   [TS 38.306 peak throughput]
+#   [C2] Churn/join logit coefficients   [Ahn 2006, Verbeke 2012]
+#   [C3] Removed price_norm re-multiplication bug  (env.py change)
+#   [C4] Demand-price elasticity          [Nevo et al. 2016]
+#   [C5] Action smoothing penalty         [Dulac-Arnold et al. 2021]
+#   [C6] Increased training timesteps     [Henderson et al. 2018]
 # ================================================================
 
 # ── §1  Scenario ──
@@ -29,12 +34,12 @@ action:
   rho_U_min: 0.05            # PRB share for URLLC — floor
   rho_U_max: 0.60            # PRB share for URLLC — ceiling
 
-# ── §5  3-Part tariff allowances  [Grubb AER 2009][Nevo 2015][TS 23.503] ──
+# ── §5  3-Part tariff allowances  [Grubb AER 2009][Nevo 2016][TS 23.503] ──
 tariff:
   Q_U_gb: 5.0                # URLLC monthly allowance (GB)
   Q_E_gb: 50.0               # eMBB  monthly allowance (GB)
 
-# ── §6  Traffic  [Nevo 2015 — usage coupled with billing] ──
+# ── §6  Traffic  [Nevo 2016 — usage coupled with billing] ──
 traffic:
   URLLC:
     target_p50_gb_day: 0.15   # calibration target: median daily URLLC usage
@@ -47,12 +52,27 @@ traffic:
     D_min_gb: 0.01
     D_max_gb: 50.0
 
-# ── §7  RAN / PRB capacity  [TS 38.104][Huang IoT-J 2020] ──
+# ── §6b  Demand-price elasticity  [NEW — C4]  [Nevo et al. 2016] ──
+# Users reduce consumption when overage price is high relative to reference.
+# D_u *= max(0.5, 1 − ε × (p_over / p_ref − 1))
+# Elasticity ε ∈ [−0.1, −0.5] per Nevo et al. (Econometrica 2016)
+demand_elasticity:
+  enabled: true
+  epsilon_U: 0.15            # URLLC demand elasticity (low — inelastic)
+  epsilon_E: 0.30            # eMBB  demand elasticity (moderate)
+  p_ref_U: 2500.0            # URLLC reference overage price (KRW/GB)
+  p_ref_E: 1500.0            # eMBB  reference overage price (KRW/GB)
+  floor: 0.5                 # minimum demand multiplier (never below 50%)
+
+# ── §7  RAN / PRB capacity  [TS 38.104][TS 38.306][Huang IoT-J 2020] ──
+# [C1] CORRECTED: 100 MHz NR @ 30 kHz SCS delivers ~1.5 Gbps peak DL.
+#      At 5% average utilisation → ~810 GB/day.  400 GB is conservative.
+#      Previous value of 50 GB caused permanent eMBB congestion (pviol ≡ 1).
 radio:
   bandwidth_mhz: 100         # [TS 38.104] Band n78
   scs_khz: 30                # [TS 38.104]
   prb_total: 273             # [TS 38.104] NRB for 100 MHz @ 30 kHz SCS
-  C_total_gb_per_step: 50.0  # macro cell daily capacity proxy (GB/day)
+  C_total_gb_per_step: 400.0 # [C1] macro cell daily capacity (GB/day)
   kappa_U: 1.2               # URLLC priority factor ≥ 1  [Huang 2020]
 
 # ── §8  QoS / SLA violation ──
@@ -65,19 +85,33 @@ qos:
 cost:
   c_opex_per_user: 1200.0    # daily OPEX per active user ≈ 36 000 KRW/mo
   c_energy_per_gb: 50.0      # energy proxy per GB
-  c_cac_per_join: 80000.0    # customer acquisition cost  [CLV_KUMAR]
+  c_cac_per_join: 80000.0    # customer acquisition cost  [Kumar & Reinartz 2018]
 
-# ── §10  Market — join / churn  [CHURN logit][ITU Teletraffic] ──
+# ── §10  Market — join / churn  [C2][C3] RECALIBRATED ──
+# Calibration methodology:
+#   Target monthly churn ≈ 3%  → per-step p ≈ 0.001  [Ahn et al. 2006]
+#   Target monthly join  ≈ 5%  → per-step p ≈ 0.0017
+#
+# Balanced user (psens=1, qsens=1, swcost=0.5, P_sig≈0.96, Q_sig≈0.95):
+#   churn_logit = −5.5 + 1.5×0.96 − 2.0×0.95 − 1.5×0.5 = −6.71
+#   σ(−6.71) ≈ 0.00121  → monthly ≈ 3.6%   ✓
+#
+#   join_logit = −7.0 − 1.0×0.96 + 1.5×0.95 = −6.535
+#   σ(−6.535) ≈ 0.00146  → monthly ≈ 4.3%   ✓
+#
+# [C3] BUG FIX: env.py now uses P_sig directly (no re-multiplication
+#      by price_norm).  Old code: β_p × psens × P_sig × price_norm
+#      produced a ~2.0 term instead of the intended ~0.03.
 market:
-  beta0_churn: -2.5          # intercept (calibrated → ~3 % monthly churn)
-  beta_p_churn: 0.00003      # price sensitivity in logit
-  beta_q_churn: 2.0          # QoS sensitivity
+  beta0_churn: -5.5          # [C2] was −2.5;  intercept calibrated → ~3% monthly
+  beta_p_churn: 1.5          # [C2] was 0.00003; on normalised P_sig scale [0,1]
+  beta_q_churn: 2.0          # QoS retention effect
   beta_sw_churn: 1.5         # switching-cost weight
-  beta0_join: -3.0           # intercept (calibrated → ~5 % monthly join)
-  beta_p_join: 0.00002
-  beta_q_join: 1.5
+  beta0_join: -7.0           # [C2] was −3.0;  intercept calibrated → ~5% monthly
+  beta_p_join: 1.0           # [C2] was 0.00002; on normalised P_sig scale
+  beta_q_join: 1.5           # QoS attraction effect
   mode: "stochastic"         # "stochastic" or "expectation"
-  price_norm: 70000.0
+  price_norm: 70000.0        # normalisation constant (used only for P_sig)
 
 # ── §11  CLV  [Gupta JSR 2006] ──
 clv:
@@ -97,9 +131,9 @@ population:
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
 
-# ── §12  Training  [Haarnoja 2018 — SAC][SB3] ──
+# ── §12  Training  [Haarnoja 2018 — SAC][SB3][Henderson 2018] ──
 training:
-  total_timesteps: 200000
+  total_timesteps: 300000    # [C6] was 200K; increased for convergence
   learning_rate: 0.0003
   batch_size: 256
   buffer_size: 100000
@@ -116,6 +150,13 @@ observation:
   dim: 16
   clip_min: -10.0
   clip_max: 10.0
+
+# ── §15b  Action smoothing  [NEW — C5]  [Dulac-Arnold et al. 2021] ──
+# Penalise large step-to-step action changes to prevent unrealistic
+# day-to-day tariff oscillations.  Weight is relative to profit scale.
+action_smoothing:
+  enabled: true
+  weight: 0.01               # λ_smooth × ||a_t − a_{t-1}||²
 
 # ── Calibration targets ──
 calibration:

@@ -1,6 +1,10 @@
 """
 Unit tests for O-RAN 3-Part Tariff environment.
 
+REVISION 2 — Changes:
+  [T1-FIX] Action space assertion now correctly requires (5,) only
+  [T8-NEW] Calibration validation tests for churn/join rates and capacity
+
 Test groups:
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
@@ -8,11 +12,14 @@ Test groups:
   T4  QoS violation (sigmoid, capacity)
   T5  Numerical safety (no NaN/Inf, obs bounds, reward clip)
   T6  Billing cycle (reset accumulators, 30-step cycles)
+  T7  Utility functions
+  T8  Calibration validation (churn/join targets, capacity adequacy)
 
 References:
   [Grubb 2009]    3-part tariff structure
   [TS 23.503]     Usage monitoring / charging
   [SB3_TIPS]      Reward normalization, no NaN
+  [Ahn 2006]      Telecom churn — 1–5% monthly typical
 """
 from __future__ import annotations
 
@@ -63,7 +70,9 @@ class TestEnvBasics:
         assert isinstance(info, dict)
 
     def test_action_space_shape(self, env):
-        assert env.action_space.shape == (3,) or env.action_space.shape == (5,)
+        # [T1-FIX] Must be exactly (5,) — the 5-D continuous action
+        assert env.action_space.shape == (5,), \
+            f"Action space should be (5,), got {env.action_space.shape}"
 
     def test_episode_terminates(self, env):
         """Episode must terminate within episode_len steps."""
@@ -103,7 +112,7 @@ class TestRevenueModel:
         for _ in range(60):
             action = env.action_space.sample()
             _, _, term, _, info = env.step(action)
-            total_over_rev += info.get("revenue_overage", 0.0)
+            total_over_rev += info.get("over_rev", 0.0)
             if term:
                 break
         # Overage should eventually appear (demand > allowance for some users)
@@ -176,16 +185,12 @@ class TestQoSViolation:
 
     def test_high_load_increases_violation(self, env):
         """Extreme ρ_U → 0 should increase eMBB violation (less capacity)."""
-        # This is a directional check, not strict monotonicity
-        env.reset(seed=42)
-        # Force ρ_U very low (most capacity to URLLC → eMBB starved)
         low_rho = np.array([-1.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         high_rho = np.array([-1.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-        # Just verify no crash — directional property is stochastic
         env.reset(seed=42)
-        _, _, _, _, info_low = env.step(low_rho[:env.action_space.shape[0]])
+        _, _, _, _, info_low = env.step(low_rho)
         env.reset(seed=42)
-        _, _, _, _, info_high = env.step(high_rho[:env.action_space.shape[0]])
+        _, _, _, _, info_high = env.step(high_rho)
         assert np.isfinite(info_low["pviol_E"])
         assert np.isfinite(info_high["pviol_E"])
 
@@ -270,7 +275,6 @@ class TestBillingCycle:
             _, _, term, _, info = env.step(action)
             if term:
                 break
-        # After T steps, we should be in cycle step T (or reset to 0 at T+1)
 
     def test_info_contains_step(self, env):
         """Info dict must contain step counter."""
@@ -307,6 +311,95 @@ class TestUtils:
         assert np.isfinite(sigmoid(-500.0))
         assert abs(sigmoid(500.0) - 1.0) < 1e-6
         assert abs(sigmoid(-500.0) - 0.0) < 1e-6
+
+
+# =====================================================================
+# T8  Calibration validation  [NEW]  [Ahn 2006][Verbeke 2012]
+# =====================================================================
+class TestCalibration:
+    """Verify that recalibrated parameters produce rates within target bands."""
+
+    def test_monthly_churn_within_target(self, cfg):
+        """Monthly churn rate should be near 3% (tolerance: 0.5–10%).
+
+        [Ahn et al. 2006]: Telecom churn typically 1–5% monthly.
+        """
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        total_churn = 0
+        total_active = 0
+        n_steps = 300  # 10 months
+
+        # Use mid-range actions (not random) for calibration test
+        mid_action = np.zeros(5, dtype=np.float32)
+        for _ in range(n_steps):
+            _, _, term, _, info = env.step(mid_action)
+            total_churn += info["n_churn"]
+            total_active += info["N_active"]
+            if term:
+                break
+
+        per_step_churn = total_churn / max(total_active, 1)
+        monthly_churn = 1.0 - (1.0 - per_step_churn) ** 30
+        assert 0.005 <= monthly_churn <= 0.10, \
+            f"Monthly churn {monthly_churn:.4f} outside [0.5%, 10%] band"
+
+    def test_monthly_join_within_target(self, cfg):
+        """Monthly join rate should be near 5% (tolerance: 1–15%)."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        total_join = 0
+        total_inactive = 0
+        n_steps = 300
+
+        mid_action = np.zeros(5, dtype=np.float32)
+        for _ in range(n_steps):
+            _, _, term, _, info = env.step(mid_action)
+            total_join += info["n_join"]
+            total_inactive += info["N_inactive"]
+            if term:
+                break
+
+        per_step_join = total_join / max(total_inactive, 1)
+        monthly_join = 1.0 - (1.0 - per_step_join) ** 30
+        assert 0.01 <= monthly_join <= 0.15, \
+            f"Monthly join {monthly_join:.4f} outside [1%, 15%] band"
+
+    def test_embb_not_permanently_congested(self, cfg):
+        """eMBB slice should NOT be permanently at pviol ≈ 1.0.
+
+        [C1] Fix: C_total increased to 400 GB/day.
+        """
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        pviol_values = []
+
+        mid_action = np.zeros(5, dtype=np.float32)
+        for _ in range(60):
+            _, _, term, _, info = env.step(mid_action)
+            pviol_values.append(info["pviol_E"])
+            if term:
+                break
+
+        mean_pviol = np.mean(pviol_values)
+        assert mean_pviol < 0.95, \
+            f"eMBB pviol_E mean={mean_pviol:.4f} — still permanently congested"
+
+    def test_capacity_adequate_for_population(self, cfg):
+        """Total cell capacity should accommodate expected aggregate demand.
+
+        100 MHz NR @ 30 kHz SCS: 273 PRBs → peak ~1.5 Gbps DL.
+        At 5% utilisation → ~810 GB/day.  [TS 38.306]
+        """
+        C = cfg["radio"]["C_total_gb_per_step"]
+        N_active = cfg["population"]["N_active_init"]
+        frac_embb = 1.0 - cfg["population"]["frac_urllc"]
+        p50_embb = cfg["traffic"]["eMBB"]["target_p50_gb_day"]
+
+        # Expected daily eMBB demand ≈ N_active × frac_eMBB × p50
+        expected_embb = N_active * frac_embb * p50_embb
+        assert C >= expected_embb * 0.8, \
+            f"Capacity {C} GB < 80% of expected eMBB demand {expected_embb:.0f} GB"
 
 
 if __name__ == "__main__":
