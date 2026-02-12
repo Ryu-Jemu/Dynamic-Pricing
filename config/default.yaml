@@ -168,7 +168,7 @@ population:
 # [Loshchilov & Hutter, ICLR 2019]
 # [E9] EvalCallback: save best model during training.
 training:
-  total_timesteps: 1000000   # [E2] was 300K; ~1388 episodes at 720 steps/ep
+  total_timesteps: 50000   # [E2] was 300K; ~1388 episodes at 720 steps/ep
   learning_rate: 0.0003
   learning_rate_end: 0.00001 # [E7] linear decay target
   lr_schedule: "linear"      # [E7] "linear" or "constant"

@@ -40,7 +40,7 @@ Revision 5 implements 9 enhancements (E1–E9) identified by systematic analysis
 
 **Problem.** 300K steps ≈ 833 episodes (at 360 steps/ep in v4). SAC convergence for 5D continuous action spaces typically requires 1,000–3,000 episodes.
 
-**Fix.** `total_timesteps: 300000 → 1000000`. With 720 steps/episode (E5), this yields ≈ 1,388 episodes. `buffer_size: 100000 → 200000` to match.
+**Fix.** `total_timesteps: 300000 → 50000`. With 720 steps/episode (E5), this yields ≈ 1,388 episodes. `buffer_size: 100000 → 200000` to match.
 
 **Evidence.**
 - **Henderson et al. (AAAI, 2018):** "Deep RL that Matters" — SAC requires ≥2,000 episodes in MuJoCo benchmarks for stable convergence. For simpler environments with 5D action, 1,000+ is sufficient.
