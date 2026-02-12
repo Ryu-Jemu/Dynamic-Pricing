@@ -78,14 +78,12 @@ def run_evaluation(cfg: Dict[str, Any],
         records = evaluate_episode(env, model, repeat_id=rep)
         all_records.extend(records)
 
-    # ── rollout log ──
     rollout_path = out / "rollout_log.csv"
     if all_records:
         df = pd.DataFrame(all_records)
         df.to_csv(rollout_path, index=False)
         logger.info("Rollout log: %d rows -> %s", len(df), rollout_path)
 
-        # ── summary ──
         summary_path = out / "eval_summary.csv"
         num_cols = df.select_dtypes(include="number").columns
         mean_vals = df[num_cols].mean()
@@ -94,7 +92,6 @@ def run_evaluation(cfg: Dict[str, Any],
         summary.to_csv(summary_path)
         logger.info("Summary -> %s", summary_path)
 
-        # ── CLV computation (§11) ──
         if cfg.get("clv", {}).get("enabled", True):
             _compute_clv_report(cfg, df, out)
 
@@ -103,14 +100,12 @@ def run_evaluation(cfg: Dict[str, Any],
 
 def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
                         out: Path) -> None:
-    """Compute and save CLV report  [Gupta JSR 2006]."""
     clv_cfg = cfg.get("clv", {})
     H = clv_cfg.get("horizon_months", 24)
     d = clv_cfg.get("discount_rate_monthly", 0.01)
 
     T = cfg["time"]["steps_per_cycle"]
 
-    # [F3] FIX: include_groups=False
     monthly_profit = df.groupby("repeat").apply(
         lambda g: g.groupby(g["step"].apply(lambda s: (s - 1) // T))["profit"].sum().mean(),
         include_groups=False,
@@ -120,7 +115,6 @@ def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
     mean_N = df["N_active"].mean()
     cf_per_user = mean_monthly_profit / max(mean_N, 1)
 
-    # retention = 1 - mean monthly churn rate
     churn_per_step = df["n_churn"].mean() / max(df["N_active"].mean(), 1)
     monthly_churn = 1.0 - (1.0 - churn_per_step) ** T
     retention = max(1.0 - monthly_churn, 0.01)

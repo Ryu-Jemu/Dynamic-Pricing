@@ -6,6 +6,7 @@
 #   [R1] 1M training timesteps (restored)
 #   [R3] Curriculum learning (Phase 1: no churn/join; Phase 2: full dynamics)
 #   [R8] Higher initial entropy coefficient
+#   [NEW] HTML convergence dashboard generation (Step 5b)
 #   Prior: [E9] Multi-seed training, [F1] transparent pip, [F2] SB3 verify
 #
 # Steps:
@@ -14,7 +15,8 @@
 #   2) Run unit tests
 #   3) Train SAC agent (multi-seed with curriculum)
 #   4) Evaluate & export logs + CLV
-#   5) Generate dashboard
+#   5a) Generate Streamlit / static PNG dashboard
+#   5b) Generate HTML convergence dashboard
 #
 # Usage:
 #   chmod +x scripts/run.sh && ./scripts/run.sh [--seeds N]
@@ -139,8 +141,8 @@ else
 fi
 echo ""
 
-# ── Step 5: Dashboard ──
-echo "===== Step 5: Dashboard ====="
+# ── Step 5a: Streamlit / static dashboard ──
+echo "===== Step 5a: Dashboard (Streamlit / PNG) ====="
 if python -c "import streamlit" 2>/dev/null; then
     echo "Launching Streamlit dashboard..."
     echo "  URL: http://localhost:8501"
@@ -155,8 +157,40 @@ df = pd.read_csv('outputs/rollout_log.csv')
 _make_static_dashboard(df, Path('outputs'))
 "
 fi
-
 echo ""
+
+# ── Step 5b: HTML convergence dashboard ──
+echo "===== Step 5b: HTML Convergence Dashboard ====="
+# Find the training log for seed 0
+TRAIN_CSV="outputs/train_log_seed0.csv"
+if [ -f "$TRAIN_CSV" ]; then
+    echo "Generating HTML dashboard from: $TRAIN_CSV"
+    python -m oran3pt.html_dashboard \
+        --csv "$TRAIN_CSV" \
+        --output outputs/training_convergence_dashboard.html \
+        --seed 0 \
+        --revision 7
+    echo "  → outputs/training_convergence_dashboard.html"
+else
+    echo "No training log found at $TRAIN_CSV"
+    # Fall back to rollout log if available
+    if [ -f "outputs/rollout_log.csv" ]; then
+        echo "Using evaluation rollout log instead"
+        python -m oran3pt.html_dashboard \
+            --csv outputs/rollout_log.csv \
+            --output outputs/training_convergence_dashboard.html \
+            --seed 0 \
+            --revision 7
+        echo "  → outputs/training_convergence_dashboard.html"
+    else
+        echo "No CSV logs found — skipping HTML dashboard"
+    fi
+fi
+echo ""
+
 echo "============================================"
 echo " Pipeline complete.  Outputs: $PROJECT_DIR/outputs/"
 echo "============================================"
+echo ""
+echo " Files:"
+ls -lh outputs/ 2>/dev/null || echo "  (no outputs yet)"

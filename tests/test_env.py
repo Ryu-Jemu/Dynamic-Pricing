@@ -55,7 +55,6 @@ def env(cfg):
 class TestEnvBasics:
     def test_reset_returns_valid_obs(self, env):
         obs, info = env.reset(seed=42)
-        # [R5] 22-D observation
         assert obs.shape == (22,), f"Bad obs shape: {obs.shape}"
         assert obs.dtype == np.float32
         assert np.all(np.isfinite(obs))
@@ -77,7 +76,6 @@ class TestEnvBasics:
             f"Action space should be (5,), got {env.action_space.shape}"
 
     def test_episode_terminates(self, env):
-        """Episode must terminate within episode_len steps."""
         obs, _ = env.reset(seed=42)
         done = False
         steps = 0
@@ -91,14 +89,13 @@ class TestEnvBasics:
             f"Terminated at step {steps}, expected {env.episode_len}"
 
     def test_episode_length_matches_config(self, env, cfg):
-        """[E5] Episode length = steps_per_cycle x episode_cycles."""
         expected = cfg["time"]["steps_per_cycle"] * cfg["time"]["episode_cycles"]
         assert env.episode_len == expected, \
             f"Episode len {env.episode_len} != {expected}"
 
 
 # =====================================================================
-# T2  Revenue model [Grubb 2009]
+# T2  Revenue model
 # =====================================================================
 class TestRevenueModel:
     def test_revenue_non_negative_with_active_users(self, env):
@@ -194,7 +191,7 @@ class TestQoSViolation:
 
 
 # =====================================================================
-# T5  Numerical safety [SB3_TIPS]
+# T5  Numerical safety
 # =====================================================================
 class TestNumericalSafety:
     def test_no_nan_inf_random_episode(self, env):
@@ -255,7 +252,7 @@ class TestNumericalSafety:
 
 
 # =====================================================================
-# T6  Billing cycle [TS 23.503]
+# T6  Billing cycle
 # =====================================================================
 class TestBillingCycle:
     def test_cycle_length(self, env):
@@ -303,13 +300,10 @@ class TestUtils:
 
 
 # =====================================================================
-# T8  Calibration validation  [E3][Ahn 2006]
+# T8  Calibration validation
 # =====================================================================
 class TestCalibration:
-    """Verify recalibrated parameters produce rates within target bands."""
-
     def test_monthly_churn_within_target(self, cfg):
-        """Monthly churn at mid-price should be in [0.5%, 15%]."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         total_churn = 0
@@ -330,7 +324,6 @@ class TestCalibration:
             f"Monthly churn {monthly_churn:.4f} outside [0.5%, 15%] band"
 
     def test_monthly_join_within_target(self, cfg):
-        """Monthly join rate should be in [1%, 15%]."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         total_join = 0
@@ -377,8 +370,6 @@ class TestCalibration:
             f"Capacity {C} GB < 80% of expected eMBB demand {expected_embb:.0f} GB"
 
     def test_high_price_causes_more_churn(self, cfg):
-        """[E3] At max price, churn should be substantially higher than mid-price."""
-        # Mid-price run
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         mid_action = np.zeros(5, dtype=np.float32)
@@ -391,7 +382,6 @@ class TestCalibration:
             if term:
                 break
 
-        # Max-price run
         env2 = OranSlicingPricingEnv(cfg, seed=42)
         env2.reset(seed=42)
         max_price_action = np.array([1.0, 1.0, 1.0, 1.0, 0.0], dtype=np.float32)
@@ -412,19 +402,15 @@ class TestCalibration:
 
 
 # =====================================================================
-# T9  v5 Enhancement tests  [E4][E6][E8]
+# T9  v5 Enhancement tests
 # =====================================================================
 class TestV5Enhancements:
-    """Tests for features introduced in revision 5 (updated for v7 22D obs)."""
-
     def test_obs_dim_is_22(self, env):
-        """[R5] Observation space should be 22-dimensional."""
         assert env.observation_space.shape == (22,)
         obs, _ = env.reset(seed=42)
         assert obs.shape == (22,)
 
     def test_load_factor_in_obs(self, env):
-        """[E4] Obs indices 18-19 should contain load factors."""
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, info = env.step(action)
@@ -434,7 +420,6 @@ class TestV5Enhancements:
         assert np.isfinite(load_E) and load_E >= 0.0
 
     def test_allowance_util_in_obs(self, env):
-        """[E4] Obs indices 16-17 should contain allowance utilisation."""
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, _ = env.step(action)
@@ -444,7 +429,6 @@ class TestV5Enhancements:
         assert np.isfinite(util_E) and util_E >= 0.0
 
     def test_allowance_util_increases_within_cycle(self, env):
-        """[E4] Allowance utilisation should monotonically increase within a cycle."""
         env.reset(seed=42)
         mid_action = np.zeros(5, dtype=np.float32)
         prev_util_E = 0.0
@@ -458,7 +442,6 @@ class TestV5Enhancements:
                 break
 
     def test_retention_penalty_in_info(self, env):
-        """[E6] Info dict should contain retention_penalty field."""
         env.reset(seed=42)
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -468,7 +451,6 @@ class TestV5Enhancements:
         assert info["retention_penalty"] >= 0.0
 
     def test_retention_penalty_warmup(self, cfg):
-        """[E6] Retention penalty should be 0 during warmup period."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         warmup = cfg.get("clv_reward_shaping", {}).get("warmup_steps", 100)
@@ -478,7 +460,6 @@ class TestV5Enhancements:
             f"Penalty should be 0 at step 1 (warmup={warmup})"
 
     def test_smooth_penalty_in_info(self, env):
-        """[E8] Info dict should contain smooth_penalty field."""
         env.reset(seed=42)
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -487,7 +468,6 @@ class TestV5Enhancements:
         assert np.isfinite(info["smooth_penalty"])
 
     def test_large_action_change_produces_smooth_penalty(self, env):
-        """[E8] Large consecutive action changes should produce nonzero penalty."""
         env.reset(seed=42)
         low_action = np.full(5, -1.0, dtype=np.float32)
         env.step(low_action)
@@ -497,7 +477,6 @@ class TestV5Enhancements:
             f"Smooth penalty should be > 0 for max action change"
 
     def test_info_contains_load_capacity(self, env):
-        """[E4] Info dict should contain L_U, L_E, C_U, C_E."""
         env.reset(seed=42)
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -508,19 +487,15 @@ class TestV5Enhancements:
 
 
 # =====================================================================
-# T10  v7 Enhancement tests  [R4][R5][R6][R3]
+# T10  v7 Enhancement tests
 # =====================================================================
 class TestV7Enhancements:
-    """Tests for features introduced in revision 7."""
-
     def test_obs_dim_is_22(self, env):
-        """[R5] Observation space should be 22-dimensional."""
         assert env.observation_space.shape == (22,)
         obs, _ = env.reset(seed=42)
         assert obs.shape == (22,)
 
     def test_overage_rate_in_obs(self, env):
-        """[R5] Obs index 20 should contain eMBB overage revenue rate."""
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, _ = env.step(action)
@@ -528,7 +503,6 @@ class TestV7Enhancements:
         assert np.isfinite(over_rate) and over_rate >= 0.0
 
     def test_days_remaining_in_obs(self, env):
-        """[R5] Obs index 21 should contain days remaining in cycle."""
         env.reset(seed=42)
         mid_action = np.zeros(5, dtype=np.float32)
         obs, _, _, _, _ = env.step(mid_action)
@@ -538,7 +512,6 @@ class TestV7Enhancements:
             f"Days remaining {days_remaining} not in [0, 1]"
 
     def test_days_remaining_decreases_within_cycle(self, env):
-        """[R5] Days remaining should decrease within a billing cycle."""
         env.reset(seed=42)
         mid_action = np.zeros(5, dtype=np.float32)
         prev_days = 1.0
@@ -552,7 +525,6 @@ class TestV7Enhancements:
                 break
 
     def test_pop_bonus_in_info(self, env):
-        """[R6] Info dict should contain pop_bonus field."""
         env.reset(seed=42)
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -561,43 +533,33 @@ class TestV7Enhancements:
         assert np.isfinite(info["pop_bonus"])
 
     def test_pop_bonus_positive_when_above_target(self, cfg):
-        """[R6] Pop bonus should be positive when N_active/N_total > target."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
-        # With 200 active / 500 total = 0.4 = target_ratio, bonus should be ~0
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
-        # At the start, N_active ≈ 200, target_ratio = 0.4, so bonus ≈ 0
         assert abs(info["pop_bonus"]) < 0.02, \
             f"Pop bonus should be near 0 at target ratio, got {info['pop_bonus']}"
 
     def test_per_dimension_smoothing(self, cfg):
-        """[R4] Per-dimension smoothing should produce asymmetric penalties."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
-        # Step 1: mid action
         mid_action = np.zeros(5, dtype=np.float32)
         env.step(mid_action)
 
-        # Step 2: change only rho_U (dimension 4, weight 0.01)
         rho_only = np.array([0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         _, _, _, _, info_rho = env.step(rho_only)
 
         env.reset(seed=42)
         env.step(mid_action)
 
-        # Step 2: change only F_U (dimension 0, weight 0.10)
         fu_only = np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         _, _, _, _, info_fu = env.step(fu_only)
 
-        # F_U change (weight=0.10) should produce higher penalty than
-        # rho_U change (weight=0.01), assuming comparable normalised deltas
         assert info_fu["smooth_penalty"] > info_rho["smooth_penalty"], \
             f"F_U penalty ({info_fu['smooth_penalty']:.6f}) should exceed " \
             f"rho_U penalty ({info_rho['smooth_penalty']:.6f})"
 
     def test_over_rev_e_in_info(self, env):
-        """[R5] Info dict should contain over_rev_E field."""
         env.reset(seed=42)
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -606,7 +568,6 @@ class TestV7Enhancements:
         assert info["over_rev_E"] >= 0.0
 
     def test_curriculum_phase_no_churn(self, cfg):
-        """[R3] Phase 1 (curriculum) should produce zero churn/join."""
         env = OranSlicingPricingEnv(cfg, seed=42, curriculum_phase=1)
         env.reset(seed=42)
         action = env.action_space.sample()
@@ -615,16 +576,13 @@ class TestV7Enhancements:
         assert info["n_join"] == 0, "Phase 1 should have no join"
 
     def test_curriculum_phase_switch(self, cfg):
-        """[R3] Switching from Phase 1 to Phase 0 should re-enable dynamics."""
         env = OranSlicingPricingEnv(cfg, seed=42, curriculum_phase=1)
         env.reset(seed=42)
 
-        # Phase 1: no churn/join
         for _ in range(10):
             _, _, _, _, info = env.step(env.action_space.sample())
         assert info["n_churn"] == 0
 
-        # Switch to Phase 0
         env.set_curriculum_phase(0)
         total_events = 0
         for _ in range(100):
@@ -633,12 +591,10 @@ class TestV7Enhancements:
             if term:
                 break
 
-        # Over 100 steps with full dynamics, some events should occur
         assert total_events > 0, \
             "After switching to Phase 0, churn/join should occur"
 
     def test_22d_obs_all_finite(self, env):
-        """All 22 observation dimensions should be finite across an episode."""
         env.reset(seed=42)
         for step in range(100):
             action = env.action_space.sample()

@@ -34,37 +34,32 @@ scenario:
   slices: ["URLLC", "eMBB"]
 
 # ── §3.1  Time axis ──
-# [E5] episode_cycles 12 → 24.  Aligns episode length with CLV
-# horizon (24 months), so the agent can experience the full
-# consequences of user attrition within a single episode.
-# [Gupta et al., J. Service Research, 2006]
 time:
-  steps_per_cycle: 30        # 1 step ≈ 1 day; 30 steps ≈ 1 month
-  episode_cycles: 24         # [E5] was 12; now 24 cycles (→ 720 steps)
+  steps_per_cycle: 30
+  episode_cycles: 24
 
 # ── §4  Action bounds (5-D continuous) ──
-# [E1] F_E_max raised from 110K to 150K KRW.
 action:
-  F_U_min: 30000.0           # URLLC base fee min  (KRW/cycle)
+  F_U_min: 30000.0
   F_U_max: 90000.0
-  F_E_min: 40000.0           # eMBB  base fee min
-  F_E_max: 150000.0          # [E1] was 110000.0
-  p_over_U_min: 500.0        # URLLC overage price min (KRW/GB)
+  F_E_min: 40000.0
+  F_E_max: 150000.0
+  p_over_U_min: 500.0
   p_over_U_max: 5000.0
-  p_over_E_min: 200.0        # eMBB  overage price min
+  p_over_E_min: 200.0
   p_over_E_max: 3000.0
-  rho_U_min: 0.05            # PRB share for URLLC — floor
-  rho_U_max: 0.60            # PRB share for URLLC — ceiling
+  rho_U_min: 0.05
+  rho_U_max: 0.60
 
-# ── §5  3-Part tariff allowances  [Grubb AER 2009][Nevo 2016][TS 23.503] ──
+# ── §5  3-Part tariff allowances ──
 tariff:
-  Q_U_gb: 5.0                # URLLC monthly allowance (GB)
-  Q_E_gb: 50.0               # eMBB  monthly allowance (GB)
+  Q_U_gb: 5.0
+  Q_E_gb: 50.0
 
-# ── §6  Traffic  [Nevo 2016 — usage coupled with billing] ──
+# ── §6  Traffic ──
 traffic:
   URLLC:
-    target_p50_gb_day: 0.15   # calibration target: median daily URLLC usage
+    target_p50_gb_day: 0.15
     target_p90_gb_day: 0.50
     D_min_gb: 0.001
     D_max_gb: 5.0
@@ -74,68 +69,58 @@ traffic:
     D_min_gb: 0.01
     D_max_gb: 50.0
 
-# ── §6b  Demand-price elasticity  [C4]  [Nevo et al. 2016] ──
+# ── §6b  Demand-price elasticity  [C4] ──
 demand_elasticity:
   enabled: true
-  epsilon_U: 0.15            # URLLC demand elasticity (low — inelastic)
-  epsilon_E: 0.30            # eMBB  demand elasticity (moderate)
-  p_ref_U: 2500.0            # URLLC reference overage price (KRW/GB)
-  p_ref_E: 1500.0            # eMBB  reference overage price (KRW/GB)
-  floor: 0.5                 # minimum demand multiplier (never below 50%)
+  epsilon_U: 0.15
+  epsilon_E: 0.30
+  p_ref_U: 2500.0
+  p_ref_E: 1500.0
+  floor: 0.5
 
-# ── §7  RAN / PRB capacity  [TS 38.104][TS 38.306][Huang IoT-J 2020] ──
+# ── §7  RAN / PRB capacity ──
 radio:
-  bandwidth_mhz: 100         # [TS 38.104] Band n78
-  scs_khz: 30                # [TS 38.104]
-  prb_total: 273             # [TS 38.104] NRB for 100 MHz @ 30 kHz SCS
-  C_total_gb_per_step: 400.0 # [C1] macro cell daily capacity (GB/day)
-  kappa_U: 1.2               # URLLC priority factor ≥ 1  [Huang 2020]
+  bandwidth_mhz: 100
+  scs_khz: 30
+  prb_total: 273
+  C_total_gb_per_step: 400.0
+  kappa_U: 1.2
 
 # ── §8  QoS / SLA violation ──
 qos:
-  alpha_congestion: 10.0     # sigmoid steepness
-  lambda_U: 500000.0         # SLA penalty weight URLLC (KRW)
-  lambda_E: 50000.0          # SLA penalty weight eMBB
+  alpha_congestion: 10.0
+  lambda_U: 500000.0
+  lambda_E: 50000.0
 
 # ── §9  Cost (Capex excluded) ──
 cost:
-  c_opex_per_user: 1200.0    # daily OPEX per active user ≈ 36 000 KRW/mo
-  c_energy_per_gb: 50.0      # energy proxy per GB
-  c_cac_per_join: 80000.0    # customer acquisition cost  [Kumar & Reinartz 2018]
+  c_opex_per_user: 1200.0
+  c_energy_per_gb: 50.0
+  c_cac_per_join: 80000.0
 
 # ── §10  Market — join / churn ──
-# [E3] beta_p_churn raised from 1.5 → 3.0.
 market:
   beta0_churn: -5.5
-  beta_p_churn: 3.0          # [E3] was 1.5;  stronger price sensitivity
-  beta_q_churn: 2.0          # QoS retention effect
-  beta_sw_churn: 1.5         # switching-cost weight
+  beta_p_churn: 3.0
+  beta_q_churn: 2.0
+  beta_sw_churn: 1.5
   beta0_join: -7.0
   beta_p_join: 1.0
-  beta_q_join: 1.5           # QoS attraction effect
-  mode: "stochastic"         # "stochastic" or "expectation"
-  price_norm: 120000.0       # [E1] updated: (F_U_max + F_E_max)/2 = (90K+150K)/2 = 120K
+  beta_q_join: 1.5
+  mode: "stochastic"
+  price_norm: 120000.0
 
-# ── §11  CLV  [Gupta JSR 2006] ──
+# ── §11  CLV ──
 clv:
   horizon_months: 24
   discount_rate_monthly: 0.01
   enabled: true
 
-# ── §11b  CLV-aware reward shaping  [E6][R2]  [Ng 1999; Wiewiora 2003] ──
-# [R2] alpha_retention raised from 0.15 → 2.0.
-# Rationale: v6 analysis showed the penalty was only 0.11% of reward —
-# below the threshold for learning.  With α=2.0 and typical
-# n_churn/N_active ≈ 0.003: penalty = 2.0 × 0.003 = 0.006 (2.1% of
-# mean reward 0.29).  At peak churn (0.02), penalty = 0.04 (14% of reward).
-# [Fader & Hardie, Marketing Science, 2010]: small churn reductions
-# (0.5–1pp) increase firm value by 25–95%.
-# [Wiewiora et al., ICML, 2003]: non-potential shaping can accelerate
-# convergence if calibrated to the relevant reward scale.
+# ── §11b  CLV-aware reward shaping ──
 clv_reward_shaping:
   enabled: true
-  alpha_retention: 2.0       # [R2] was 0.15; meaningful penalty at 2.1% of reward
-  warmup_steps: 100          # no penalty for first N steps (exploration)
+  alpha_retention: 2.0
+  warmup_steps: 100
 
 # ── §13  Population ──
 population:
@@ -149,74 +134,46 @@ population:
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
 
-# ── §12  Training  [Haarnoja 2018 — SAC][SB3][Henderson 2018] ──
-# [R1] total_timesteps restored to 1,000,000 (was incorrectly 50,000).
-# At 720 steps/episode, 1M steps ≈ 1,388 episodes per seed.
-# With 5 seeds, total ≈ 6,944 episodes, exceeding Henderson (2018)
-# minimum of 2,000.
-# [R8] ent_coef_init: 0.5 for higher initial exploration, transitioning
-# to auto-tuning after warmup phase.
-# [Zhou et al., ICLR, 2022]: higher initial entropy followed by
-# annealing improves final performance in environments with sparse
-# or delayed rewards.
+# ── §12  Training ──
 training:
-  total_timesteps: 10000   # [R1] restored from 50K; ~1388 episodes/seed
+  total_timesteps: 10000
   learning_rate: 0.0003
-  learning_rate_end: 0.00001 # [E7] linear decay target
-  lr_schedule: "linear"      # [E7] "linear" or "constant"
+  learning_rate_end: 0.00001
+  lr_schedule: "linear"
   batch_size: 256
-  buffer_size: 200000        # replay buffer — fully utilised at 1M steps
-  gamma: 0.995               # [E5] longer episodes need higher γ
+  buffer_size: 200000
+  gamma: 0.995
   tau: 0.005
-  ent_coef: "auto"           # [SB3 SAC] automatic entropy tuning
-  ent_coef_init: 0.5         # [R8] higher initial exploration entropy
-  ent_coef_warmup_steps: 200000  # [R8] steps before transitioning to auto
+  ent_coef: "auto"
+  ent_coef_init: 0.5
+  ent_coef_warmup_steps: 200000
   train_freq: 1
   gradient_steps: 1
-  eval_freq: 10000           # [E9] evaluate every 10K steps
+  eval_freq: 10000
   n_eval_episodes: 5
-  n_seeds: 5                 # [E9] multi-seed training runs
-  # [R3] Curriculum learning phases
+  n_seeds: 5
   curriculum:
     enabled: true
-    phase1_steps: 200000     # Phase 1: fixed N_active, no churn/join
-    phase2_steps: 800000     # Phase 2: full stochastic dynamics
+    phase1_steps: 200000
+    phase2_steps: 800000
 
 # ── §3.2  Observation ──
-# [R5] dim 20 → 22.  Added 2 derived features:
-#   20: over_rev_E / (p_over_E × N_E + ε)  — eMBB overage revenue rate
-#   21: (T − cycle_step) / T                — days remaining in cycle
-# [Dulac-Arnold et al., JMLR 2021, Challenge #1]: task-relevant
-# observations reduce sample complexity.
 observation:
-  dim: 22                    # [R5] was 20; added overage rate + days remaining
+  dim: 22
   clip_min: -10.0
   clip_max: 10.0
 
-# ── §15b  Action smoothing  [C5][E8][R4]  [Dulac-Arnold 2021; Dalal 2018] ──
-# [R4] Per-dimension weights replace scalar weight.
-# Pricing dimensions (F_U, F_E) penalised more heavily — real telcos
-# change base fees monthly at most.  Overage prices and capacity (ρ_U)
-# can change daily (algorithmic adjustment).
-# [Dalal et al., NeurIPS, 2018]: domain-specific per-dimension action
-# constraints improve learning efficiency and deployed policy quality.
+# ── §15b  Action smoothing ──
 action_smoothing:
   enabled: true
-  weight: 0.05               # [E8] scalar fallback (used if weights absent)
-  weights: [0.10, 0.05, 0.10, 0.05, 0.01]  # [R4] F_U, p_over_U, F_E, p_over_E, rho_U
+  weight: 0.05
+  weights: [0.10, 0.05, 0.10, 0.05, 0.01]
 
-# ── §15c  Population-aware reward  [R6]  [Mguni 2019; Zheng 2022] ──
-# Adds a population maintenance term to the reward:
-#   reward += β_pop × (N_active / N_total − target_ratio)
-# Rewards the agent for sustaining the subscriber base.
-# [Mguni et al., AAMAS, 2019]: auxiliary reward terms tied to
-# environment state stability improve long-horizon performance.
-# [Zheng et al., Science Advances, 2022, "The AI Economist"]:
-# population-level welfare terms prevent degenerate equilibria.
+# ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 0.1              # population maintenance bonus weight
-  target_ratio: 0.4          # target N_active/N_total = 200/500
+  beta_pop: 0.1
+  target_ratio: 0.4
 
 # ── Calibration targets ──
 calibration:

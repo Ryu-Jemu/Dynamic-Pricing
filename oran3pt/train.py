@@ -91,11 +91,7 @@ def _filter_info(info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _make_lr_schedule(lr_start: float, lr_end: float):
-    """[E7] Linear LR decay  [Loshchilov & Hutter, ICLR 2019].
-
-    Returns a callable that SB3 accepts for learning_rate parameter.
-    progress_remaining goes from 1.0 (start) → 0.0 (end of training).
-    """
+    """[E7] Linear LR decay  [Loshchilov & Hutter, ICLR 2019]."""
     def _schedule(progress_remaining: float) -> float:
         return lr_end + (lr_start - lr_end) * progress_remaining
     return _schedule
@@ -125,31 +121,30 @@ def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
     }
 
 
-class _CurriculumCallback(BaseCallback):
-    """[R3] Curriculum learning callback.
+if _SB3_AVAILABLE:
+    class _CurriculumCallback(BaseCallback):
+        """[R3] Curriculum learning callback.
 
-    Phase 1 (steps 0..phase1_steps): no churn/join — agent learns
-    capacity allocation and overage pricing in isolation.
-    Phase 2 (remaining steps): full stochastic dynamics.
+        Phase 1 (steps 0..phase1_steps): no churn/join — agent learns
+        capacity allocation and overage pricing in isolation.
+        Phase 2 (remaining steps): full stochastic dynamics.
+        """
 
-    [Narvekar et al., JMLR, 2020; Bengio et al., ICML, 2009]
-    """
+        def __init__(self, phase1_steps: int, verbose: int = 0):
+            super().__init__(verbose)
+            self._phase1_steps = phase1_steps
+            self._transitioned = False
 
-    def __init__(self, phase1_steps: int, verbose: int = 0):
-        super().__init__(verbose)
-        self._phase1_steps = phase1_steps
-        self._transitioned = False
-
-    def _on_step(self) -> bool:
-        if not self._transitioned and self.num_timesteps >= self._phase1_steps:
-            env = self.training_env.envs[0]
-            if hasattr(env, 'set_curriculum_phase'):
-                env.set_curriculum_phase(0)  # 0 = full dynamics
-                logger.info(
-                    "[R3] Curriculum: Phase 1 → Phase 2 at step %d "
-                    "(enabling churn/join)", self.num_timesteps)
-            self._transitioned = True
-        return True
+        def _on_step(self) -> bool:
+            if not self._transitioned and self.num_timesteps >= self._phase1_steps:
+                env = self.training_env.envs[0]
+                if hasattr(env, 'set_curriculum_phase'):
+                    env.set_curriculum_phase(0)
+                    logger.info(
+                        "[R3] Curriculum: Phase 1 → Phase 2 at step %d "
+                        "(enabling churn/join)", self.num_timesteps)
+                self._transitioned = True
+            return True
 
 
 def train_single_seed(cfg: Dict[str, Any],
@@ -169,18 +164,15 @@ def train_single_seed(cfg: Dict[str, Any],
     lr_end = tc.get("learning_rate_end", 1e-5)
     lr_schedule_type = tc.get("lr_schedule", "linear")
 
-    # [R3] Curriculum learning config
     curriculum_cfg = tc.get("curriculum", {})
     curriculum_enabled = curriculum_cfg.get("enabled", False)
     phase1_steps = curriculum_cfg.get("phase1_steps", 200000)
 
-    # [R8] Entropy coefficient config
     ent_coef_init = tc.get("ent_coef_init", None)
     ent_coef = tc.get("ent_coef", "auto")
 
     csv_path = str(out / f"train_log_seed{seed}.csv")
 
-    # [F1] Explicit check
     if not _SB3_AVAILABLE:
         logger.error(
             "═══════════════════════════════════════════════════════\n"
@@ -199,7 +191,6 @@ def train_single_seed(cfg: Dict[str, Any],
     logger.info("SB3 available — training SAC for %d timesteps (seed %d)",
                 total_timesteps, seed)
 
-    # [R3] Start in Phase 1 (no churn/join) if curriculum enabled
     initial_phase = 1 if curriculum_enabled else 0
     env = OranSlicingPricingEnv(
         cfg, users_csv=users_csv, seed=seed,
@@ -221,7 +212,6 @@ def train_single_seed(cfg: Dict[str, Any],
                 self.csvl.log(_filter_info(infos[0]))
             return True
 
-    # [E7] Learning rate schedule
     if lr_schedule_type == "linear":
         learning_rate = _make_lr_schedule(lr_start, lr_end)
         logger.info("  LR schedule: linear %g -> %g", lr_start, lr_end)
@@ -229,7 +219,6 @@ def train_single_seed(cfg: Dict[str, Any],
         learning_rate = lr_start
         logger.info("  LR: constant %g", lr_start)
 
-    # [R8] Entropy coefficient — use initial value if specified
     if ent_coef_init is not None:
         effective_ent_coef = ent_coef_init
         logger.info("  [R8] ent_coef_init: %g (will transition to '%s')",
@@ -253,14 +242,12 @@ def train_single_seed(cfg: Dict[str, Any],
             verbose=0,
         )
 
-        # [E9] EvalCallback — checkpoint best model during training
         eval_env = OranSlicingPricingEnv(cfg, users_csv=users_csv,
                                          seed=seed + 10000)
         eval_freq = tc.get("eval_freq", 10000)
         n_eval_eps = tc.get("n_eval_episodes", 5)
         best_model_name = f"best_model_seed{seed}"
 
-        # best_model_save_name added in SB3 2.4.0; fall back if absent
         eval_cb_kwargs = dict(
             eval_env=eval_env,
             eval_freq=eval_freq,
@@ -281,18 +268,14 @@ def train_single_seed(cfg: Dict[str, Any],
                         "saving to %s/best_model.zip", seed_dir)
         eval_cb = EvalCallback(**eval_cb_kwargs)
 
-        # Build callback list
         callbacks = [_LogCallback(csvlog), eval_cb]
 
-        # [R3] Add curriculum callback if enabled
         if curriculum_enabled:
             callbacks.append(_CurriculumCallback(phase1_steps))
 
-        # [R8] Entropy transition callback
         ent_warmup = tc.get("ent_coef_warmup_steps", 0)
         if ent_coef_init is not None and ent_coef == "auto" and ent_warmup > 0:
             class _EntropyTransitionCallback(BaseCallback):
-                """[R8] Transition from fixed ent_coef to auto after warmup."""
                 def __init__(self, warmup: int):
                     super().__init__()
                     self._warmup = warmup
@@ -301,10 +284,6 @@ def train_single_seed(cfg: Dict[str, Any],
                 def _on_step(self) -> bool:
                     if (not self._transitioned
                             and self.num_timesteps >= self._warmup):
-                        # SB3's auto entropy tuning uses log_ent_coef
-                        # We can't switch to "auto" mid-training easily,
-                        # but we can reduce the fixed ent_coef to let
-                        # the auto-tuning take effect gradually.
                         logger.info(
                             "[R8] Entropy warmup complete at step %d. "
                             "Current ent_coef will be managed by SAC auto-tuning.",
@@ -318,7 +297,6 @@ def train_single_seed(cfg: Dict[str, Any],
                     callback=callbacks,
                     progress_bar=True)
 
-        # Also save final model
         final_path = out / f"final_model_seed{seed}"
         model.save(str(final_path))
         csvlog.close()
@@ -326,7 +304,6 @@ def train_single_seed(cfg: Dict[str, Any],
                      seed, best_model_name, final_path)
 
         best_zip = out / f"{best_model_name}.zip"
-        # Fallback: check seed-specific subdirectory if not found in out/
         if not best_zip.exists():
             best_zip = out / f"seed{seed}" / "best_model.zip"
         if best_zip.exists():
@@ -361,7 +338,6 @@ def train(cfg: Dict[str, Any],
                               output_dir=output_dir, seed=seed_idx)
         best_paths.append(p)
 
-    # Copy seed-0 best model as the canonical "best_model.zip" for eval
     canonical = out / "best_model.zip"
     if best_paths and best_paths[0].exists():
         import shutil
