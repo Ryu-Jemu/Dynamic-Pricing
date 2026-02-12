@@ -29,8 +29,13 @@ dist/
 
 # Experiment outputs
 outputs/
+outputs_light/
 *.csv
 
 # IDE
 .idea/
 .vscode/
+
+# Markdown files (except README.md)
+*.md
+!README.md

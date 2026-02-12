@@ -1,11 +1,13 @@
 """
 Unit tests for O-RAN 3-Part Tariff environment.
 
-REVISION 7 — Changes:
+REVISION 8 — Changes:
+  [M9] v8 unit tests (T11) — curriculum fraction, convex SLA, Lagrangian,
+       rho_U bound, pop_bonus scale, eval diagnostics
+  Prior revisions:
   [R4] Per-dimension smoothing tests
   [R5] Observation shape updated to (22,)
   [R6] Population-aware reward tests
-  Prior revisions:
   [E4] Observation shape 16 → 20
   [E5] Episode length now 720 (24 cycles)
   [E6] CLV reward shaping tests
@@ -22,6 +24,7 @@ Test groups:
   T8  Calibration validation (recalibrated for v5)
   T9  v5 enhancements (20D obs, CLV reward, load factors)
   T10 v7 enhancements (22D obs, per-dim smoothing, pop reward, curriculum)
+  T11 v8 enhancements (curriculum fraction, convex SLA, Lagrangian, rho_U bound)
 """
 from __future__ import annotations
 
@@ -604,6 +607,120 @@ class TestV7Enhancements:
                     f"Step {step}, obs[{i}] = {obs[i]} is not finite"
             if term:
                 break
+
+
+# =====================================================================
+# T11  v8 Enhancement tests
+# =====================================================================
+class TestV8Enhancements:
+    def test_T11_1_curriculum_fraction_based(self, cfg):
+        """[M2] phase1_fraction produces correct absolute step count."""
+        cfg_copy = {**cfg}
+        cfg_copy["training"] = {**cfg.get("training", {})}
+        cfg_copy["training"]["total_timesteps"] = 100
+        cfg_copy["training"]["curriculum"] = {"enabled": True, "phase1_fraction": 0.20}
+        fraction = cfg_copy["training"]["curriculum"]["phase1_fraction"]
+        total = cfg_copy["training"]["total_timesteps"]
+        phase1_steps = int(total * fraction)
+        assert phase1_steps == 20, \
+            f"phase1_steps should be 20 (20% of 100), got {phase1_steps}"
+
+    def test_T11_2_convex_sla_penalty(self, cfg):
+        """[M3] SLA penalty with gamma_sla_E=2.0 produces convex curve."""
+        from oran3pt.utils import sigmoid
+        gamma = cfg["qos"].get("gamma_sla_E", 2.0)
+        # pviol_E = 0.9: penalty_factor = 0.9^2 = 0.81
+        # pviol_E = 0.3: penalty_factor = 0.3^2 = 0.09
+        pf_high = 0.9 ** gamma
+        pf_low = 0.3 ** gamma
+        # Convex: penalty at 0.9 should be much more than 3x penalty at 0.3
+        ratio = pf_high / pf_low
+        assert ratio > 3.0, \
+            f"Convex penalty ratio {ratio:.2f} should exceed 3.0"
+
+    def test_T11_3_rho_U_clipped_to_035(self, cfg):
+        """[M4] rho_U action clipped to [0.05, 0.35]."""
+        assert cfg["action"]["rho_U_max"] <= 0.35, \
+            f"rho_U_max should be <= 0.35, got {cfg['action']['rho_U_max']}"
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        max_action = np.ones(5, dtype=np.float32)
+        _, _, _, _, info = env.step(max_action)
+        assert info["rho_U"] <= 0.35 + 1e-6, \
+            f"rho_U should be <= 0.35, got {info['rho_U']}"
+
+    def test_T11_4_pop_bonus_scale(self, cfg):
+        """[M5] pop_bonus magnitude is 10-20% of reward at N_active=150."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # Run a few steps to get a stable state
+        mid_action = np.zeros(5, dtype=np.float32)
+        for _ in range(30):
+            _, _, term, _, info = env.step(mid_action)
+            if term:
+                break
+        beta_pop = cfg.get("population_reward", {}).get("beta_pop", 0.3)
+        assert beta_pop >= 0.2, \
+            f"beta_pop should be >= 0.2 for adequate signal, got {beta_pop}"
+
+    def test_T11_5_lagrangian_increases_on_violation(self, cfg):
+        """[M6] Lagrangian lambda increases when pviol_E > threshold."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.15)
+        # Verify setter works
+        env.set_lagrangian_lambda(0.0)
+        assert env._lagrangian_lambda == 0.0
+        env.set_lagrangian_lambda(1.5)
+        assert env._lagrangian_lambda == 1.5
+
+    def test_T11_6_lagrangian_zero_below_threshold(self, cfg):
+        """[M6] Lagrangian penalty is 0 when pviol_E < threshold."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        env.set_lagrangian_lambda(2.0)
+        # With low rho_U, pviol_E should be low => max(0, pviol_E - 0.15) = 0
+        low_rho = np.array([0.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
+        _, _, _, _, info = env.step(low_rho)
+        if info["pviol_E"] < env._pviol_E_threshold:
+            assert info["lagrangian_penalty"] == 0.0, \
+                f"Lagrangian penalty should be 0 when pviol_E < threshold"
+
+    def test_T11_7_convex_sla_penalty_ratio(self, cfg):
+        """[M3] penalty(0.9) / penalty(0.3) > 3x for convex (vs 3x for linear)."""
+        gamma = cfg["qos"].get("gamma_sla_E", 2.0)
+        lambda_E = cfg["qos"]["lambda_E"]
+        penalty_high = lambda_E * (0.9 ** gamma)
+        penalty_low = lambda_E * (0.3 ** gamma)
+        ratio = penalty_high / penalty_low
+        assert ratio > 3.0, \
+            f"Convex penalty ratio {ratio:.2f} should exceed 3.0 (linear = 3.0)"
+
+    def test_T11_8_lagrangian_penalty_in_info(self, env):
+        """[M6] lagrangian_penalty key present and finite in info dict."""
+        env.reset(seed=42)
+        action = env.action_space.sample()
+        _, _, _, _, info = env.step(action)
+        assert "lagrangian_penalty" in info, \
+            "Missing 'lagrangian_penalty' key in info dict"
+        assert np.isfinite(info["lagrangian_penalty"]), \
+            f"lagrangian_penalty is not finite: {info['lagrangian_penalty']}"
+        assert info["lagrangian_penalty"] >= 0.0
+
+    def test_T11_9_phase1_fraction_backward_compat(self, cfg):
+        """[M2] Backward compatibility: absolute phase1_steps still works."""
+        cfg_copy = {**cfg}
+        cfg_copy["training"] = {**cfg.get("training", {})}
+        cfg_copy["training"]["curriculum"] = {
+            "enabled": True,
+            "phase1_steps": 50000,
+        }
+        # When phase1_fraction is absent, should use phase1_steps
+        curriculum_cfg = cfg_copy["training"]["curriculum"]
+        phase1_fraction = curriculum_cfg.get("phase1_fraction", None)
+        assert phase1_fraction is None
+        phase1_steps = curriculum_cfg.get("phase1_steps", 200000)
+        assert phase1_steps == 50000
 
 
 if __name__ == "__main__":

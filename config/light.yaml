@@ -1,0 +1,180 @@
+# ================================================================
+# 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
+# ================================================================
+# LIGHTWEIGHT CONFIG — 개발/디버깅용 경량 구성
+# base: config/default.yaml (v8)
+# [M10] 경량 훈련 구성  [Henderson 2018; Haarnoja 2018]
+#
+# 주요 변경:
+#   total_timesteps  1M → 100K   (10x 감소)
+#   n_seeds          5  → 1      (5x 감소)
+#   N_total        500  → 100    (5x 감소, 매 스텝 연산량 감소)
+#   episode_cycles  24  → 12     (2x 감소, 에피소드 360스텝)
+#   buffer_size   200K  → 50K    (메모리 절감)
+#   n_eval_episodes  5  → 2      (평가 시간 감소)
+#   ent_coef_warmup 200K → 20K   (비율 유지)
+#
+# 예상 훈련 시간: 수 분 (CPU 기준)
+# 프로덕션 훈련: config/default.yaml 사용
+# ================================================================
+
+# ── §1  Scenario ──
+scenario:
+  name: "5G_ORAN_1Cell_3PT"
+  slices: ["URLLC", "eMBB"]
+
+# ── §3.1  Time axis ──
+time:
+  steps_per_cycle: 30
+  episode_cycles: 12             # [M10] 24→12  (에피소드 360스텝)
+
+# ── §4  Action bounds (5-D continuous) ──
+action:
+  F_U_min: 30000.0
+  F_U_max: 90000.0
+  F_E_min: 40000.0
+  F_E_max: 150000.0
+  p_over_U_min: 500.0
+  p_over_U_max: 5000.0
+  p_over_E_min: 200.0
+  p_over_E_max: 3000.0
+  rho_U_min: 0.05
+  rho_U_max: 0.35
+
+# ── §5  3-Part tariff allowances ──
+tariff:
+  Q_U_gb: 5.0
+  Q_E_gb: 50.0
+
+# ── §6  Traffic ──
+traffic:
+  URLLC:
+    target_p50_gb_day: 0.15
+    target_p90_gb_day: 0.50
+    D_min_gb: 0.001
+    D_max_gb: 5.0
+  eMBB:
+    target_p50_gb_day: 1.5
+    target_p90_gb_day: 5.0
+    D_min_gb: 0.01
+    D_max_gb: 50.0
+
+# ── §6b  Demand-price elasticity  [C4] ──
+demand_elasticity:
+  enabled: true
+  epsilon_U: 0.15
+  epsilon_E: 0.30
+  p_ref_U: 2500.0
+  p_ref_E: 1500.0
+  floor: 0.5
+
+# ── §7  RAN / PRB capacity ──
+radio:
+  bandwidth_mhz: 100
+  scs_khz: 30
+  prb_total: 273
+  C_total_gb_per_step: 400.0
+  kappa_U: 1.2
+
+# ── §8  QoS / SLA violation ──
+qos:
+  alpha_congestion: 10.0
+  lambda_U: 500000.0
+  lambda_E: 200000.0
+  gamma_sla_E: 2.0
+
+# ── §9  Cost (Capex excluded) ──
+cost:
+  c_opex_per_user: 1200.0
+  c_energy_per_gb: 50.0
+  c_cac_per_join: 80000.0
+
+# ── §10  Market — join / churn ──
+market:
+  beta0_churn: -5.5
+  beta_p_churn: 3.0
+  beta_q_churn: 2.0
+  beta_sw_churn: 1.5
+  beta0_join: -7.0
+  beta_p_join: 1.0
+  beta_q_join: 1.5
+  mode: "stochastic"
+  price_norm: 120000.0
+
+# ── §11  CLV ──
+clv:
+  horizon_months: 24
+  discount_rate_monthly: 0.01
+  enabled: true
+
+# ── §11b  CLV-aware reward shaping ──
+clv_reward_shaping:
+  enabled: true
+  alpha_retention: 2.0
+  warmup_steps: 50              # [M10] 100→50 (짧은 에피소드에 맞춤)
+
+# ── §13  Population ──
+population:
+  N_total: 100                  # [M10] 500→100  (5x 감소)
+  N_active_init: 40             # [M10] 200→40   (40% 비율 유지)
+  frac_urllc: 0.20
+  segments:
+    names: ["price_sensitive", "balanced", "qos_sensitive"]
+    proportions: [0.30, 0.45, 0.25]
+    price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
+    qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
+    switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
+
+# ── §12  Training ──
+training:
+  total_timesteps: 100000       # [M10] 1M→100K  (10x 감소)
+  learning_rate: 0.0003
+  learning_rate_end: 0.00001
+  lr_schedule: "linear"
+  batch_size: 256
+  buffer_size: 50000            # [M10] 200K→50K  (메모리 절감)
+  gamma: 0.995
+  tau: 0.005
+  ent_coef: "auto"
+  ent_coef_init: 0.5
+  ent_coef_warmup_steps: 20000  # [M10] 200K→20K  (20% 비율 유지)
+  train_freq: 4
+  gradient_steps: 4
+  eval_freq: 10000
+  n_eval_episodes: 2            # [M10] 5→2  (평가 시간 감소)
+  n_seeds: 1                    # [M10] 5→1  (5x 감소)
+  curriculum:
+    enabled: true
+    phase1_fraction: 0.20
+
+# ── §3.2  Observation ──
+observation:
+  dim: 22
+  clip_min: -10.0
+  clip_max: 10.0
+
+# ── §15b  Action smoothing ──
+action_smoothing:
+  enabled: true
+  weight: 0.05
+  weights: [0.10, 0.05, 0.10, 0.05, 0.01]
+
+# ── §15c  Population-aware reward ──
+population_reward:
+  enabled: true
+  beta_pop: 0.3
+  target_ratio: 0.4
+
+# ── §15d  Lagrangian QoS constraint  [M6] ──
+lagrangian_qos:
+  enabled: true
+  pviol_E_threshold: 0.15
+  lr_lambda: 0.01
+  lambda_max: 5.0
+  update_freq: 1000
+
+# ── Calibration targets ──
+calibration:
+  demand_tolerance: 0.10
+  churn_target_monthly: 0.03
+  join_target_monthly: 0.05

@@ -1,11 +1,15 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Online MDP  (§§3–11)
 
-REVISION 7 — Improvements from training evaluation:
-  [R4] Per-dimension action smoothing    [Dalal et al., NeurIPS 2018]
-  [R5] Observation dim 20 → 22          [Dulac-Arnold et al., JMLR 2021]
-  [R6] Population-aware reward term      [Mguni 2019; Zheng 2022]
-  Prior revisions (v1–v6):
+REVISION 8 — Changes from v7:
+  [M3] Convex SLA penalty for eMBB        [Tessler 2019; Paternain 2019; KCC 2023]
+  [M4] rho_U_max 0.60 → 0.35             [Huang IoT-J 2020; Dulac-Arnold 2021]
+  [M5] beta_pop 0.1 → 0.3                [Mguni 2019; Zheng 2022; Wiewiora 2003]
+  [M6] Lagrangian safety layer            [Tessler 2019; Stooke 2020]
+  Prior revisions (v1–v7):
+  [R4] Per-dimension action smoothing     [Dalal et al., NeurIPS 2018]
+  [R5] Observation dim 20 → 22           [Dulac-Arnold et al., JMLR 2021]
+  [R6] Population-aware reward term       [Mguni 2019; Zheng 2022]
   [E4] Observation dim 16 → 20 (load factors, allowance utilisation)
   [E6] CLV-aware reward shaping (retention penalty)
   [E8] Stronger action smoothing (weight from config)
@@ -30,15 +34,17 @@ Revenue per step (§5.2  — online accrual):
 
 Cost per step (§9):
   Cost_t = c_opex·N_active + c_energy·(L_U+L_E) + c_cac·N_join + SLA_penalty
+  [M3] SLA_penalty = λ_U·pviol_U + λ_E·pviol_E^γ_sla  (convex)
 
 Market (§10):
   Logit-based churn/join every step, expectation-only or stochastic mode.
   [R3] Curriculum mode: Phase 1 disables churn/join for stable learning.
 
-Reward (§15 + §11b + §15c):
+Reward (§15 + §11b + §15c + §15d):
   [R6] reward = log_profit − smooth_penalty − retention_penalty + pop_bonus
+  [M6]         − lagrangian_penalty
   pop_bonus = β_pop × (N_active / N_total − target_ratio)
-  [Mguni et al., AAMAS 2019; Zheng et al., Science Advances 2022]
+  lagrangian_penalty = λ_lag × max(0, pviol_E − threshold)
 
 References:
   [Haarnoja 2018]    SAC
@@ -54,6 +60,9 @@ References:
   [Dalal 2018]       Safe exploration — per-dimension constraints
   [Mguni 2019]       Population stability in economic simulations
   [Zheng 2022]       The AI Economist — population welfare terms
+  [Tessler 2019]     Reward Constrained Policy Optimization (RCPO)
+  [Paternain 2019]   Constrained RL has zero duality gap
+  [Stooke 2020]      Responsive Safety in RL
 """
 from __future__ import annotations
 
@@ -129,6 +138,14 @@ class OranSlicingPricingEnv(gym.Env):
         self.alpha_cong: float = qos["alpha_congestion"]
         self.lambda_U: float = qos["lambda_U"]
         self.lambda_E: float = qos["lambda_E"]
+        # [M3] Convex SLA penalty exponent  [Paternain 2019]
+        self._gamma_sla_E: float = qos.get("gamma_sla_E", 1.0)
+
+        # [M6] Lagrangian safety layer  [Tessler 2019; Stooke 2020]
+        lag_cfg = cfg.get("lagrangian_qos", {})
+        self._lagrangian_enabled: bool = lag_cfg.get("enabled", False)
+        self._lagrangian_lambda: float = 0.0
+        self._pviol_E_threshold: float = lag_cfg.get("pviol_E_threshold", 0.15)
 
         # Cost (§9)
         cc = cfg["cost"]
@@ -238,6 +255,10 @@ class OranSlicingPricingEnv(gym.Env):
     def set_curriculum_phase(self, phase: int) -> None:
         self._curriculum_phase = phase
 
+    def set_lagrangian_lambda(self, lambda_val: float) -> None:
+        """[M6] Update Lagrangian multiplier from dual ascent callback."""
+        self._lagrangian_lambda = lambda_val
+
     def reset(self, *, seed: Optional[int] = None,
               options: Optional[Dict[str, Any]] = None
               ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -335,7 +356,8 @@ class OranSlicingPricingEnv(gym.Env):
         cost_opex = self.c_opex * N_act
         cost_energy = self.c_energy * (L_U + L_E)
         cost_cac = self.c_cac * n_join
-        sla_penalty = self.lambda_U * pviol_U + self.lambda_E * pviol_E
+        # [M3] Convex SLA penalty for eMBB  [Paternain 2019]
+        sla_penalty = self.lambda_U * pviol_U + self.lambda_E * (pviol_E ** self._gamma_sla_E)
         cost_total = cost_opex + cost_energy + cost_cac + sla_penalty
 
         profit = revenue - cost_total
@@ -358,8 +380,15 @@ class OranSlicingPricingEnv(gym.Env):
             pop_bonus = self._pop_beta * (
                 N_act / max(self.N_total, 1) - self._pop_target_ratio)
 
+        # [M6] Lagrangian penalty for pviol_E constraint
+        lagrangian_penalty = 0.0
+        if self._lagrangian_enabled and self._lagrangian_lambda > 0.0:
+            lagrangian_penalty = self._lagrangian_lambda * max(
+                0.0, pviol_E - self._pviol_E_threshold)
+
         reward = self._compute_reward(
-            profit, smooth_penalty, retention_penalty, pop_bonus)
+            profit, smooth_penalty, retention_penalty, pop_bonus,
+            lagrangian_penalty)
 
         self._prev_action = a.copy()
         self._prev_revenue = revenue
@@ -398,6 +427,7 @@ class OranSlicingPricingEnv(gym.Env):
             "smooth_penalty": smooth_penalty,
             "retention_penalty": retention_penalty,
             "pop_bonus": pop_bonus,
+            "lagrangian_penalty": lagrangian_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
         }
@@ -503,13 +533,15 @@ class OranSlicingPricingEnv(gym.Env):
     def _compute_reward(self, profit: float,
                         smooth_penalty: float = 0.0,
                         retention_penalty: float = 0.0,
-                        pop_bonus: float = 0.0) -> float:
+                        pop_bonus: float = 0.0,
+                        lagrangian_penalty: float = 0.0) -> float:
         if not np.isfinite(profit):
             profit = 0.0
         r = float(np.sign(profit) * np.log1p(abs(profit) / self._reward_scale))
         r -= smooth_penalty
         r -= retention_penalty
         r += pop_bonus
+        r -= lagrangian_penalty  # [M6]
         return float(np.clip(r, -2.0, 2.0))
 
     def _build_obs(self) -> np.ndarray:

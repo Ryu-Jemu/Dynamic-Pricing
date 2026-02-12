@@ -1,9 +1,11 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 7 — Changes:
-  Updated for new info keys (pop_bonus, over_rev_E)
+REVISION 8 — Changes from v7:
+  [M8] Derived diagnostic columns (utilisation, margins, pop delta)
+       [Dulac-Arnold 2021 — observability for real-world RL]
   Prior revisions:
+  Updated for new info keys (pop_bonus, over_rev_E, lagrangian_penalty)
   [E9] Multi-seed model selection (evaluates best model across seeds)
   [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
@@ -81,6 +83,14 @@ def run_evaluation(cfg: Dict[str, Any],
     rollout_path = out / "rollout_log.csv"
     if all_records:
         df = pd.DataFrame(all_records)
+
+        # [M8] Derived diagnostic columns
+        df["urllc_util"] = df["L_U"] / df["C_U"].clip(lower=1e-6)
+        df["embb_util"] = df["L_E"] / df["C_E"].clip(lower=1e-6)
+        df["sla_revenue_ratio"] = df["sla_penalty"] / df["revenue"].clip(lower=1e-6)
+        df["profit_margin"] = df["profit"] / df["revenue"].clip(lower=1e-6)
+        df["population_delta"] = df["n_join"] - df["n_churn"]
+
         df.to_csv(rollout_path, index=False)
         logger.info("Rollout log: %d rows -> %s", len(df), rollout_path)
 

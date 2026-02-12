@@ -1,15 +1,24 @@
 # ================================================================
 # 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
-# REVISION 7 — Improvements from training evaluation analysis.
-# Change log vs. v6:
+# REVISION 8 — Fixes from v7 root-cause diagnosis.
+# Change log vs. v7:
+#   [M1] total_timesteps 10K → 1M       [Haarnoja 2018; Henderson 2018; D'Oro 2023]
+#   [M2] Curriculum: absolute → fraction [Narvekar 2020; Bengio 2009]
+#   [M3] lambda_E 50K → 200K + convex   [Tessler 2019; Paternain 2019; KCC 2023]
+#   [M4] rho_U_max 0.60 → 0.35          [Huang IoT-J 2020; Dulac-Arnold 2021]
+#   [M5] beta_pop 0.1 → 0.3             [Mguni 2019; Zheng 2022; Wiewiora 2003]
+#   [M6] Lagrangian safety for pviol_E   [Tessler 2019; Stooke 2020]
+#   [M7] train_freq/gradient_steps 1→4   [Fedus 2020]
+#   [M8] Eval diagnostic columns         [Dulac-Arnold 2021]
+#   [M9] Unit tests T11 for v8           [Henderson 2018]
+# Prior revisions (v1–v7):
 #   [R1] total_timesteps 50K → 1M       [Henderson et al. AAAI 2018]
 #   [R2] alpha_retention 0.15 → 2.0     [Fader & Hardie 2010; Wiewiora 2003]
 #   [R4] Per-dimension action smoothing  [Dalal et al. NeurIPS 2018]
 #   [R5] Observation dim 20 → 22        [Dulac-Arnold et al. JMLR 2021]
 #   [R6] Population-aware reward term    [Mguni 2019; Zheng 2022]
 #   [R8] Entropy coefficient schedule    [Zhou et al. ICLR 2022]
-# Prior revisions (v1–v6):
 #   [E1] F_E_max 110K → 150K            [KISDI 2023 Korean 5G plans]
 #   [E2] total_timesteps 300K → 1M      [Henderson et al. AAAI 2018]
 #   [E3] beta_p_churn 1.5 → 3.0         [Kim & Yoon 2004; Ahn 2006]
@@ -49,7 +58,7 @@ action:
   p_over_E_min: 200.0
   p_over_E_max: 3000.0
   rho_U_min: 0.05
-  rho_U_max: 0.60
+  rho_U_max: 0.35            # [M4] 0.60→0.35  [Huang IoT-J 2020; Dulac-Arnold 2021]
 
 # ── §5  3-Part tariff allowances ──
 tariff:
@@ -90,7 +99,8 @@ radio:
 qos:
   alpha_congestion: 10.0
   lambda_U: 500000.0
-  lambda_E: 50000.0
+  lambda_E: 200000.0          # [M3] 50K→200K  [Tessler 2019; KCC 2023]
+  gamma_sla_E: 2.0            # [M3] Convex penalty exponent  [Paternain 2019]
 
 # ── §9  Cost (Capex excluded) ──
 cost:
@@ -136,7 +146,7 @@ population:
 
 # ── §12  Training ──
 training:
-  total_timesteps: 10000
+  total_timesteps: 1000000    # [M1] 10K→1M  [Haarnoja 2018; Henderson 2018; D'Oro 2023]
   learning_rate: 0.0003
   learning_rate_end: 0.00001
   lr_schedule: "linear"
@@ -147,15 +157,14 @@ training:
   ent_coef: "auto"
   ent_coef_init: 0.5
   ent_coef_warmup_steps: 200000
-  train_freq: 1
-  gradient_steps: 1
+  train_freq: 4               # [M7] 1→4  [Fedus 2020]
+  gradient_steps: 4            # [M7] 1→4  [Fedus 2020]
   eval_freq: 10000
   n_eval_episodes: 5
   n_seeds: 5
   curriculum:
     enabled: true
-    phase1_steps: 200000
-    phase2_steps: 800000
+    phase1_fraction: 0.20      # [M2] Fraction-based  [Narvekar 2020; Bengio 2009]
 
 # ── §3.2  Observation ──
 observation:
@@ -172,8 +181,16 @@ action_smoothing:
 # ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 0.1
+  beta_pop: 0.3               # [M5] 0.1→0.3  [Mguni 2019; Zheng 2022; Wiewiora 2003]
   target_ratio: 0.4
+
+# ── §15d  Lagrangian QoS constraint  [M6] ──
+lagrangian_qos:
+  enabled: true
+  pviol_E_threshold: 0.15     # [M6] Target pviol_E ≤ 0.15  [ETSI QoS 003; KCC 2022]
+  lr_lambda: 0.01             # [M6] Dual learning rate  [Stooke 2020; Boyd 2004]
+  lambda_max: 5.0             # [M6] Multiplier cap
+  update_freq: 1000           # [M6] Dual update interval (steps)
 
 # ── Calibration targets ──
 calibration:

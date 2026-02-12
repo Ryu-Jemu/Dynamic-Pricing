@@ -1,12 +1,15 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
-REVISION 7 — Improvements from training evaluation:
+REVISION 8 — Changes from v7:
+  [M2] Curriculum: fraction-based phase boundary  [Narvekar 2020; Bengio 2009]
+  [M6] Lagrangian QoS callback for pviol_E        [Tessler 2019; Stooke 2020]
+  [M7] train_freq/gradient_steps 1→4              [Fedus 2020]
+  Prior revisions (v1–v7):
   [R3] Curriculum learning (Phase 1: no churn/join; Phase 2: full dynamics)
        [Narvekar et al., JMLR 2020; Bengio et al., ICML 2009]
   [R8] Higher initial entropy coefficient for broader exploration
        [Zhou et al., ICLR 2022]
-  Prior revisions (v1–v6):
   [E7] Linear learning rate schedule  [Loshchilov & Hutter, ICLR 2019]
   [E9] EvalCallback with best-model checkpointing [Henderson 2018]
   [E9] Multi-seed training loop
@@ -137,13 +140,65 @@ if _SB3_AVAILABLE:
 
         def _on_step(self) -> bool:
             if not self._transitioned and self.num_timesteps >= self._phase1_steps:
-                env = self.training_env.envs[0]
+                # [F6] Use .unwrapped to bypass SB3 Monitor wrapper
+                raw_env = self.training_env.envs[0]
+                env = getattr(raw_env, 'unwrapped', raw_env)
                 if hasattr(env, 'set_curriculum_phase'):
                     env.set_curriculum_phase(0)
                     logger.info(
                         "[R3] Curriculum: Phase 1 → Phase 2 at step %d "
                         "(enabling churn/join)", self.num_timesteps)
                 self._transitioned = True
+            return True
+
+    class _LagrangianQoSCallback(BaseCallback):
+        """[M6] Primal-dual Lagrangian for pviol_E constraint.
+
+        Maintains a learnable multiplier λ that penalises pviol_E > threshold.
+        Updated every update_freq steps based on running constraint violation.
+
+        References:
+          [Tessler et al., ICML 2019]  — RCPO
+          [Stooke et al., ICLR 2020]  — Responsive Safety in RL
+          [Boyd & Vandenberghe, 2004]  — Dual step size convergence
+        """
+
+        def __init__(self, threshold: float = 0.15,
+                     lr_lambda: float = 0.01,
+                     update_freq: int = 1000,
+                     lambda_max: float = 5.0,
+                     verbose: int = 0) -> None:
+            super().__init__(verbose)
+            self._threshold = threshold
+            self._lr_lambda = lr_lambda
+            self._update_freq = update_freq
+            self._lambda_max = lambda_max
+            self.lambda_val: float = 0.0
+            self._pviol_buffer: List[float] = []
+
+        def _on_step(self) -> bool:
+            infos = self.locals.get("infos", [])
+            if infos and "pviol_E" in infos[0]:
+                self._pviol_buffer.append(float(infos[0]["pviol_E"]))
+
+            if len(self._pviol_buffer) >= self._update_freq:
+                mean_pviol = float(np.mean(self._pviol_buffer))
+                violation = mean_pviol - self._threshold
+                self.lambda_val = max(0.0, min(
+                    self._lambda_max,
+                    self.lambda_val + self._lr_lambda * violation))
+                self._pviol_buffer.clear()
+
+                # [F6] Use .unwrapped to bypass SB3 Monitor wrapper
+                raw_env = self.training_env.envs[0]
+                env = getattr(raw_env, 'unwrapped', raw_env)
+                if hasattr(env, 'set_lagrangian_lambda'):
+                    env.set_lagrangian_lambda(self.lambda_val)
+                    if self.verbose > 0:
+                        logger.info(
+                            "[M6] Lagrangian update: λ=%.4f  "
+                            "mean_pviol_E=%.4f  threshold=%.4f",
+                            self.lambda_val, mean_pviol, self._threshold)
             return True
 
 
@@ -166,7 +221,12 @@ def train_single_seed(cfg: Dict[str, Any],
 
     curriculum_cfg = tc.get("curriculum", {})
     curriculum_enabled = curriculum_cfg.get("enabled", False)
-    phase1_steps = curriculum_cfg.get("phase1_steps", 200000)
+    # [M2] Fraction-based phase boundary — prevents coupling with total_timesteps
+    phase1_fraction = curriculum_cfg.get("phase1_fraction", None)
+    if phase1_fraction is not None:
+        phase1_steps = int(total_timesteps * phase1_fraction)
+    else:
+        phase1_steps = curriculum_cfg.get("phase1_steps", 200000)
 
     ent_coef_init = tc.get("ent_coef_init", None)
     ent_coef = tc.get("ent_coef", "auto")
@@ -272,6 +332,20 @@ def train_single_seed(cfg: Dict[str, Any],
 
         if curriculum_enabled:
             callbacks.append(_CurriculumCallback(phase1_steps))
+
+        # [M6] Lagrangian QoS constraint callback
+        lag_cfg = cfg.get("lagrangian_qos", {})
+        if lag_cfg.get("enabled", False):
+            lag_cb = _LagrangianQoSCallback(
+                threshold=lag_cfg.get("pviol_E_threshold", 0.15),
+                lr_lambda=lag_cfg.get("lr_lambda", 0.01),
+                update_freq=lag_cfg.get("update_freq", 1000),
+                lambda_max=lag_cfg.get("lambda_max", 5.0),
+            )
+            callbacks.append(lag_cb)
+            logger.info("[M6] Lagrangian QoS callback enabled: "
+                        "threshold=%.3f  lr_lambda=%.4f  lambda_max=%.1f",
+                        lag_cb._threshold, lag_cb._lr_lambda, lag_cb._lambda_max)
 
         ent_warmup = tc.get("ent_coef_warmup_steps", 0)
         if ent_coef_init is not None and ent_coef == "auto" and ent_warmup > 0:
