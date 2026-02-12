@@ -1,9 +1,26 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
-REVISION 3 — Fixes:
+REVISION 4 — Fixes:
   [F1] Explicit SB3 import diagnostic (not silent fallback)
   [F2] Structured logging of training metrics
+  [F5] CSVLogger crash on SB3 episode-boundary keys (terminal_observation, episode)
+
+Root cause of [F5]:
+  SB3 injects 'terminal_observation' (numpy array) and 'episode' (dict with
+  keys r, l, t) into the info dict when an episode terminates.  The CSVLogger
+  initialised its DictWriter fieldnames from the *first* step's info dict,
+  which did not contain these keys.  On step ~346 (first episode boundary),
+  DictWriter raised:
+    ValueError: dict contains fields not in fieldnames: 'terminal_observation', 'episode'
+  This was caught by the broad `except Exception` and silently fell back to
+  random baseline — meaning NO learning occurred.
+
+Fix:
+  1. CSVLogger uses `extrasaction='ignore'` so unknown columns are silently
+     skipped instead of raising.
+  2. _LogCallback filters out non-scalar SB3 keys before logging, since
+     'terminal_observation' is a numpy array and not CSV-serialisable anyway.
 
 Features:
   - Automatic device selection: MPS (Apple) → CUDA → CPU  [MPS_PYTORCH]
@@ -19,7 +36,6 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,9 +59,27 @@ try:
 except ImportError as e:
     _SB3_IMPORT_ERROR = str(e)
 
+# ── Keys injected by SB3 at episode boundaries ──────────────────────
+# These are NOT part of the env's info dict and must be excluded from
+# CSV logging.  'terminal_observation' is a numpy array (not scalar),
+# 'episode' is a dict {'r': float, 'l': int, 't': float}.
+# See: stable_baselines3/common/vec_env/base_vec_env.py
+_SB3_INJECTED_KEYS = frozenset({
+    "terminal_observation",
+    "episode",
+    "TimeLimit.truncated",
+    "_final_observation",
+    "_final_info",
+})
+
 
 class CSVLogger:
-    """Append step-level info dicts to a CSV file."""
+    """Append step-level info dicts to a CSV file.
+
+    [F5] Uses extrasaction='ignore' so that any unexpected keys
+    (e.g. SB3-injected episode metadata) are silently skipped
+    rather than raising ValueError.
+    """
 
     def __init__(self, path: str) -> None:
         self._path = Path(path)
@@ -58,7 +92,10 @@ class CSVLogger:
         if self._writer is None:
             self._fields = list(record.keys())
             self._f = open(self._path, "w", newline="")
-            self._writer = csv.DictWriter(self._f, fieldnames=self._fields)
+            # [F5] extrasaction='ignore' — skip keys not in original fieldnames
+            self._writer = csv.DictWriter(
+                self._f, fieldnames=self._fields, extrasaction="ignore"
+            )
             self._writer.writeheader()
         self._writer.writerow(record)
         self._f.flush()
@@ -70,6 +107,16 @@ class CSVLogger:
             self._writer = None
 
 
+def _filter_info(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove SB3-injected non-scalar keys from the info dict.
+
+    [F5] 'terminal_observation' is a numpy array and 'episode' is a
+    nested dict — neither is CSV-serialisable.  We strip them here
+    so the CSVLogger only receives flat scalar data.
+    """
+    return {k: v for k, v in info.items() if k not in _SB3_INJECTED_KEYS}
+
+
 def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
                          csv_path: str, users_csv: Optional[str] = None,
                          seed: int = 42) -> Dict[str, float]:
@@ -79,11 +126,7 @@ def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
     csvlog = CSVLogger(csv_path)
     rewards: List[float] = []
 
-    for step in tqdm(
-        range(total_steps),
-        desc="Random baseline",
-        disable=not _should_render_progress_bar(),
-    ):
+    for step in tqdm(range(total_steps), desc="Random baseline"):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
         csvlog.log(info)
@@ -96,13 +139,6 @@ def _run_random_baseline(cfg: Dict[str, Any], total_steps: int,
         "mean_reward": float(np.mean(rewards)),
         "std_reward": float(np.std(rewards)),
     }
-
-
-def _should_render_progress_bar() -> bool:
-    """Render progress bars only on interactive TTY terminals."""
-    if os.environ.get("CI"):
-        return False
-    return sys.stderr.isatty()
 
 
 def train(cfg: Dict[str, Any],
@@ -146,6 +182,8 @@ def train(cfg: Dict[str, Any],
     csvlog = CSVLogger(csv_path)
 
     class _LogCallback(BaseCallback):
+        """Log per-step info to CSV, filtering out SB3-injected keys."""
+
         def __init__(self, csvl: CSVLogger):
             super().__init__()
             self.csvl = csvl
@@ -153,7 +191,8 @@ def train(cfg: Dict[str, Any],
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [])
             if infos:
-                self.csvl.log(infos[0])
+                # [F5] Filter out non-scalar SB3 keys before CSV logging
+                self.csvl.log(_filter_info(infos[0]))
             return True
 
     try:
@@ -173,7 +212,7 @@ def train(cfg: Dict[str, Any],
 
         cb = _LogCallback(csvlog)
         model.learn(total_timesteps=total_timesteps,
-                    callback=cb, progress_bar=_should_render_progress_bar())
+                    callback=cb, progress_bar=True)
 
         model_path = out / "best_model"
         model.save(str(model_path))
@@ -183,7 +222,7 @@ def train(cfg: Dict[str, Any],
 
     except Exception as e:
         csvlog.close()
-        logger.error("SAC training failed: %s", e)
+        logger.error("SAC training failed: %s", e, exc_info=True)
         logger.info("Falling back to random baseline.")
         stats = _run_random_baseline(cfg, total_timesteps, csv_path,
                                      users_csv=users_csv)
