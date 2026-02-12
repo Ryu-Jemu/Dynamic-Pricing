@@ -1,9 +1,10 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 5 — Enhancements:
-  [E9] Multi-seed model selection (evaluates best model across seeds)
+REVISION 7 — Changes:
+  Updated for new info keys (pop_bonus, over_rev_E)
   Prior revisions:
+  [E9] Multi-seed model selection (evaluates best model across seeds)
   [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
 Outputs:

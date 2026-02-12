@@ -1,10 +1,12 @@
 """
 Streamlit evaluation dashboard (Requirement 14).
 
-REVISION 5 — Enhancements:
+REVISION 7 — Enhancements:
+  [R5] Added overage rate tracking
+  [R6] Added population bonus tracking
+  Prior revisions:
   [E4] Added load factor visualisations (P7b)
   [E6] Added retention penalty tracking
-  Prior revisions:
   [F4] width="stretch" (Streamlit deprecation fix)
 
 Panels:
@@ -14,7 +16,8 @@ Panels:
   4. Action trajectories
   5. Distributions (profit, rho_U)
   6. CLV summary table
-  7. Load factors (new)
+  7. Load factors
+  8. Reward over time
 
 Design:
   - Color-blind safe palette  [Wong, Nat. Methods 2011]
@@ -52,7 +55,7 @@ def _make_static_dashboard(df: pd.DataFrame, out_dir: Path) -> None:
     g = df.groupby("step").mean(numeric_only=True)
 
     fig, axes = plt.subplots(4, 2, figsize=(16, 20))
-    fig.suptitle("O-RAN 3-Part Tariff — Evaluation Dashboard (v5)",
+    fig.suptitle("O-RAN 3-Part Tariff — Evaluation Dashboard (v7)",
                  fontsize=14, fontweight="bold")
 
     # P1: Profit / Revenue / Cost
@@ -148,8 +151,8 @@ def _run_streamlit(csv_path: str) -> None:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    st.set_page_config(page_title="O-RAN 3PT Dashboard v5", layout="wide")
-    st.title("O-RAN 3-Part Tariff — Evaluation Dashboard (v5)")
+    st.set_page_config(page_title="O-RAN 3PT Dashboard v7", layout="wide")
+    st.title("O-RAN 3-Part Tariff — Evaluation Dashboard (v7)")
 
     df = pd.read_csv(csv_path)
     g = df.groupby("step").mean(numeric_only=True)
@@ -250,7 +253,8 @@ def _run_streamlit(csv_path: str) -> None:
     st.caption(
         "References: [Haarnoja 2018] SAC | [Grubb 2009] 3-part tariff | "
         "[Gupta 2006] CLV | [Dulac-Arnold 2021] Real-world RL | "
-        "[Ng 1999] Reward shaping | [Henderson 2018] Multi-seed eval"
+        "[Ng 1999] Reward shaping | [Henderson 2018] Multi-seed eval | "
+        "[Dalal 2018] Per-dim constraints | [Mguni 2019] Population reward"
     )
 
 

@@ -2,16 +2,17 @@
 # ==============================================================================
 # O-RAN 3-Part Tariff Pricing — End-to-End Pipeline  (Requirement 15)
 #
-# REVISION 5 — Enhancements:
-#   [E2] 1M training timesteps
-#   [E9] Multi-seed training (default: 1 seed for quick run; set --seeds N)
-#   Prior fixes: [F1] transparent pip, [F2] SB3 verify, [F3] fallback install
+# REVISION 7 — Improvements from training evaluation:
+#   [R1] 1M training timesteps (restored)
+#   [R3] Curriculum learning (Phase 1: no churn/join; Phase 2: full dynamics)
+#   [R8] Higher initial entropy coefficient
+#   Prior: [E9] Multi-seed training, [F1] transparent pip, [F2] SB3 verify
 #
 # Steps:
 #   0) Create venv & install dependencies
 #   1) Generate synthetic user CSV
 #   2) Run unit tests
-#   3) Train SAC agent (multi-seed)
+#   3) Train SAC agent (multi-seed with curriculum)
 #   4) Evaluate & export logs + CLV
 #   5) Generate dashboard
 #
@@ -34,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "============================================"
-echo " O-RAN 3-Part Tariff — Full Pipeline (v5)"
+echo " O-RAN 3-Part Tariff — Full Pipeline (v7)"
 echo "============================================"
 echo "Project dir: $PROJECT_DIR"
 echo ""

@@ -1,11 +1,14 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Online MDP  (§§3–11)
 
-REVISION 5 — Enhancements:
+REVISION 7 — Improvements from training evaluation:
+  [R4] Per-dimension action smoothing    [Dalal et al., NeurIPS 2018]
+  [R5] Observation dim 20 → 22          [Dulac-Arnold et al., JMLR 2021]
+  [R6] Population-aware reward term      [Mguni 2019; Zheng 2022]
+  Prior revisions (v1–v6):
   [E4] Observation dim 16 → 20 (load factors, allowance utilisation)
   [E6] CLV-aware reward shaping (retention penalty)
   [E8] Stronger action smoothing (weight from config)
-  Prior revisions (v1–v4):
   [C3] Removed price_norm re-multiplication in churn/join logits
   [C4] Demand-price elasticity  [Nevo et al., Econometrica 2016]
   [C5] Action smoothing penalty  [Dulac-Arnold et al., JMLR 2021]
@@ -15,13 +18,10 @@ Gymnasium-compatible environment for SB3 SAC.
 Action (5-D continuous, §4):
   a = [F_U, p_U^over, F_E, p_E^over, ρ_U]
 
-Observation (20-D, §3.2) — see ``_build_obs`` for layout.
-  [E4] Four new features:
-    16: cycle_usage_U / (Q_U × N_U)  — URLLC allowance utilisation
-    17: cycle_usage_E / (Q_E × N_E)  — eMBB allowance utilisation
-    18: L_U / C_U                     — URLLC load factor
-    19: L_E / C_E                     — eMBB load factor
-  [Dulac-Arnold et al., JMLR 2021, Challenge #1]
+Observation (22-D, §3.2) — see ``_build_obs`` for layout.
+  [R5] Two new features (in addition to E4's four):
+    20: over_rev_E / (p_over_E × N_E + ε)  — eMBB overage revenue rate
+    21: (T − cycle_step) / T                — days remaining in cycle
 
 Revenue per step (§5.2  — online accrual):
   BaseRev_t  = (F_U·N_U + F_E·N_E) / T
@@ -33,10 +33,12 @@ Cost per step (§9):
 
 Market (§10):
   Logit-based churn/join every step, expectation-only or stochastic mode.
+  [R3] Curriculum mode: Phase 1 disables churn/join for stable learning.
 
-Reward (§15 + §11b):
-  [E6] reward = log_profit − smooth_penalty − retention_penalty
-  retention_penalty = α_ret × (n_churn / N_active)   [Ng et al., ICML 1999]
+Reward (§15 + §11b + §15c):
+  [R6] reward = log_profit − smooth_penalty − retention_penalty + pop_bonus
+  pop_bonus = β_pop × (N_active / N_total − target_ratio)
+  [Mguni et al., AAMAS 2019; Zheng et al., Science Advances 2022]
 
 References:
   [Haarnoja 2018]    SAC
@@ -49,6 +51,9 @@ References:
   [Dulac-Arnold 2021] Challenges of Real-World RL
   [Ahn 2006]         Telecom churn determinants
   [Ng 1999]          Policy invariance under reward transformations
+  [Dalal 2018]       Safe exploration — per-dimension constraints
+  [Mguni 2019]       Population stability in economic simulations
+  [Zheng 2022]       The AI Economist — population welfare terms
 """
 from __future__ import annotations
 
@@ -74,10 +79,20 @@ class OranSlicingPricingEnv(gym.Env):
     # ── constructor ───────────────────────────────────────────────────
     def __init__(self, cfg: Dict[str, Any],
                  users_csv: Optional[str] = None,
-                 seed: Optional[int] = None) -> None:
+                 seed: Optional[int] = None,
+                 curriculum_phase: int = 0) -> None:
+        """
+        Args:
+            cfg: Configuration dictionary.
+            users_csv: Path to user CSV (optional).
+            seed: Random seed.
+            curriculum_phase: [R3] 0 = full dynamics (default),
+                              1 = Phase 1 (no churn/join).
+        """
         super().__init__()
         self.cfg = cfg
         self._rng = np.random.default_rng(seed)
+        self._curriculum_phase = curriculum_phase
 
         # Time (§3.1)
         tc = cfg["time"]
@@ -99,9 +114,9 @@ class OranSlicingPricingEnv(gym.Env):
         ], dtype=np.float64)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(5,), dtype=np.float32)
 
-        # Observation (§3.2)  [E4] 20-D
+        # Observation (§3.2)  [R5] 22-D
         obs_cfg = cfg.get("observation", {})
-        self._obs_dim: int = obs_cfg.get("dim", 20)
+        self._obs_dim: int = obs_cfg.get("dim", 22)
         self._obs_lo = obs_cfg.get("clip_min", -10.0)
         self._obs_hi = obs_cfg.get("clip_max", 10.0)
         self.observation_space = spaces.Box(
@@ -150,16 +165,28 @@ class OranSlicingPricingEnv(gym.Env):
         self._pref_E: float = de.get("p_ref_E", 1500.0)
         self._demand_floor: float = de.get("floor", 0.5)
 
-        # Action smoothing (§15b)  [C5][E8]  [Dulac-Arnold 2021]
+        # Action smoothing (§15b)  [C5][E8][R4]  [Dulac-Arnold 2021; Dalal 2018]
         sm = cfg.get("action_smoothing", {})
         self._smooth_enabled: bool = sm.get("enabled", False)
         self._smooth_weight: float = sm.get("weight", 0.05)
+        # [R4] Per-dimension weights (fall back to scalar if not specified)
+        smooth_weights = sm.get("weights", None)
+        if smooth_weights is not None and len(smooth_weights) == 5:
+            self._smooth_weights = np.array(smooth_weights, dtype=np.float64)
+        else:
+            self._smooth_weights = np.full(5, self._smooth_weight, dtype=np.float64)
 
-        # CLV reward shaping (§11b)  [E6]  [Ng et al. 1999]
+        # CLV reward shaping (§11b)  [E6][R2]  [Ng et al. 1999; Wiewiora 2003]
         clv_rs = cfg.get("clv_reward_shaping", {})
         self._clv_rs_enabled: bool = clv_rs.get("enabled", False)
-        self._clv_rs_alpha: float = clv_rs.get("alpha_retention", 0.15)
+        self._clv_rs_alpha: float = clv_rs.get("alpha_retention", 2.0)
         self._clv_rs_warmup: int = clv_rs.get("warmup_steps", 100)
+
+        # [R6] Population-aware reward  [Mguni 2019; Zheng 2022]
+        pop_rw = cfg.get("population_reward", {})
+        self._pop_reward_enabled: bool = pop_rw.get("enabled", False)
+        self._pop_beta: float = pop_rw.get("beta_pop", 0.1)
+        self._pop_target_ratio: float = pop_rw.get("target_ratio", 0.4)
 
         # CLV (§11)
         clv_cfg = cfg.get("clv", {})
@@ -195,6 +222,8 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_L_E: float = 0.0
         self._prev_C_U: float = 1.0
         self._prev_C_E: float = 1.0
+        # [R5] Track overage revenue for obs
+        self._prev_over_rev_E: float = 0.0
 
     # ── user loading ──────────────────────────────────────────────────
     def _load_users(self, csv_path: Optional[str]) -> None:
@@ -219,6 +248,11 @@ class OranSlicingPricingEnv(gym.Env):
         self._swcost = df["switching_cost"].values.astype(np.float64)
         self._clv_dr = df["clv_discount_rate"].values.astype(np.float64)
         self._init_active = df["is_active_init"].values.astype(bool)
+
+    # ── curriculum phase control [R3] ─────────────────────────────────
+    def set_curriculum_phase(self, phase: int) -> None:
+        """Switch curriculum phase.  0 = full dynamics, 1 = no churn/join."""
+        self._curriculum_phase = phase
 
     # ── reset ─────────────────────────────────────────────────────────
     def reset(self, *, seed: Optional[int] = None,
@@ -246,6 +280,8 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_L_E = 0.0
         self._prev_C_U = self.C_total * 0.5 * self.kappa_U
         self._prev_C_E = self.C_total * 0.5
+        # [R5]
+        self._prev_over_rev_E = 0.0
         return self._build_obs(), {}
 
     # ── step ──────────────────────────────────────────────────────────
@@ -287,7 +323,11 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_over_E = 0.0
 
         # ── market: join / churn (§10) ──
-        n_join, n_churn = self._market_step(F_U, p_over_U, F_E, p_over_E)
+        # [R3] Curriculum Phase 1: no churn/join
+        if self._curriculum_phase == 1:
+            n_join, n_churn = 0, 0
+        else:
+            n_join, n_churn = self._market_step(F_U, p_over_U, F_E, p_over_E)
 
         # ── counts ──
         N_act = int(self._active_mask.sum())
@@ -321,7 +361,9 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_over_U = cur_over_U
         self._prev_over_E = cur_over_E
 
-        over_rev = p_over_U * delta_over_U + p_over_E * delta_over_E
+        over_rev_U = p_over_U * delta_over_U
+        over_rev_E = p_over_E * delta_over_E
+        over_rev = over_rev_U + over_rev_E
         revenue = base_rev + over_rev
 
         # ── cost (§9) ──
@@ -334,22 +376,30 @@ class OranSlicingPricingEnv(gym.Env):
         # ── profit + reward ──
         profit = revenue - cost_total
 
-        # ── action smoothing penalty [C5][E8] [Dulac-Arnold 2021] ──
+        # ── action smoothing penalty [C5][E8][R4] ──
+        # [R4] Per-dimension weights  [Dalal et al., NeurIPS 2018]
         smooth_penalty = 0.0
         if self._smooth_enabled and self.t > 1:
             a_norm = (a - self._a_lo) / np.maximum(self._a_hi - self._a_lo, 1e-8)
             prev_norm = (self._prev_action - self._a_lo) / np.maximum(
                 self._a_hi - self._a_lo, 1e-8)
-            smooth_penalty = self._smooth_weight * float(
-                np.sum((a_norm - prev_norm) ** 2))
+            smooth_penalty = float(
+                np.sum(self._smooth_weights * (a_norm - prev_norm) ** 2))
 
-        # ── CLV retention penalty [E6] [Ng et al. 1999] ──
+        # ── CLV retention penalty [E6][R2] [Ng et al. 1999; Wiewiora 2003] ──
         retention_penalty = 0.0
         if (self._clv_rs_enabled and self.t > self._clv_rs_warmup
                 and N_act > 0):
             retention_penalty = self._clv_rs_alpha * (n_churn / max(N_act, 1))
 
-        reward = self._compute_reward(profit, smooth_penalty, retention_penalty)
+        # ── population bonus [R6] [Mguni 2019; Zheng 2022] ──
+        pop_bonus = 0.0
+        if self._pop_reward_enabled:
+            pop_bonus = self._pop_beta * (
+                N_act / max(self.N_total, 1) - self._pop_target_ratio)
+
+        reward = self._compute_reward(
+            profit, smooth_penalty, retention_penalty, pop_bonus)
 
         # ── cache for obs ──
         self._prev_action = a.copy()
@@ -365,6 +415,8 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_L_E = L_E
         self._prev_C_U = C_U
         self._prev_C_E = C_E
+        # [R5] cache overage revenue
+        self._prev_over_rev_E = over_rev_E
 
         return {
             "step": self.t,
@@ -380,6 +432,7 @@ class OranSlicingPricingEnv(gym.Env):
             "C_U": C_U, "C_E": C_E,
             "pviol_U": pviol_U, "pviol_E": pviol_E,
             "base_rev": base_rev, "over_rev": over_rev,
+            "over_rev_E": over_rev_E,
             "revenue": revenue,
             "cost_opex": cost_opex, "cost_energy": cost_energy,
             "cost_cac": cost_cac, "sla_penalty": sla_penalty,
@@ -387,6 +440,7 @@ class OranSlicingPricingEnv(gym.Env):
             "profit": profit, "reward": reward,
             "smooth_penalty": smooth_penalty,
             "retention_penalty": retention_penalty,
+            "pop_bonus": pop_bonus,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
         }
@@ -509,17 +563,16 @@ class OranSlicingPricingEnv(gym.Env):
 
         return n_join, n_churn
 
-    # ── reward (§5 + §11b + §15b) ────────────────────────────────────
+    # ── reward (§5 + §11b + §15b + §15c) ─────────────────────────────
     def _compute_reward(self, profit: float,
                         smooth_penalty: float = 0.0,
-                        retention_penalty: float = 0.0) -> float:
-        """Log-transformed profit with CLV retention and smoothing penalties.
+                        retention_penalty: float = 0.0,
+                        pop_bonus: float = 0.0) -> float:
+        """Log-transformed profit with penalties and population bonus.
 
-        [E6] retention_penalty = α_ret × (n_churn / N_active)
-             Internalises lifetime cost of losing customers.
-             [Ng et al., ICML 1999]: potential-based shaping preserves
-             optimal policy invariance.
-        [C5][E8] smooth_penalty penalises large action changes.
+        [E6][R2] retention_penalty = α_ret × (n_churn / N_active)
+        [R4] smooth_penalty uses per-dimension weights.
+        [R6] pop_bonus = β_pop × (N_active/N_total − target_ratio)
         """
         if not np.isfinite(profit):
             profit = 0.0
@@ -527,9 +580,10 @@ class OranSlicingPricingEnv(gym.Env):
         r = float(np.sign(profit) * np.log1p(abs(profit) / self._reward_scale))
         r -= smooth_penalty
         r -= retention_penalty
+        r += pop_bonus
         return float(np.clip(r, -2.0, 2.0))
 
-    # ── observation (§3.2)  [E4] 20-D ────────────────────────────────
+    # ── observation (§3.2)  [R5] 22-D ────────────────────────────────
     def _build_obs(self) -> np.ndarray:
         N_act = int(self._active_mask.sum())
         N_U = int((self._active_mask * self._slice_is_U).sum())
@@ -544,6 +598,14 @@ class OranSlicingPricingEnv(gym.Env):
         # [E4] Load factors
         load_factor_U = min(self._prev_L_U / max(self._prev_C_U, 1e-6), 5.0)
         load_factor_E = min(self._prev_L_E / max(self._prev_C_E, 1e-6), 5.0)
+
+        # [R5] Overage revenue rate (normalised)
+        p_over_E = self._prev_action[3] if self.t > 0 else 1.0
+        over_rev_rate_E = self._prev_over_rev_E / max(p_over_E * N_E + 1e-6, 1e-6)
+        over_rev_rate_E = min(over_rev_rate_E, 5.0)
+
+        # [R5] Days remaining in cycle (normalised to [0, 1])
+        days_remaining = (self.T - self._cycle_step) / max(self.T, 1)
 
         obs = np.array([
             N_act / max(self.N_total, 1),                          # 0
@@ -562,11 +624,14 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_action[4],                                  # 13 rho_U
             (self.t % self.T) / max(self.T, 1),                   # 14 cycle phase
             self.t / max(self.episode_len, 1),                     # 15 episode progress
-            # [E4] New features
+            # [E4] Features
             allow_util_U,                                          # 16 URLLC allowance util
             allow_util_E,                                          # 17 eMBB allowance util
             load_factor_U,                                         # 18 URLLC load factor
             load_factor_E,                                         # 19 eMBB load factor
+            # [R5] New features
+            over_rev_rate_E,                                       # 20 eMBB overage rate
+            days_remaining,                                        # 21 days remaining in cycle
         ], dtype=np.float32)
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=self._obs_hi, neginf=self._obs_lo)

@@ -4,7 +4,8 @@ Reference-grade simulation for joint network-slice pricing and PRB allocation
 using Soft Actor-Critic reinforcement learning, with a **3-part tariff**
 revenue model (base fee + allowance + overage pricing).
 
-**Revision 6** — 9 learning-efficiency enhancements (E1–E9) with 37 unit tests.
+**Revision 7** — 8 improvements (R1–R8) based on v6 training evaluation analysis,
+with 48 unit tests.
 
 ## Quick Start
 
@@ -39,19 +40,19 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 
 ```
 oran3pt/
-├── config/default.yaml        # All scenario parameters (v6)
+├── config/default.yaml        # All scenario parameters (v7)
 ├── oran3pt/
 │   ├── utils.py               # Config I/O, sigmoid, device selection
 │   ├── gen_users.py           # Synthetic user CSV generation (§13)
-│   ├── env.py                 # Gymnasium environment — 20D obs (§3–12)
-│   ├── train.py               # SB3 SAC training + multi-seed (§14)
+│   ├── env.py                 # Gymnasium environment — 22D obs (§3–12)
+│   ├── train.py               # SB3 SAC training + curriculum + multi-seed (§14)
 │   ├── eval.py                # Evaluation + CLV computation (§15)
 │   └── dashboard_app.py       # Streamlit/Matplotlib dashboard (§16)
 ├── scripts/run.sh             # End-to-end pipeline
-├── tests/test_env.py          # 37 unit tests
+├── tests/test_env.py          # 48 unit tests
 ├── data/                      # Generated users_init.csv
 ├── outputs/                   # Models, logs, plots
-├── Revision_v5.md             # Enhancement report
+├── Revision_v5.md             # v7 training evaluation report
 └── README.md
 ```
 
@@ -70,121 +71,9 @@ Bill_{u,s} = F_s + p_s^over × max(0, D_{u,s} − Q_s)
 | p_s^over | Per-GB overage coefficient | Agent action |
 | D_{u,s} | User's total monthly usage | Stochastic (lognormal) |
 
-**Online accrual** avoids sparse rewards by decomposing revenue into daily increments:
-
-```
-BaseRev_t  = (F_U · N_U + F_E · N_E) / T
-OverRev_t  = Σ_s  p_s^over × ΔOver_s(t)
-ΔOver_s(t) = (X_s(t) − Q_s)^+  −  (X_s(t−1) − Q_s)^+
-```
-
-where X_s(t) = cumulative per-user usage up to day t in the current cycle.
-
-## Traffic Model (§6)
-
-Per-user daily demand follows a log-normal distribution [IEEE/ACM Trans. Netw. 2021]:
-
-```
-D_{u,s}(t) ~ LogNormal(μ_{u,s}, σ_{u,s})
-```
-
-| Slice | Target p50 | Target p90 | Calibrated μ | Calibrated σ |
-|-------|-----------|-----------|-------------|-------------|
-| URLLC | 0.15 GB/day | 0.50 GB/day | −1.897 | 0.940 |
-| eMBB | 1.50 GB/day | 5.00 GB/day | 0.405 | 0.940 |
-
-**Demand-price elasticity** [C4] [Nevo et al., Econometrica 2016]:
-```
-D_u *= max(0.5, 1 − ε × (p_over / p_ref − 1))
-```
-
-| Parameter | URLLC | eMBB |
-|-----------|-------|------|
-| ε | 0.15 (inelastic) | 0.30 (moderate) |
-| p_ref | 2,500 KRW/GB | 1,500 KRW/GB |
-
-## RAN / PRB Allocation (§7)
-
-```
-C_U(t) = ρ_U(t) × C × κ_U        (κ_U = 1.2, URLLC priority)
-C_E(t) = (1 − ρ_U(t)) × C
-C      = 400 GB/step              (macro cell daily capacity)
-```
-
-Standards context: 100 MHz @ 30 kHz SCS → 273 PRBs [TS 38.104]. Peak DL ~1.5 Gbps [TS 38.306].
-
-## QoS Violation Model (§8)
-
-Smooth congestion probability [Huang et al., IEEE IoT-J 2020]:
-
-```
-p^viol_s(t) = σ(α × (L_s / C_s − 1))
-```
-
-| Parameter | Value | Meaning |
-|-----------|-------|---------|
-| α | 10.0 | Congestion sensitivity |
-| λ_U | 500,000 KRW | URLLC violation penalty (strict) |
-| λ_E | 50,000 KRW | eMBB violation penalty (moderate) |
-
-## Cost Model (§9)
-
-```
-Cost_t = c_opex · N_active  +  c_energy · (L_U + L_E)  +  c_cac · N_join  +  SLA_penalty
-```
-
-| Component | Value | Reference |
-|-----------|-------|-----------|
-| c_opex | 1,200 KRW/user/day | [Oughton & Frias, IEEE Access 2021] |
-| c_energy | 50 KRW/GB | [BS power models] |
-| c_cac | 80,000 KRW/join | [Kumar & Reinartz, Springer 2018] |
-| SLA_penalty | λ_U·p^viol_U + λ_E·p^viol_E | [Verizon SLA tiers] |
-
-## Market Dynamics (§10)
-
-Logit-based join and churn with heterogeneous user sensitivities:
-
-**Churn probability** (per active user per step):
-```
-p^churn_u = σ(β_0^churn + β_p^churn · P_u − β_q^churn · Q_u − β_sw · SC_u)
-```
-
-**Join probability** (per inactive user per step):
-```
-p^join_u = σ(β_0^join − β_p^join · P_u + β_q^join · Q_u)
-```
-
-| Parameter | Value | Role |
-|-----------|-------|------|
-| β_0^churn | −5.5 | Baseline churn intercept (~3% monthly) |
-| β_p^churn | 3.0 | Price sensitivity for churn [E3] |
-| β_q^churn | 2.0 | QoS retention effect |
-| β_sw | 1.5 | Switching cost |
-| β_0^join | −7.0 | Baseline join intercept (~5% monthly) |
-| β_p^join | 1.0 | Price deterrent for joining |
-| β_q^join | 1.5 | QoS attraction effect |
-
-## Customer Lifetime Value (§11)
-
-```
-CLV = Σ_{k=0}^{H−1}  E[CashFlow] · r^k / (1+d)^k
-```
-
-| Parameter | Value |
-|-----------|-------|
-| H | 24 months |
-| d | 0.01 (monthly discount) |
-| r | 1 − p^churn (retention rate) |
-
-**CLV-aware reward shaping** [E6] [Ng et al., ICML 1999]:
-```
-reward -= α_retention × (n_churn / N_active)
-```
-with α_retention = 0.15 and 100-step warmup.
-
 ## Observation Space (§3.2)
 
-20-dimensional normalized vector (expanded from 16D in v5):
+22-dimensional normalized vector (expanded from 20D in v6):
 
 | Index | Feature | Normalization |
 |-------|---------|--------------|
@@ -195,32 +84,30 @@ with α_retention = 0.15 and 100-step warmup.
 | 9–13 | Previous action components | affine to [0, 1] |
 | 14 | Billing cycle phase | (t mod T) / T |
 | 15 | Episode progress | t / episode_len |
-| **16** | **URLLC allowance utilization** | cycle_usage / (Q_U×N_U) [E4] |
-| **17** | **eMBB allowance utilization** | cycle_usage / (Q_E×N_E) [E4] |
-| **18** | **URLLC load factor** | L_U / C_U [E4] |
-| **19** | **eMBB load factor** | L_E / C_E [E4] |
+| 16 | URLLC allowance utilization | cycle_usage / (Q_U×N_U) [E4] |
+| 17 | eMBB allowance utilization | cycle_usage / (Q_E×N_E) [E4] |
+| 18 | URLLC load factor | L_U / C_U [E4] |
+| 19 | eMBB load factor | L_E / C_E [E4] |
+| **20** | **eMBB overage revenue rate** | over_rev_E / (p_over_E × N_E) [R5] |
+| **21** | **Days remaining in cycle** | (T − cycle_step) / T [R5] |
 
 ## Reward (§15)
 
 ```
-r = sign(profit) × log(1 + |profit| / scale) − smooth_penalty − retention_penalty
+r = sign(profit) × log(1 + |profit| / scale)
+    − smooth_penalty
+    − retention_penalty
+    + pop_bonus
 ```
 
 | Component | Formula | Reference |
 |-----------|---------|-----------|
 | Log-transform | sign(p)·log1p(\|p\|/s) | [SB3 Tips] |
-| Smoothing [E8] | 0.05 × ‖a_t − a_{t−1}‖² | [Dulac-Arnold 2021] |
-| Retention [E6] | 0.15 × (n_churn / N_active) | [Ng 1999, Gupta 2006] |
+| Smoothing [R4] | Σ_i w_i × (a_t[i] − a_{t−1}[i])² | [Dalal 2018] |
+| Retention [R2] | 2.0 × (n_churn / N_active) | [Wiewiora 2003, Gupta 2006] |
+| Population [R6] | 0.1 × (N_active/N_total − 0.4) | [Mguni 2019, Zheng 2022] |
 
 Clipped to [−2, 2].
-
-## Time Structure
-
-| Parameter | Value |
-|-----------|-------|
-| 1 step | 1 day |
-| 1 billing cycle (T) | 30 steps |
-| 1 episode | 24 cycles = 720 steps [E5] |
 
 ## Training
 
@@ -228,29 +115,14 @@ SAC with automatic entropy tuning [Haarnoja et al., ICML 2018]:
 
 | Hyperparameter | Value |
 |----------------|-------|
-| total_timesteps | 1,000,000 [E2] |
+| total_timesteps | 1,000,000 [R1] |
 | learning_rate | 3×10⁻⁴ → 1×10⁻⁵ (linear) [E7] |
 | batch_size | 256 |
-| buffer_size | 200,000 [E12] |
-| gamma | 0.995 [E11] |
-| ent_coef | auto |
+| buffer_size | 200,000 |
+| gamma | 0.995 |
+| ent_coef | 0.5 (initial) → auto [R8] |
 | n_seeds | 5 [E9] |
-| EvalCallback | every 10K steps [E9] |
-
-Device: MPS (Apple Silicon) → CUDA → CPU.
-
-## Dashboard Panels
-
-| Panel | Content |
-|-------|---------|
-| P1 | Profit / Revenue / Cost time series |
-| P2 | Active users / Join / Churn dynamics |
-| P3 | QoS violation probabilities (URLLC / eMBB) |
-| P4 | Action trajectories (F_U, p_over_U, F_E, p_over_E, ρ_U) |
-| P5 | Profit distribution |
-| P6 | ρ_U distribution |
-| P7 | Load factors (L_E vs C_E) [E4] |
-| P8 | Reward components breakdown |
+| Curriculum | Phase 1 (200K): no churn/join; Phase 2 (800K): full [R3] |
 
 ## Tests
 
@@ -258,7 +130,7 @@ Device: MPS (Apple Silicon) → CUDA → CPU.
 python -m pytest tests/ -v
 ```
 
-37 tests across 9 groups:
+48 tests across 10 groups:
 
 | Group | Tests | Focus |
 |-------|-------|-------|
@@ -270,7 +142,8 @@ python -m pytest tests/ -v
 | T6 Billing | 2 | Cycle length, step counter |
 | T7 Utils | 3 | Lognormal fit accuracy, sigmoid stability |
 | T8 Calibration | 5 | Churn/join targets, capacity, price sensitivity |
-| T9 v5 Enhancements | 9 | 20D obs, load factors, CLV shaping, smoothing |
+| T9 v5 Enhancements | 9 | 22D obs, load factors, CLV shaping, smoothing |
+| **T10 v7 Enhancements** | **11** | **22D obs, per-dim smoothing, pop reward, curriculum** |
 
 ## Revision History
 
@@ -280,21 +153,21 @@ python -m pytest tests/ -v
 | v2 | Calibration (C1–C5) | 26 | Fixed capacity, churn, demand elasticity |
 | v3 | SB3 transparency (F1) | 26 | Exposed silent import failure |
 | v4 | CSVLogger crash (F5) | 26 | SAC actually trains |
-| **v5/v6** | **9 enhancements (E1–E9)** | **37** | **20D obs, CLV shaping, 1M steps, multi-seed** |
+| v5/v6 | 9 enhancements (E1–E9) | 37 | 20D obs, CLV shaping, multi-seed |
+| **v7** | **8 improvements (R1–R8)** | **48** | **22D obs, curriculum, 1M steps, population reward** |
 
-### v5/v6 Enhancements
+### v7 Improvements
 
 | ID | Enhancement | Evidence |
 |----|------------|----------|
-| E1 | F_E_max: 110K → 150K | [KISDI 2023] |
-| E2 | Training: 300K → 1M steps | [Henderson 2018] |
-| E3 | β_p_churn: 1.5 → 3.0 | [Ahn 2006, Kim 2004] |
-| E4 | Observation: 16D → 20D | [Dulac-Arnold 2021] |
-| E5 | Episode: 12 → 24 cycles | [Gupta 2006] |
-| E6 | CLV reward shaping | [Ng 1999] |
-| E7 | Linear LR schedule | [Loshchilov 2019] |
-| E8 | Smoothing: 0.01 → 0.05 | [Dulac-Arnold 2021] |
-| E9 | EvalCallback + multi-seed | [Henderson 2018] |
+| R1 | Training: 50K → 1M steps (restored) | [Henderson 2018, Haarnoja 2018] |
+| R2 | Retention penalty: 0.15 → 2.0 | [Fader 2010, Wiewiora 2003] |
+| R3 | Curriculum learning (2-phase) | [Narvekar 2020, Bengio 2009] |
+| R4 | Per-dimension action smoothing | [Dalal 2018] |
+| R5 | Observation: 20D → 22D | [Dulac-Arnold 2021] |
+| R6 | Population-aware reward | [Mguni 2019, Zheng 2022] |
+| R7 | Hierarchical action timing (design) | [Vezhnevets 2017, Bacon 2017] |
+| R8 | Entropy coefficient schedule | [Zhou 2022] |
 
 ## 20 Requirements Checklist
 
@@ -325,26 +198,25 @@ python -m pytest tests/ -v
 
 | Tag | Source |
 |-----|--------|
-| [Haarnoja 2018] | Haarnoja et al., "Soft Actor-Critic," ICML 2018 |
-| [SB3] | Stable-Baselines3 documentation and RL Tips |
+| [Bacon 2017] | Bacon et al., "The Option-Critic Architecture," AAAI 2017 |
+| [Bengio 2009] | Bengio et al., "Curriculum Learning," ICML 2009 |
+| [Dalal 2018] | Dalal et al., "Safe Exploration in Continuous Action Spaces," NeurIPS 2018 |
+| [Dulac-Arnold 2021] | Dulac-Arnold et al., "Challenges of Real-World RL," JMLR 2021 |
+| [Fader 2010] | Fader & Hardie, "Customer-Base Valuation," Marketing Science 2010 |
 | [Grubb 2009] | Grubb, "Selling to Overconfident Consumers," AER 2009 |
-| [Nevo 2016] | Nevo, Turner, Williams, "Usage-Based Pricing," Econometrica 2016 |
+| [Gupta 2006] | Gupta et al., "Modeling CLV," J. Service Research 2006 |
+| [Haarnoja 2018] | Haarnoja et al., "Soft Actor-Critic," ICML 2018 |
+| [Henderson 2018] | Henderson et al., "Deep RL that Matters," AAAI 2018 |
+| [Mguni 2019] | Mguni et al., "Coordinating the Crowd," AAMAS 2019 |
+| [Narvekar 2020] | Narvekar et al., "Curriculum Learning for RL," JMLR 2020 |
+| [Nevo 2016] | Nevo et al., "Usage-Based Pricing," Econometrica 2016 |
+| [Ng 1999] | Ng et al., "Policy Invariance Under Reward Transformations," ICML 1999 |
 | [TS 38.104] | 3GPP TS 38.104 — NR Base Station radio |
 | [TS 38.306] | 3GPP TS 38.306 — NR UE radio access capabilities |
-| [TS 23.503] | 3GPP TS 23.503 — Policy and Charging Control |
-| [Huang 2020] | Huang et al., "URLLC/eMBB coexistence," IEEE IoT-J 2020 |
-| [Gupta 2006] | Gupta et al., "Modeling CLV," J. Service Research 2006 |
-| [Ng 1999] | Ng, Harada, Russell, "Policy Invariance Under Reward Transformations," ICML 1999 |
-| [Oughton 2021] | Oughton & Frias, "5G Infrastructure," IEEE Access 2021 |
-| [Kumar 2018] | Kumar & Reinartz, "Customer Relationship Management," Springer 2018 |
-| [Henderson 2018] | Henderson et al., "Deep RL that Matters," AAAI 2018 |
-| [Dulac-Arnold 2021] | Dulac-Arnold et al., "Challenges of Real-World RL," JMLR 2021 |
-| [Ahn 2006] | Ahn et al., "Internet impact on switching," Telecom Policy 2006 |
-| [Kim 2004] | Kim & Yoon, "Determinants of subscriber churn," Telecom Policy 2004 |
-| [KISDI 2023] | KISDI, "ICT Industry Outlook," Korea 2023 |
-| [Loshchilov 2019] | Loshchilov & Hutter, "SGDR," ICLR 2019 |
-| [Fader 2010] | Fader & Hardie, "Customer-Base Valuation," Marketing Science 2010 |
-| [Wong 2011] | Wong, "Color blindness," Nature Methods 2011 |
+| [Vezhnevets 2017] | Vezhnevets et al., "FeUdal Networks," ICML 2017 |
+| [Wiewiora 2003] | Wiewiora et al., "Principled Methods for Advising RL Agents," ICML 2003 |
+| [Zheng 2022] | Zheng et al., "The AI Economist," Science Advances 2022 |
+| [Zhou 2022] | Zhou et al., "Revisiting Exploration in Deep RL," ICLR 2022 |
 
 ## License
 
