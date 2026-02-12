@@ -2,21 +2,21 @@
 # ==============================================================================
 # O-RAN 3-Part Tariff Pricing — End-to-End Pipeline  (Requirement 15)
 #
+# REVISION 5 — Enhancements:
+#   [E2] 1M training timesteps
+#   [E9] Multi-seed training (default: 1 seed for quick run; set --seeds N)
+#   Prior fixes: [F1] transparent pip, [F2] SB3 verify, [F3] fallback install
+#
 # Steps:
-#   0) Create venv & install dependencies (with SB3 verification)
+#   0) Create venv & install dependencies
 #   1) Generate synthetic user CSV
 #   2) Run unit tests
-#   3) Train SAC agent
+#   3) Train SAC agent (multi-seed)
 #   4) Evaluate & export logs + CLV
 #   5) Generate dashboard
 #
-# REVISION 3 — Fixes:
-#   [F1] pip install no longer suppresses errors (was hiding SB3 failure)
-#   [F2] Explicit SB3 import check before training
-#   [F3] Fallback: attempt SB3 install from PyPI if missing
-#
 # Usage:
-#   chmod +x scripts/run.sh && ./scripts/run.sh
+#   chmod +x scripts/run.sh && ./scripts/run.sh [--seeds N]
 # ==============================================================================
 set -euo pipefail
 
@@ -24,8 +24,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+# Parse optional --seeds argument
+N_SEEDS=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --seeds) N_SEEDS="$2"; shift 2;;
+        *) shift;;
+    esac
+done
+
 echo "============================================"
-echo " O-RAN 3-Part Tariff — Full Pipeline"
+echo " O-RAN 3-Part Tariff — Full Pipeline (v5)"
 echo "============================================"
 echo "Project dir: $PROJECT_DIR"
 echo ""
@@ -39,59 +48,51 @@ fi
 source .venv/bin/activate
 pip install --upgrade pip -q
 
-# [F1] FIX: Do NOT suppress pip output — show errors clearly
 echo "Installing dependencies..."
 pip install -r requirements.txt 2>&1 | tee /tmp/pip_install.log | tail -5
 echo ""
 
-# [F2] FIX: Verify SB3 is importable before proceeding
+# Verify critical packages
 echo "Verifying critical packages..."
 python -c "
 import sys
 errors = []
 
-# Check SB3
 try:
     import stable_baselines3
-    print(f'  ✅ stable-baselines3 {stable_baselines3.__version__}')
+    print(f'  stable-baselines3 {stable_baselines3.__version__}')
 except ImportError as e:
     errors.append(f'stable-baselines3: {e}')
-    print(f'  ❌ stable-baselines3 MISSING: {e}')
+    print(f'  stable-baselines3 MISSING: {e}')
 
-# Check PyTorch
 try:
     import torch
     from oran3pt.utils import select_device
     dev = select_device()
-    print(f'  ✅ torch {torch.__version__} (device: {dev})')
+    print(f'  torch {torch.__version__} (device: {dev})')
 except ImportError as e:
     errors.append(f'torch: {e}')
-    print(f'  ❌ torch MISSING: {e}')
+    print(f'  torch MISSING: {e}')
 
-# Check gymnasium
 try:
     import gymnasium
-    print(f'  ✅ gymnasium {gymnasium.__version__}')
+    print(f'  gymnasium {gymnasium.__version__}')
 except ImportError as e:
     errors.append(f'gymnasium: {e}')
-    print(f'  ❌ gymnasium MISSING: {e}')
+    print(f'  gymnasium MISSING: {e}')
 
 if errors:
     print()
-    print('  ⚠️  Some packages failed to install.')
-    print('  Attempting targeted install of missing packages...')
+    print('  Some packages failed. Attempting targeted install...')
     sys.exit(1)
 else:
     print('  All critical packages verified.')
 " || {
-    # [F3] FIX: Attempt targeted reinstall of SB3
     echo ""
     echo "Attempting targeted SB3 install..."
     pip install "stable-baselines3[extra]>=2.3.0" --force-reinstall 2>&1 | tail -5
-    python -c "import stable_baselines3; print(f'  ✅ SB3 {stable_baselines3.__version__} installed successfully')" || {
-        echo "  ❌ SB3 install failed. Training will use random baseline."
-        echo "  Common causes: incompatible torch version, missing C++ compiler"
-        echo "  Try: pip install stable-baselines3 --verbose"
+    python -c "import stable_baselines3; print(f'  SB3 {stable_baselines3.__version__} installed')" || {
+        echo "  SB3 install failed. Training will use random baseline."
     }
 }
 echo ""
@@ -110,9 +111,11 @@ echo ""
 
 # ── Step 3: Train SAC ──
 echo "===== Step 3: Train SAC ====="
-python -m oran3pt.train \
-    --config config/default.yaml \
-    --users data/users_init.csv
+TRAIN_ARGS="--config config/default.yaml --users data/users_init.csv"
+if [ -n "$N_SEEDS" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS --seeds $N_SEEDS"
+fi
+python -m oran3pt.train $TRAIN_ARGS
 echo ""
 
 # ── Step 4: Evaluate ──
@@ -126,8 +129,8 @@ if [ -f "$MODEL_PATH" ]; then
         --model "$MODEL_PATH" \
         --repeats 5
 else
-    echo "⚠️  No trained model found at $MODEL_PATH"
-    echo "   Evaluating with random policy (results will be baseline only)"
+    echo "No trained model found at $MODEL_PATH"
+    echo "Evaluating with random policy (baseline only)"
     python -m oran3pt.eval \
         --config config/default.yaml \
         --users data/users_init.csv \
@@ -154,6 +157,5 @@ fi
 
 echo ""
 echo "============================================"
-echo " Pipeline complete."
-echo " Outputs in: $PROJECT_DIR/outputs/"
+echo " Pipeline complete.  Outputs: $PROJECT_DIR/outputs/"
 echo "============================================"

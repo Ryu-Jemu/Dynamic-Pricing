@@ -4,6 +4,8 @@ Reference-grade simulation for joint network-slice pricing and PRB allocation
 using Soft Actor-Critic reinforcement learning, with a **3-part tariff**
 revenue model (base fee + allowance + overage pricing).
 
+**Revision 6** — 9 learning-efficiency enhancements (E1–E9) with 37 unit tests.
+
 ## Quick Start
 
 ```bash
@@ -27,7 +29,7 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 |--------|-------------|-------|
 | `a[0]` | URLLC base fee F_U | [30K, 90K] KRW/cycle |
 | `a[1]` | URLLC overage price p^over_U | [500, 5000] KRW/GB |
-| `a[2]` | eMBB base fee F_E | [40K, 110K] KRW/cycle |
+| `a[2]` | eMBB base fee F_E | [40K, 150K] KRW/cycle |
 | `a[3]` | eMBB overage price p^over_E | [200, 3000] KRW/GB |
 | `a[4]` | URLLC PRB share ρ_U | [0.05, 0.60] |
 
@@ -37,18 +39,19 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 
 ```
 oran3pt/
-├── config/default.yaml        # All scenario parameters
+├── config/default.yaml        # All scenario parameters (v6)
 ├── oran3pt/
 │   ├── utils.py               # Config I/O, sigmoid, device selection
 │   ├── gen_users.py           # Synthetic user CSV generation (§13)
-│   ├── env.py                 # Gymnasium environment (§3–12)
-│   ├── train.py               # SB3 SAC training (§14)
+│   ├── env.py                 # Gymnasium environment — 20D obs (§3–12)
+│   ├── train.py               # SB3 SAC training + multi-seed (§14)
 │   ├── eval.py                # Evaluation + CLV computation (§15)
 │   └── dashboard_app.py       # Streamlit/Matplotlib dashboard (§16)
 ├── scripts/run.sh             # End-to-end pipeline
-├── tests/test_env.py          # Unit tests
+├── tests/test_env.py          # 37 unit tests
 ├── data/                      # Generated users_init.csv
 ├── outputs/                   # Models, logs, plots
+├── Revision_v5.md             # Enhancement report
 └── README.md
 ```
 
@@ -90,17 +93,25 @@ D_{u,s}(t) ~ LogNormal(μ_{u,s}, σ_{u,s})
 | URLLC | 0.15 GB/day | 0.50 GB/day | −1.897 | 0.940 |
 | eMBB | 1.50 GB/day | 5.00 GB/day | 0.405 | 0.940 |
 
-Parameters fitted via quantile matching: μ = ln(p50), σ = (ln(p90) − μ) / Φ⁻¹(0.90).
+**Demand-price elasticity** [C4] [Nevo et al., Econometrica 2016]:
+```
+D_u *= max(0.5, 1 − ε × (p_over / p_ref − 1))
+```
+
+| Parameter | URLLC | eMBB |
+|-----------|-------|------|
+| ε | 0.15 (inelastic) | 0.30 (moderate) |
+| p_ref | 2,500 KRW/GB | 1,500 KRW/GB |
 
 ## RAN / PRB Allocation (§7)
 
 ```
 C_U(t) = ρ_U(t) × C × κ_U        (κ_U = 1.2, URLLC priority)
 C_E(t) = (1 − ρ_U(t)) × C
-C      = 50 GB/step               (macro cell daily capacity)
+C      = 400 GB/step              (macro cell daily capacity)
 ```
 
-Standards context: 100 MHz @ 30 kHz SCS → 273 PRBs [TS 38.104].
+Standards context: 100 MHz @ 30 kHz SCS → 273 PRBs [TS 38.104]. Peak DL ~1.5 Gbps [TS 38.306].
 
 ## QoS Violation Model (§8)
 
@@ -116,12 +127,7 @@ p^viol_s(t) = σ(α × (L_s / C_s − 1))
 | λ_U | 500,000 KRW | URLLC violation penalty (strict) |
 | λ_E | 50,000 KRW | eMBB violation penalty (moderate) |
 
-The sigmoid formulation is **expectation-friendly** — it supports
-deterministic expected-value optimization without sampling [Req. 12].
-
 ## Cost Model (§9)
-
-Capex excluded (single-cell assumption). Operating cost per step:
 
 ```
 Cost_t = c_opex · N_active  +  c_energy · (L_U + L_E)  +  c_cac · N_join  +  SLA_penalty
@@ -150,21 +156,15 @@ p^join_u = σ(β_0^join − β_p^join · P_u + β_q^join · Q_u)
 
 | Parameter | Value | Role |
 |-----------|-------|------|
-| β_0^churn | −4.5 | Baseline churn intercept (~3% monthly) |
-| β_p^churn | 0.3 | Price sensitivity for churn |
-| β_q^churn | 0.2 | QoS retention effect |
-| β_sw | 0.5 | Switching cost |
-| β_0^join | −3.5 | Baseline join intercept (~5% monthly) |
-| β_p^join | 0.2 | Price deterrent for joining |
-| β_q^join | 0.3 | QoS attraction effect |
-
-Two modes supported [Req. 12]:
-1. **Expectation-only**: N_join = round(Σ p^join), N_churn = round(Σ p^churn)
-2. **Stochastic**: N_join ~ Poisson(Σ p^join), N_churn ~ Poisson(Σ p^churn)
+| β_0^churn | −5.5 | Baseline churn intercept (~3% monthly) |
+| β_p^churn | 3.0 | Price sensitivity for churn [E3] |
+| β_q^churn | 2.0 | QoS retention effect |
+| β_sw | 1.5 | Switching cost |
+| β_0^join | −7.0 | Baseline join intercept (~5% monthly) |
+| β_p^join | 1.0 | Price deterrent for joining |
+| β_q^join | 1.5 | QoS attraction effect |
 
 ## Customer Lifetime Value (§11)
-
-Computed post-evaluation using [Gupta et al., J. Service Research 2006]:
 
 ```
 CLV = Σ_{k=0}^{H−1}  E[CashFlow] · r^k / (1+d)^k
@@ -176,26 +176,42 @@ CLV = Σ_{k=0}^{H−1}  E[CashFlow] · r^k / (1+d)^k
 | d | 0.01 (monthly discount) |
 | r | 1 − p^churn (retention rate) |
 
+**CLV-aware reward shaping** [E6] [Ng et al., ICML 1999]:
+```
+reward -= α_retention × (n_churn / N_active)
+```
+with α_retention = 0.15 and 100-step warmup.
+
 ## Observation Space (§3.2)
 
-16-dimensional normalized vector:
+20-dimensional normalized vector (expanded from 16D in v5):
 
 | Index | Feature | Normalization |
 |-------|---------|--------------|
 | 0–1 | Active / inactive user fractions | /N_total |
-| 2–3 | Previous join / churn counts | /N_total |
+| 2–3 | Previous join / churn counts | /N_total×0.05 |
 | 4–5 | QoS violation probs (URLLC, eMBB) | [0, 1] |
 | 6–8 | Revenue / cost / profit (normalized) | /scale |
 | 9–13 | Previous action components | affine to [0, 1] |
 | 14 | Billing cycle phase | (t mod T) / T |
 | 15 | Episode progress | t / episode_len |
+| **16** | **URLLC allowance utilization** | cycle_usage / (Q_U×N_U) [E4] |
+| **17** | **eMBB allowance utilization** | cycle_usage / (Q_E×N_E) [E4] |
+| **18** | **URLLC load factor** | L_U / C_U [E4] |
+| **19** | **eMBB load factor** | L_E / C_E [E4] |
 
 ## Reward (§15)
 
-Log-transformed for stability [SB3 Tips]:
 ```
-r = sign(profit) × log(1 + |profit| / scale)
+r = sign(profit) × log(1 + |profit| / scale) − smooth_penalty − retention_penalty
 ```
+
+| Component | Formula | Reference |
+|-----------|---------|-----------|
+| Log-transform | sign(p)·log1p(\|p\|/s) | [SB3 Tips] |
+| Smoothing [E8] | 0.05 × ‖a_t − a_{t−1}‖² | [Dulac-Arnold 2021] |
+| Retention [E6] | 0.15 × (n_churn / N_active) | [Ng 1999, Gupta 2006] |
+
 Clipped to [−2, 2].
 
 ## Time Structure
@@ -204,7 +220,7 @@ Clipped to [−2, 2].
 |-----------|-------|
 | 1 step | 1 day |
 | 1 billing cycle (T) | 30 steps |
-| 1 episode | 12 cycles = 360 steps |
+| 1 episode | 24 cycles = 720 steps [E5] |
 
 ## Training
 
@@ -212,14 +228,16 @@ SAC with automatic entropy tuning [Haarnoja et al., ICML 2018]:
 
 | Hyperparameter | Value |
 |----------------|-------|
-| total_timesteps | 200,000 |
-| learning_rate | 3 × 10⁻⁴ |
+| total_timesteps | 1,000,000 [E2] |
+| learning_rate | 3×10⁻⁴ → 1×10⁻⁵ (linear) [E7] |
 | batch_size | 256 |
-| buffer_size | 100,000 |
-| gamma | 0.99 |
+| buffer_size | 200,000 [E12] |
+| gamma | 0.995 [E11] |
 | ent_coef | auto |
+| n_seeds | 5 [E9] |
+| EvalCallback | every 10K steps [E9] |
 
-Device: MPS (Apple Silicon) preferred, fallback to CPU [PyTorch MPS docs].
+Device: MPS (Apple Silicon) → CUDA → CPU.
 
 ## Dashboard Panels
 
@@ -231,7 +249,8 @@ Device: MPS (Apple Silicon) preferred, fallback to CPU [PyTorch MPS docs].
 | P4 | Action trajectories (F_U, p_over_U, F_E, p_over_E, ρ_U) |
 | P5 | Profit distribution |
 | P6 | ρ_U distribution |
-| P7 | CLV summary table |
+| P7 | Load factors (L_E vs C_E) [E4] |
+| P8 | Reward components breakdown |
 
 ## Tests
 
@@ -239,15 +258,43 @@ Device: MPS (Apple Silicon) preferred, fallback to CPU [PyTorch MPS docs].
 python -m pytest tests/ -v
 ```
 
-| Test | Assertions |
-|------|-----------|
-| T1 Env basics | Reset/step shapes, episode termination |
-| T2 Revenue | Non-negative revenue, overage accrual |
-| T3 Market | Population conservation, join/churn ≥ 0 |
-| T4 QoS | Violation in [0,1], sigmoid monotonicity |
-| T5 Numerical | No NaN/Inf across seeds, obs bounds, reward clip |
-| T6 Billing | Cycle length, step counter |
-| T7 Utils | Lognormal fit accuracy, sigmoid stability |
+37 tests across 9 groups:
+
+| Group | Tests | Focus |
+|-------|-------|-------|
+| T1 Env basics | 5 | Reset/step shapes, episode 720 steps |
+| T2 Revenue | 2 | Non-negative revenue, overage accrual |
+| T3 Market | 3 | Population conservation, join/churn ≥ 0 |
+| T4 QoS | 3 | Violation in [0,1], sigmoid monotonicity |
+| T5 Numerical | 5 | No NaN/Inf across seeds, obs bounds, reward clip |
+| T6 Billing | 2 | Cycle length, step counter |
+| T7 Utils | 3 | Lognormal fit accuracy, sigmoid stability |
+| T8 Calibration | 5 | Churn/join targets, capacity, price sensitivity |
+| T9 v5 Enhancements | 9 | 20D obs, load factors, CLV shaping, smoothing |
+
+## Revision History
+
+| Version | Focus | Tests | Key Change |
+|---------|-------|-------|------------|
+| v1 | Initial | 22 | Broken calibration (profit < 0) |
+| v2 | Calibration (C1–C5) | 26 | Fixed capacity, churn, demand elasticity |
+| v3 | SB3 transparency (F1) | 26 | Exposed silent import failure |
+| v4 | CSVLogger crash (F5) | 26 | SAC actually trains |
+| **v5/v6** | **9 enhancements (E1–E9)** | **37** | **20D obs, CLV shaping, 1M steps, multi-seed** |
+
+### v5/v6 Enhancements
+
+| ID | Enhancement | Evidence |
+|----|------------|----------|
+| E1 | F_E_max: 110K → 150K | [KISDI 2023] |
+| E2 | Training: 300K → 1M steps | [Henderson 2018] |
+| E3 | β_p_churn: 1.5 → 3.0 | [Ahn 2006, Kim 2004] |
+| E4 | Observation: 16D → 20D | [Dulac-Arnold 2021] |
+| E5 | Episode: 12 → 24 cycles | [Gupta 2006] |
+| E6 | CLV reward shaping | [Ng 1999] |
+| E7 | Linear LR schedule | [Loshchilov 2019] |
+| E8 | Smoothing: 0.01 → 0.05 | [Dulac-Arnold 2021] |
+| E9 | EvalCallback + multi-seed | [Henderson 2018] |
 
 ## 20 Requirements Checklist
 
@@ -278,21 +325,26 @@ python -m pytest tests/ -v
 
 | Tag | Source |
 |-----|--------|
-| [Haarnoja 2018] | Haarnoja et al., "Soft Actor-Critic: Off-Policy Maximum Entropy Deep RL," ICML 2018 |
+| [Haarnoja 2018] | Haarnoja et al., "Soft Actor-Critic," ICML 2018 |
 | [SB3] | Stable-Baselines3 documentation and RL Tips |
-| [Grubb 2009] | Grubb, "Selling to Overconfident Consumers: The Effect of 3-Part Tariffs," AER 2009 |
-| [Nevo 2015] | Nevo, Turner, Williams, "Usage-Based Pricing and Demand for Residential Broadband," NBER w21321 |
-| [TS 38.104] | 3GPP TS 38.104 — NR Base Station radio (100 MHz, 30 kHz SCS, 273 PRBs) |
-| [TS 23.503] | 3GPP TS 23.503 — Policy and Charging Control (usage monitoring) |
-| [Huang 2020] | Huang et al., "URLLC/eMBB coexistence via preemptive puncturing," IEEE IoT-J 2020 |
-| [Gupta 2006] | Gupta, Hanssens, Hardie, Kahn, Kumar, Lin, Sriram, "Modeling CLV," J. Service Research 2006 |
+| [Grubb 2009] | Grubb, "Selling to Overconfident Consumers," AER 2009 |
+| [Nevo 2016] | Nevo, Turner, Williams, "Usage-Based Pricing," Econometrica 2016 |
+| [TS 38.104] | 3GPP TS 38.104 — NR Base Station radio |
+| [TS 38.306] | 3GPP TS 38.306 — NR UE radio access capabilities |
+| [TS 23.503] | 3GPP TS 23.503 — Policy and Charging Control |
+| [Huang 2020] | Huang et al., "URLLC/eMBB coexistence," IEEE IoT-J 2020 |
+| [Gupta 2006] | Gupta et al., "Modeling CLV," J. Service Research 2006 |
 | [Ng 1999] | Ng, Harada, Russell, "Policy Invariance Under Reward Transformations," ICML 1999 |
-| [Oughton 2021] | Oughton & Frias, "Techno-economic Assessment of 5G Infrastructure," IEEE Access 2021 |
+| [Oughton 2021] | Oughton & Frias, "5G Infrastructure," IEEE Access 2021 |
 | [Kumar 2018] | Kumar & Reinartz, "Customer Relationship Management," Springer 2018 |
 | [Henderson 2018] | Henderson et al., "Deep RL that Matters," AAAI 2018 |
-| [LogN_TNet] | Mobile data traffic modeling, IEEE/ACM Trans. Netw. 2021 |
-| [Wong 2011] | Wong, "Points of view: Color blindness," Nature Methods 2011 |
-| [ITU] | ITU Teletraffic Engineering Handbook — Poisson arrivals |
+| [Dulac-Arnold 2021] | Dulac-Arnold et al., "Challenges of Real-World RL," JMLR 2021 |
+| [Ahn 2006] | Ahn et al., "Internet impact on switching," Telecom Policy 2006 |
+| [Kim 2004] | Kim & Yoon, "Determinants of subscriber churn," Telecom Policy 2004 |
+| [KISDI 2023] | KISDI, "ICT Industry Outlook," Korea 2023 |
+| [Loshchilov 2019] | Loshchilov & Hutter, "SGDR," ICLR 2019 |
+| [Fader 2010] | Fader & Hardie, "Customer-Base Valuation," Marketing Science 2010 |
+| [Wong 2011] | Wong, "Color blindness," Nature Methods 2011 |
 
 ## License
 

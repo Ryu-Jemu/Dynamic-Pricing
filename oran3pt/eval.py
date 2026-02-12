@@ -1,12 +1,15 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 3 — Fixes:
-  [F3] Fixed pandas FutureWarning in CLV groupby.apply (include_groups=False)
+REVISION 5 — Enhancements:
+  [E9] Multi-seed model selection (evaluates best model across seeds)
+  Prior revisions:
+  [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
 Outputs:
   outputs/rollout_log.csv   — per-step metrics across repeats
   outputs/eval_summary.csv  — aggregate statistics
+  outputs/clv_report.csv    — CLV analysis
 
 Usage:
   python -m oran3pt.eval --config config/default.yaml --model outputs/best_model.zip
@@ -60,7 +63,6 @@ def run_evaluation(cfg: Dict[str, Any],
     if model_path and Path(model_path).exists():
         try:
             from stable_baselines3 import SAC
-            # Ensure model_path has .zip extension
             mp = model_path if model_path.endswith(".zip") else model_path + ".zip"
             if Path(mp).exists():
                 model = SAC.load(mp, env=env)
@@ -80,7 +82,7 @@ def run_evaluation(cfg: Dict[str, Any],
     if all_records:
         df = pd.DataFrame(all_records)
         df.to_csv(rollout_path, index=False)
-        logger.info("Rollout log: %d rows → %s", len(df), rollout_path)
+        logger.info("Rollout log: %d rows -> %s", len(df), rollout_path)
 
         # ── summary ──
         summary_path = out / "eval_summary.csv"
@@ -89,7 +91,7 @@ def run_evaluation(cfg: Dict[str, Any],
         std_vals = df[num_cols].std()
         summary = pd.DataFrame({"mean": mean_vals, "std": std_vals})
         summary.to_csv(summary_path)
-        logger.info("Summary → %s", summary_path)
+        logger.info("Summary -> %s", summary_path)
 
         # ── CLV computation (§11) ──
         if cfg.get("clv", {}).get("enabled", True):
@@ -105,10 +107,9 @@ def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
     H = clv_cfg.get("horizon_months", 24)
     d = clv_cfg.get("discount_rate_monthly", 0.01)
 
-    # Estimate monthly cash-flow per user ≈ monthly profit / N_active
     T = cfg["time"]["steps_per_cycle"]
 
-    # [F3] FIX: Added include_groups=False to avoid pandas FutureWarning
+    # [F3] FIX: include_groups=False
     monthly_profit = df.groupby("repeat").apply(
         lambda g: g.groupby(g["step"].apply(lambda s: (s - 1) // T))["profit"].sum().mean(),
         include_groups=False,
@@ -132,12 +133,13 @@ def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
         "mean_monthly_profit": mean_monthly_profit,
         "mean_N_active": mean_N,
         "cf_per_user_month": cf_per_user,
+        "monthly_churn": monthly_churn,
         "monthly_retention": retention,
         "CLV_per_user": clv,
         "horizon_months": H,
         "discount_rate": d,
     }]).to_csv(clv_path, index=False)
-    logger.info("CLV report → %s  (CLV=%.0f KRW)", clv_path, clv)
+    logger.info("CLV report -> %s  (CLV=%.0f KRW)", clv_path, clv)
 
 
 def main() -> None:

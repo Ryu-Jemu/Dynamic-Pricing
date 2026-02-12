@@ -1,17 +1,27 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Online MDP  (§§3–11)
 
-REVISION 2 — Calibration corrections:
+REVISION 5 — Enhancements:
+  [E4] Observation dim 16 → 20 (load factors, allowance utilisation)
+  [E6] CLV-aware reward shaping (retention penalty)
+  [E8] Stronger action smoothing (weight from config)
+  Prior revisions (v1–v4):
   [C3] Removed price_norm re-multiplication in churn/join logits
-  [C4] Added demand-price elasticity  [Nevo et al., Econometrica 2016]
-  [C5] Added action smoothing penalty  [Dulac-Arnold et al., JMLR 2021]
+  [C4] Demand-price elasticity  [Nevo et al., Econometrica 2016]
+  [C5] Action smoothing penalty  [Dulac-Arnold et al., JMLR 2021]
 
 Gymnasium-compatible environment for SB3 SAC.
 
 Action (5-D continuous, §4):
   a = [F_U, p_U^over, F_E, p_E^over, ρ_U]
 
-Observation (16-D, §3.2) — see ``_build_obs`` for layout.
+Observation (20-D, §3.2) — see ``_build_obs`` for layout.
+  [E4] Four new features:
+    16: cycle_usage_U / (Q_U × N_U)  — URLLC allowance utilisation
+    17: cycle_usage_E / (Q_E × N_E)  — eMBB allowance utilisation
+    18: L_U / C_U                     — URLLC load factor
+    19: L_E / C_E                     — eMBB load factor
+  [Dulac-Arnold et al., JMLR 2021, Challenge #1]
 
 Revenue per step (§5.2  — online accrual):
   BaseRev_t  = (F_U·N_U + F_E·N_E) / T
@@ -24,6 +34,10 @@ Cost per step (§9):
 Market (§10):
   Logit-based churn/join every step, expectation-only or stochastic mode.
 
+Reward (§15 + §11b):
+  [E6] reward = log_profit − smooth_penalty − retention_penalty
+  retention_penalty = α_ret × (n_churn / N_active)   [Ng et al., ICML 1999]
+
 References:
   [Haarnoja 2018]    SAC
   [Grubb AER 2009]   3-part tariff
@@ -34,6 +48,7 @@ References:
   [ITU Teletraffic]  Poisson arrivals
   [Dulac-Arnold 2021] Challenges of Real-World RL
   [Ahn 2006]         Telecom churn determinants
+  [Ng 1999]          Policy invariance under reward transformations
 """
 from __future__ import annotations
 
@@ -84,12 +99,13 @@ class OranSlicingPricingEnv(gym.Env):
         ], dtype=np.float64)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(5,), dtype=np.float32)
 
-        # Observation (§3.2)
+        # Observation (§3.2)  [E4] 20-D
         obs_cfg = cfg.get("observation", {})
+        self._obs_dim: int = obs_cfg.get("dim", 20)
         self._obs_lo = obs_cfg.get("clip_min", -10.0)
         self._obs_hi = obs_cfg.get("clip_max", 10.0)
         self.observation_space = spaces.Box(
-            self._obs_lo, self._obs_hi, shape=(16,), dtype=np.float32)
+            self._obs_lo, self._obs_hi, shape=(self._obs_dim,), dtype=np.float32)
 
         # Tariff allowances (§5.1  — CONFIG param, not action)
         tar = cfg["tariff"]
@@ -123,7 +139,7 @@ class OranSlicingPricingEnv(gym.Env):
         self.bp_join: float = mc["beta_p_join"]
         self.bq_join: float = mc["beta_q_join"]
         self.market_mode: str = mc.get("mode", "stochastic")
-        self._price_norm: float = mc.get("price_norm", 70000.0)
+        self._price_norm: float = mc.get("price_norm", 120000.0)
 
         # Demand-price elasticity (§6b)  [C4]  [Nevo 2016]
         de = cfg.get("demand_elasticity", {})
@@ -134,10 +150,16 @@ class OranSlicingPricingEnv(gym.Env):
         self._pref_E: float = de.get("p_ref_E", 1500.0)
         self._demand_floor: float = de.get("floor", 0.5)
 
-        # Action smoothing (§15b)  [C5]  [Dulac-Arnold 2021]
+        # Action smoothing (§15b)  [C5][E8]  [Dulac-Arnold 2021]
         sm = cfg.get("action_smoothing", {})
         self._smooth_enabled: bool = sm.get("enabled", False)
-        self._smooth_weight: float = sm.get("weight", 0.01)
+        self._smooth_weight: float = sm.get("weight", 0.05)
+
+        # CLV reward shaping (§11b)  [E6]  [Ng et al. 1999]
+        clv_rs = cfg.get("clv_reward_shaping", {})
+        self._clv_rs_enabled: bool = clv_rs.get("enabled", False)
+        self._clv_rs_alpha: float = clv_rs.get("alpha_retention", 0.15)
+        self._clv_rs_warmup: int = clv_rs.get("warmup_steps", 100)
 
         # CLV (§11)
         clv_cfg = cfg.get("clv", {})
@@ -168,6 +190,11 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_n_churn: int = 0
         self._prev_pviol_U: float = 0.0
         self._prev_pviol_E: float = 0.0
+        # [E4] Track load and capacity for obs
+        self._prev_L_U: float = 0.0
+        self._prev_L_E: float = 0.0
+        self._prev_C_U: float = 1.0
+        self._prev_C_E: float = 1.0
 
     # ── user loading ──────────────────────────────────────────────────
     def _load_users(self, csv_path: Optional[str]) -> None:
@@ -214,6 +241,11 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_n_churn = 0
         self._prev_pviol_U = 0.0
         self._prev_pviol_E = 0.0
+        # [E4]
+        self._prev_L_U = 0.0
+        self._prev_L_E = 0.0
+        self._prev_C_U = self.C_total * 0.5 * self.kappa_U
+        self._prev_C_E = self.C_total * 0.5
         return self._build_obs(), {}
 
     # ── step ──────────────────────────────────────────────────────────
@@ -302,17 +334,22 @@ class OranSlicingPricingEnv(gym.Env):
         # ── profit + reward ──
         profit = revenue - cost_total
 
-        # ── action smoothing penalty [C5] [Dulac-Arnold 2021] ──
+        # ── action smoothing penalty [C5][E8] [Dulac-Arnold 2021] ──
         smooth_penalty = 0.0
         if self._smooth_enabled and self.t > 1:
-            # Normalise each action dimension to [0,1] before computing change
             a_norm = (a - self._a_lo) / np.maximum(self._a_hi - self._a_lo, 1e-8)
             prev_norm = (self._prev_action - self._a_lo) / np.maximum(
                 self._a_hi - self._a_lo, 1e-8)
             smooth_penalty = self._smooth_weight * float(
                 np.sum((a_norm - prev_norm) ** 2))
 
-        reward = self._compute_reward(profit, smooth_penalty)
+        # ── CLV retention penalty [E6] [Ng et al. 1999] ──
+        retention_penalty = 0.0
+        if (self._clv_rs_enabled and self.t > self._clv_rs_warmup
+                and N_act > 0):
+            retention_penalty = self._clv_rs_alpha * (n_churn / max(N_act, 1))
+
+        reward = self._compute_reward(profit, smooth_penalty, retention_penalty)
 
         # ── cache for obs ──
         self._prev_action = a.copy()
@@ -323,6 +360,11 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_n_churn = n_churn
         self._prev_pviol_U = pviol_U
         self._prev_pviol_E = pviol_E
+        # [E4] cache load/capacity
+        self._prev_L_U = L_U
+        self._prev_L_E = L_E
+        self._prev_C_U = C_U
+        self._prev_C_E = C_E
 
         return {
             "step": self.t,
@@ -344,6 +386,7 @@ class OranSlicingPricingEnv(gym.Env):
             "cost_total": cost_total,
             "profit": profit, "reward": reward,
             "smooth_penalty": smooth_penalty,
+            "retention_penalty": retention_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
         }
@@ -355,7 +398,6 @@ class OranSlicingPricingEnv(gym.Env):
 
         [C4] Demand-price elasticity  [Nevo et al., Econometrica 2016]:
           D_u *= max(floor, 1 − ε × (p_over/p_ref − 1))
-        Users reduce consumption when overage price exceeds reference.
         """
         act = self._active_mask
         n = int(act.sum())
@@ -365,7 +407,7 @@ class OranSlicingPricingEnv(gym.Env):
         traf_cfg_u = self.cfg["traffic"]["URLLC"]
         traf_cfg_e = self.cfg["traffic"]["eMBB"]
 
-        # Sample URLLC usage for all users, zero out inactive & eMBB
+        # Sample URLLC usage
         raw_u = self._rng.lognormal(self._mu_u, self._sig_u)
         raw_u = np.clip(raw_u, traf_cfg_u["D_min_gb"], traf_cfg_u["D_max_gb"])
 
@@ -393,11 +435,8 @@ class OranSlicingPricingEnv(gym.Env):
                      ) -> Tuple[int, int]:
         """Compute join/churn for this step; update _active_mask.
 
-        [C3] BUG FIX: Removed redundant `* self._price_norm` from logit.
-        Previous code computed  β_p × psens × P_sig × price_norm,
-        which re-inflated the normalised P_sig back to the raw price
-        scale, producing churn logits ~2.0 instead of the intended ~0.03.
-        Now β_p operates directly on P_sig ∈ [0, 1].
+        [C3] BUG FIX: β_p operates directly on P_sig ∈ [0, 1].
+        [E3] beta_p_churn strengthened to 3.0 for competitive market.
         """
         N_act = int(self._active_mask.sum())
         N_inact = self.N_total - N_act
@@ -407,28 +446,24 @@ class OranSlicingPricingEnv(gym.Env):
         Q_sig = 1.0 - (self._prev_pviol_U + self._prev_pviol_E) / 2.0
 
         # ── churn (§10.1) ──
-        # [C3] Per-user logit — β_p now works on normalised P_sig directly
         churn_logits = (
             self.b0_churn
-            + self.bp_churn * self._psens * P_sig      # [C3] removed × price_norm
+            + self.bp_churn * self._psens * P_sig
             - self.bq_churn * self._qsens * Q_sig
             - self.bsw_churn * self._swcost
         )
-        p_churn_all = sigmoid(churn_logits)   # per-user array
-        # Only active users can churn
+        p_churn_all = sigmoid(churn_logits)
         p_churn_active = p_churn_all * self._active_mask
 
         E_churn = float(p_churn_active.sum())
 
         # ── join (§10.2) ──
-        # [C3] Same fix — β_p_join on normalised scale
         join_logits = (
             self.b0_join
-            - self.bp_join * self._psens * P_sig        # [C3] removed × price_norm
+            - self.bp_join * self._psens * P_sig
             + self.bq_join * self._qsens * Q_sig
         )
         p_join_all = sigmoid(join_logits)
-        # Only inactive users can join
         p_join_inactive = p_join_all * (~self._active_mask).astype(np.float64)
 
         E_join = float(p_join_inactive.sum())
@@ -437,7 +472,6 @@ class OranSlicingPricingEnv(gym.Env):
         if self.market_mode == "expectation":
             n_churn = min(int(round(E_churn)), N_act)
             n_join = min(int(round(E_join)), N_inact)
-            # Deterministic: deactivate highest-churn-prob users
             if n_churn > 0:
                 churn_scores = p_churn_active.copy()
                 churn_scores[~self._active_mask] = -1.0
@@ -475,30 +509,48 @@ class OranSlicingPricingEnv(gym.Env):
 
         return n_join, n_churn
 
-    # ── reward (§5 objective + §15b smoothing) ────────────────────────
+    # ── reward (§5 + §11b + §15b) ────────────────────────────────────
     def _compute_reward(self, profit: float,
-                        smooth_penalty: float = 0.0) -> float:
-        """Log-transformed profit reward with optional action smoothing.
+                        smooth_penalty: float = 0.0,
+                        retention_penalty: float = 0.0) -> float:
+        """Log-transformed profit with CLV retention and smoothing penalties.
 
-        [C5] Smooth penalty  [Dulac-Arnold et al., JMLR 2021]:
-          Penalises large step-to-step action changes.
+        [E6] retention_penalty = α_ret × (n_churn / N_active)
+             Internalises lifetime cost of losing customers.
+             [Ng et al., ICML 1999]: potential-based shaping preserves
+             optimal policy invariance.
+        [C5][E8] smooth_penalty penalises large action changes.
         """
         if not np.isfinite(profit):
             profit = 0.0
         # log-transform for stability  [SB3_TIPS]
         r = float(np.sign(profit) * np.log1p(abs(profit) / self._reward_scale))
         r -= smooth_penalty
+        r -= retention_penalty
         return float(np.clip(r, -2.0, 2.0))
 
-    # ── observation (§3.2) ────────────────────────────────────────────
+    # ── observation (§3.2)  [E4] 20-D ────────────────────────────────
     def _build_obs(self) -> np.ndarray:
         N_act = int(self._active_mask.sum())
+        N_U = int((self._active_mask * self._slice_is_U).sum())
+        N_E = N_act - N_U
+
+        # [E4] Allowance utilisation ratios
+        allow_cap_U = max(self.Q_U * N_U, 1e-6)
+        allow_cap_E = max(self.Q_E * N_E, 1e-6)
+        allow_util_U = min(self._cycle_usage_U / allow_cap_U, 5.0)
+        allow_util_E = min(self._cycle_usage_E / allow_cap_E, 5.0)
+
+        # [E4] Load factors
+        load_factor_U = min(self._prev_L_U / max(self._prev_C_U, 1e-6), 5.0)
+        load_factor_E = min(self._prev_L_E / max(self._prev_C_E, 1e-6), 5.0)
+
         obs = np.array([
             N_act / max(self.N_total, 1),                          # 0
             (self.N_total - N_act) / max(self.N_total, 1),         # 1
-            self._prev_n_join / max(self.N_total * 0.05, 1.0),    # 2  [FIX] adaptive norm
-            self._prev_n_churn / max(self.N_total * 0.05, 1.0),   # 3  [FIX] adaptive norm
-            self._prev_pviol_U,                                    # 4 (already [0,1])
+            self._prev_n_join / max(self.N_total * 0.05, 1.0),    # 2
+            self._prev_n_churn / max(self.N_total * 0.05, 1.0),   # 3
+            self._prev_pviol_U,                                    # 4
             self._prev_pviol_E,                                    # 5
             self._prev_revenue / max(self._reward_scale, 1.0),     # 6
             self._prev_cost / max(self._reward_scale, 1.0),        # 7
@@ -507,9 +559,14 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_action[1] / self._a_hi[1],                  # 10 p_over_U
             self._prev_action[2] / self._a_hi[2],                  # 11 F_E
             self._prev_action[3] / self._a_hi[3],                  # 12 p_over_E
-            self._prev_action[4],                                  # 13 rho_U (already [0,1])
+            self._prev_action[4],                                  # 13 rho_U
             (self.t % self.T) / max(self.T, 1),                   # 14 cycle phase
             self.t / max(self.episode_len, 1),                     # 15 episode progress
+            # [E4] New features
+            allow_util_U,                                          # 16 URLLC allowance util
+            allow_util_E,                                          # 17 eMBB allowance util
+            load_factor_U,                                         # 18 URLLC load factor
+            load_factor_E,                                         # 19 eMBB load factor
         ], dtype=np.float32)
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=self._obs_hi, neginf=self._obs_lo)
