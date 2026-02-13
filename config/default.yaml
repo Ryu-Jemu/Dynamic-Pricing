@@ -36,6 +36,30 @@
 #   [F1] Transparent SB3 install/import
 #   [F5] CSVLogger SB3 episode-boundary fix
 # ================================================================
+# ================================================================
+# 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
+# ================================================================
+# REVISION 9 (v9) — Design improvements from verification report
+#
+# New in v9:
+#   [D1] NSACF admission control           [3GPP TS 23.501 §5.2.3; Caballero JSAC 2019]
+#   [D2] Hierarchical action timing         [Vezhnevets ICML 2017; Bacon AAAI 2017]
+#   [D3] Hard capacity guard                [3GPP TS 23.501 §5.15; Samdanis CommMag 2016]
+#   [D4] Segment proportions grounded       [Kim & Yoon Expert Syst 2004; KISDI 2023]
+#   [D5] Observation dim 22 → 24           [Dulac-Arnold JMLR 2021]
+#   CMDP framing                            [Altman 1999; Berry RAND 1994]
+#
+# Prior revisions (v1–v8):
+#   [M1] total_timesteps 10K→1M            [Haarnoja 2018; Henderson 2018]
+#   [M2] Curriculum fraction-based          [Narvekar 2020; Bengio 2009]
+#   [M3] Convex SLA penalty                [Tessler 2019; Paternain 2019]
+#   [M4] rho_U_max 0.60→0.35              [Huang IoT-J 2020]
+#   [M5] beta_pop 0.1→0.3                 [Mguni 2019; Zheng 2022]
+#   [M6] Lagrangian safety layer           [Tessler 2019; Stooke 2020]
+#   [M7] train_freq/gradient_steps 1→4    [Fedus 2020]
+#   [E1–E9] Feature engineering, CLV, multi-seed
+#   [C1–C5] Calibration fixes
+# ================================================================
 
 # ── §1  Scenario ──
 scenario:
@@ -58,9 +82,11 @@ action:
   p_over_E_min: 200.0
   p_over_E_max: 3000.0
   rho_U_min: 0.05
-  rho_U_max: 0.35            # [M4] 0.60→0.35  [Huang IoT-J 2020; Dulac-Arnold 2021]
+  rho_U_max: 0.35              # [M4]  [Huang IoT-J 2020]
 
 # ── §5  3-Part tariff allowances ──
+# Q_U=5GB: Korean URLLC average  [MSIT 2023; ITU DDI 2023]
+# Q_E=50GB: Korean eMBB 5G average  [KCC 2023; KISDI ICT 2023]
 tariff:
   Q_U_gb: 5.0
   Q_E_gb: 50.0
@@ -81,13 +107,15 @@ traffic:
 # ── §6b  Demand-price elasticity  [C4] ──
 demand_elasticity:
   enabled: true
-  epsilon_U: 0.15
+  epsilon_U: 0.15               # [Nevo et al. Econometrica 2016]
   epsilon_E: 0.30
   p_ref_U: 2500.0
   p_ref_E: 1500.0
   floor: 0.5
 
 # ── §7  RAN / PRB capacity ──
+# C_total=400GB: 100MHz NR, 273 PRBs  [3GPP TS 38.306 R16]
+# kappa_U=1.2: URLLC scheduling gain  [3GPP TR 38.913 §7.1; Bennis IEEE Comms 2018]
 radio:
   bandwidth_mhz: 100
   scs_khz: 30
@@ -99,8 +127,8 @@ radio:
 qos:
   alpha_congestion: 10.0
   lambda_U: 500000.0
-  lambda_E: 200000.0          # [M3] 50K→200K  [Tessler 2019; KCC 2023]
-  gamma_sla_E: 2.0            # [M3] Convex penalty exponent  [Paternain 2019]
+  lambda_E: 200000.0            # [M3]  [Tessler 2019; KCC 2023]
+  gamma_sla_E: 2.0              # [M3]  [Paternain 2019]
 
 # ── §9  Cost (Capex excluded) ──
 cost:
@@ -133,6 +161,15 @@ clv_reward_shaping:
   warmup_steps: 100
 
 # ── §13  Population ──
+# N_total=500: single gNB suburban cell  [3GPP TR 38.913 §6.1 Table 6.1-1]
+# Segment proportions: [D4]
+#   30% price-sensitive: consistent with Korean postpaid value-tier share
+#     [Kim & Yoon, Expert Syst. Appl. 2004; KISDI ICT Outlook 2023]
+#   45% balanced: majority moderate-usage subscribers
+#     [Ericsson Mobility Report 2023, Figure 12]
+#   25% QoS-sensitive: premium/enterprise tier
+#     [GSMA Intelligence 2023; Shy, Rev. Industrial Org. 2002]
+# Switching costs: [Shy 2002; Kim et al. Info Econ & Policy 2004]
 population:
   N_total: 500
   N_active_init: 200
@@ -146,7 +183,7 @@ population:
 
 # ── §12  Training ──
 training:
-  total_timesteps: 1000000    # [M1] 10K→1M  [Haarnoja 2018; Henderson 2018; D'Oro 2023]
+  total_timesteps: 1000000
   learning_rate: 0.0003
   learning_rate_end: 0.00001
   lr_schedule: "linear"
@@ -157,18 +194,18 @@ training:
   ent_coef: "auto"
   ent_coef_init: 0.5
   ent_coef_warmup_steps: 200000
-  train_freq: 4               # [M7] 1→4  [Fedus 2020]
-  gradient_steps: 4            # [M7] 1→4  [Fedus 2020]
+  train_freq: 4                 # [M7]  [Fedus 2020]
+  gradient_steps: 4             # [M7]
   eval_freq: 10000
   n_eval_episodes: 5
   n_seeds: 5
   curriculum:
     enabled: true
-    phase1_fraction: 0.20      # [M2] Fraction-based  [Narvekar 2020; Bengio 2009]
+    phase1_fraction: 0.20       # [M2]  [Narvekar 2020; Bengio 2009]
 
-# ── §3.2  Observation ──
+# ── §3.2  Observation  [D5] 24-D ──
 observation:
-  dim: 22
+  dim: 24                       # [D5] 22→24 (admission rejection rate + load headroom)
   clip_min: -10.0
   clip_max: 10.0
 
@@ -176,21 +213,44 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.01]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.01]   # [R4] per-dimension  [Dalal 2018]
 
 # ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 0.3               # [M5] 0.1→0.3  [Mguni 2019; Zheng 2022; Wiewiora 2003]
+  beta_pop: 0.3                 # [M5]  [Mguni 2019; Zheng 2022]
   target_ratio: 0.4
 
 # ── §15d  Lagrangian QoS constraint  [M6] ──
 lagrangian_qos:
   enabled: true
-  pviol_E_threshold: 0.15     # [M6] Target pviol_E ≤ 0.15  [ETSI QoS 003; KCC 2022]
-  lr_lambda: 0.01             # [M6] Dual learning rate  [Stooke 2020; Boyd 2004]
-  lambda_max: 5.0             # [M6] Multiplier cap
-  update_freq: 1000           # [M6] Dual update interval (steps)
+  pviol_E_threshold: 0.15       # [ETSI QoS 003; KCC 2022]
+  lr_lambda: 0.01               # [Stooke 2020; Boyd 2004]
+  lambda_max: 5.0
+  update_freq: 1000
+
+# ── §16  [D1] Admission control (NSACF) ──
+# [3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019]
+# Gating: reject new joins if projected load > threshold or pviol > ceiling
+admission_control:
+  enabled: true
+  load_threshold: 0.85          # Reject if load_ratio would exceed 85%
+  pviol_ceiling: 0.30           # Block all joins if pviol_E > 0.30
+  per_user_load_estimate_E_gb: 1.5    # eMBB p50 daily traffic
+  per_user_load_estimate_U_gb: 0.15   # URLLC p50 daily traffic
+
+# ── §17  [D2] Hierarchical action timing ──
+# [Vezhnevets et al. ICML 2017; Bacon et al. AAAI 2017]
+# Pricing locked at cycle start; rho_U updates every step
+hierarchical_actions:
+  enabled: true
+
+# ── §18  [D3] Hard capacity guard ──
+# [3GPP TS 23.501 §5.15; Samdanis et al. IEEE CommMag 2016]
+# When enabled, L_effective = min(L, C) for energy cost.
+# QoS penalty still uses raw load ratio.
+capacity_enforcement:
+  hard_cap: false               # Default off — soft penalty preferred
 
 # ── Calibration targets ──
 calibration:
