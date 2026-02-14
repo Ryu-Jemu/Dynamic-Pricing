@@ -1,77 +1,13 @@
 """
-O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Online MDP  (§§3–11)
-
-REVISION 8 — Changes from v7:
-  [M3] Convex SLA penalty for eMBB        [Tessler 2019; Paternain 2019; KCC 2023]
-  [M4] rho_U_max 0.60 → 0.35             [Huang IoT-J 2020; Dulac-Arnold 2021]
-  [M5] beta_pop 0.1 → 0.3                [Mguni 2019; Zheng 2022; Wiewiora 2003]
-  [M6] Lagrangian safety layer            [Tessler 2019; Stooke 2020]
-  Prior revisions (v1–v7):
-  [R4] Per-dimension action smoothing     [Dalal et al., NeurIPS 2018]
-  [R5] Observation dim 20 → 22           [Dulac-Arnold et al., JMLR 2021]
-  [R6] Population-aware reward term       [Mguni 2019; Zheng 2022]
-  [E4] Observation dim 16 → 20 (load factors, allowance utilisation)
-  [E6] CLV-aware reward shaping (retention penalty)
-  [E8] Stronger action smoothing (weight from config)
-  [C3] Removed price_norm re-multiplication in churn/join logits
-  [C4] Demand-price elasticity  [Nevo et al., Econometrica 2016]
-  [C5] Action smoothing penalty  [Dulac-Arnold et al., JMLR 2021]
-
-Gymnasium-compatible environment for SB3 SAC.
-
-Action (5-D continuous, §4):
-  a = [F_U, p_U^over, F_E, p_E^over, ρ_U]
-
-Observation (22-D, §3.2) — see ``_build_obs`` for layout.
-  [R5] Two new features (in addition to E4's four):
-    20: over_rev_E / (p_over_E × N_E + ε)  — eMBB overage revenue rate
-    21: (T − cycle_step) / T                — days remaining in cycle
-
-Revenue per step (§5.2  — online accrual):
-  BaseRev_t  = (F_U·N_U + F_E·N_E) / T
-  OverRev_t  = Σ_s p_s^over · ΔOver_s(t)
-  Revenue_t  = BaseRev_t + OverRev_t
-
-Cost per step (§9):
-  Cost_t = c_opex·N_active + c_energy·(L_U+L_E) + c_cac·N_join + SLA_penalty
-  [M3] SLA_penalty = λ_U·pviol_U + λ_E·pviol_E^γ_sla  (convex)
-
-Market (§10):
-  Logit-based churn/join every step, expectation-only or stochastic mode.
-  [R3] Curriculum mode: Phase 1 disables churn/join for stable learning.
-
-Reward (§15 + §11b + §15c + §15d):
-  [R6] reward = log_profit − smooth_penalty − retention_penalty + pop_bonus
-  [M6]         − lagrangian_penalty
-  pop_bonus = β_pop × (N_active / N_total − target_ratio)
-  lagrangian_penalty = λ_lag × max(0, pviol_E − threshold)
-
-References:
-  [Haarnoja 2018]    SAC
-  [Grubb AER 2009]   3-part tariff
-  [Nevo 2016]        Broadband tariffs / usage coupling  (Econometrica)
-  [TS 23.503]        Usage monitoring thresholds
-  [Huang IoT-J 2020] URLLC priority / coexistence
-  [Gupta JSR 2006]   CLV
-  [ITU Teletraffic]  Poisson arrivals
-  [Dulac-Arnold 2021] Challenges of Real-World RL
-  [Ahn 2006]         Telecom churn determinants
-  [Ng 1999]          Policy invariance under reward transformations
-  [Dalal 2018]       Safe exploration — per-dimension constraints
-  [Mguni 2019]       Population stability in economic simulations
-  [Zheng 2022]       The AI Economist — population welfare terms
-  [Tessler 2019]     Reward Constrained Policy Optimization (RCPO)
-  [Paternain 2019]   Constrained RL has zero duality gap
-  [Stooke 2020]      Responsive Safety in RL
-"""
-"""
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Constrained MDP  (§§3–11)
 
 REVISION 9 — Changes from v8:
   [D1] NSACF-style admission control          [3GPP TS 23.501 §5.2.3; Caballero JSAC 2019]
   [D2] Hierarchical action timing              [Vezhnevets ICML 2017; Bacon AAAI 2017]
   [D3] Hard capacity guard (traffic shedding)  [3GPP TS 23.501 §5.15; Samdanis CommMag 2016]
+  [D4] Slice-specific QoS signal per user     [Kim & Yoon 2004; Ahn 2006]
   [D5] Observation dim 22 → 24                [Dulac-Arnold JMLR 2021]
+  [D6] pviol_E EMA in obs[22]                 [Dulac-Arnold JMLR 2021]
   Prior revisions (v1–v8):
   [M3] Convex SLA penalty for eMBB            [Tessler 2019; Paternain 2019]
   [M4] rho_U_max 0.60 → 0.35                 [Huang IoT-J 2020]
@@ -82,6 +18,8 @@ REVISION 9 — Changes from v8:
   [R6] Population-aware reward term           [Mguni 2019; Zheng 2022]
   [C4] Demand-price elasticity                [Nevo et al. Econometrica 2016]
   [C5] Action smoothing penalty               [Dulac-Arnold JMLR 2021]
+
+Gymnasium-compatible environment for SB3 SAC.
 
 Formal Problem Structure — Constrained MDP (CMDP) [Altman 1999]:
   State:   s_t ∈ ℝ²⁴  (normalised observation vector)
@@ -100,8 +38,8 @@ Action (5-D continuous, §4):
        hierarchical_actions.enabled=true. ρ_U (a[4]) updates every step.
 
 Observation (24-D, §3.2):
-  Indices 0–21: same as v8
-  [D5] 22: admission_rejection_rate
+  Indices 0–21: see ``_build_obs`` for layout
+  [D6] 22: pviol_E_ema (EMA α=0.3 trend signal)
   [D5] 23: load_headroom_E
 
 Revenue per step (§5.2 — online accrual):
@@ -113,8 +51,21 @@ Cost per step (§9):
   [M3] SLA = λ_U·pviol_U + λ_E·pviol_E^γ  (convex)
   [D3] L_eff = min(L, C) when hard_cap enabled
 
+Reward (§15 + §11b + §15c + §15d):
+  reward = log_profit − smooth_penalty − retention_penalty
+           + pop_bonus − lagrangian_penalty
+
 Market (§10):
   Logit-based churn/join. [D1] Joins gated by load-aware admission control.
+
+References:
+  [Haarnoja 2018]    SAC
+  [Grubb AER 2009]   3-part tariff
+  [Nevo 2016]        Broadband tariffs / usage coupling  (Econometrica)
+  [Dulac-Arnold 2021] Challenges of Real-World RL
+  [Tessler 2019]     Reward Constrained Policy Optimization (RCPO)
+  [Stooke 2020]      Responsive Safety in RL
+  [Altman 1999]      Constrained Markov Decision Processes
 """
 from __future__ import annotations
 
@@ -310,6 +261,10 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_over_rev_E: float = 0.0
         self._prev_n_rejected: int = 0       # [D1]
         self._cycle_pricing = np.zeros(4, dtype=np.float64)  # [D2]
+        self._last_churned_ids: list = []   # [M13c]
+        self._last_joined_ids: list = []    # [M13c]
+        self._pviol_E_ema: float = 0.0     # [D6] EMA for obs trend
+        self._lagrangian_boost: float = 1.0  # [D5] curriculum phase boost
 
     def _load_users(self, csv_path: Optional[str]) -> None:
         if csv_path is not None and Path(csv_path).exists():
@@ -342,6 +297,10 @@ class OranSlicingPricingEnv(gym.Env):
         """[M6] Update Lagrangian multiplier from dual ascent."""
         self._lagrangian_lambda = lambda_val
 
+    def set_lagrangian_boost(self, boost: float) -> None:
+        """[D5] Set Lagrangian penalty boost factor for curriculum phases."""
+        self._lagrangian_boost = boost
+
     # ── Gymnasium interface ───────────────────────────────────────────
 
     def reset(self, *, seed: Optional[int] = None,
@@ -371,6 +330,9 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_over_rev_E = 0.0
         self._prev_n_rejected = 0
         self._cycle_pricing = mid[:4].copy()
+        self._last_churned_ids = []   # [M13c]
+        self._last_joined_ids = []    # [M13c]
+        self._pviol_E_ema = 0.0       # [D6]
         return self._build_obs(), {}
 
     def step(self, action: np.ndarray
@@ -473,6 +435,10 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_over_U = 0.0
             self._prev_over_E = 0.0
 
+        # [M13c] Reset per-step user event lists
+        self._last_churned_ids = []
+        self._last_joined_ids = []
+
         # Market dynamics
         if self._curriculum_phase == 1:
             n_join, n_churn, n_rejected = 0, 0, 0
@@ -504,6 +470,9 @@ class OranSlicingPricingEnv(gym.Env):
             self.alpha_cong * (L_U / C_U - 1.0)))
         pviol_E = float(sigmoid(
             self.alpha_cong * (L_E / C_E - 1.0)))
+
+        # [D6] Update pviol_E exponential moving average (α=0.3)
+        self._pviol_E_ema = 0.3 * pviol_E + 0.7 * self._pviol_E_ema
 
         # Revenue
         base_rev = (F_U * N_U + F_E * N_E) / self.T
@@ -555,6 +524,7 @@ class OranSlicingPricingEnv(gym.Env):
         if self._lagrangian_enabled and self._lagrangian_lambda > 0.0:
             lagrangian_penalty = self._lagrangian_lambda * max(
                 0.0, pviol_E - self._pviol_E_threshold)
+            lagrangian_penalty *= self._lagrangian_boost  # [D5] curriculum boost
 
         reward = self._compute_reward(
             profit, smooth_penalty, retention_penalty,
@@ -606,6 +576,8 @@ class OranSlicingPricingEnv(gym.Env):
             "lagrangian_penalty": lagrangian_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
+            "churned_user_ids": self._last_churned_ids,   # [M13c]
+            "joined_user_ids": self._last_joined_ids,     # [M13c]
         }
 
     # ── Traffic ───────────────────────────────────────────────────────
@@ -650,13 +622,19 @@ class OranSlicingPricingEnv(gym.Env):
         N_inact = self.N_total - N_act
 
         P_sig = (F_U + F_E) / (2.0 * self._price_norm)
-        Q_sig = 1.0 - (self._prev_pviol_U + self._prev_pviol_E) / 2.0
+        # [D4] Slice-specific QoS signal — each user sees own slice's QoS
+        # [Kim & Yoon 2004; Ahn 2006]
+        Q_sig_users = np.where(
+            self._slice_is_U,
+            1.0 - self._prev_pviol_U,    # URLLC users: own slice QoS
+            1.0 - self._prev_pviol_E     # eMBB users: own slice QoS
+        )
 
         # Churn logit
         churn_logits = (
             self.b0_churn
             + self.bp_churn * self._psens * P_sig
-            - self.bq_churn * self._qsens * Q_sig
+            - self.bq_churn * self._qsens * Q_sig_users  # [D4] per-user
             - self.bsw_churn * self._swcost)
         p_churn_all = sigmoid(churn_logits)
         p_churn_active = p_churn_all * self._active_mask
@@ -666,7 +644,7 @@ class OranSlicingPricingEnv(gym.Env):
         join_logits = (
             self.b0_join
             - self.bp_join * self._psens * P_sig
-            + self.bq_join * self._qsens * Q_sig)
+            + self.bq_join * self._qsens * Q_sig_users)   # [D4] per-user
         p_join_all = sigmoid(join_logits)
         p_join_inactive = p_join_all * (
             ~self._active_mask).astype(np.float64)
@@ -686,6 +664,7 @@ class OranSlicingPricingEnv(gym.Env):
                 scores[~self._active_mask] = -1.0
                 idx = np.argsort(scores)[-n_churn:]
                 self._active_mask[idx] = False
+                self._last_churned_ids = idx.tolist()  # [M13c]
 
             # [D1] Admission gate
             if n_join_cand > 0:
@@ -697,6 +676,7 @@ class OranSlicingPricingEnv(gym.Env):
                     C_E, self._prev_L_E, C_U, self._prev_L_U)
                 if n_join > 0:
                     self._active_mask[cand_idx[:n_join]] = True
+                    self._last_joined_ids = cand_idx[:n_join].tolist()  # [M13c]
             else:
                 n_join = 0
         else:
@@ -715,6 +695,7 @@ class OranSlicingPricingEnv(gym.Env):
                     size=min(n_churn, len(active_idx)),
                     replace=False, p=probs)
                 self._active_mask[chosen] = False
+                self._last_churned_ids = chosen.tolist()  # [M13c]
 
             if n_join_cand > 0:
                 inact_idx = np.where(~self._active_mask)[0]
@@ -729,6 +710,7 @@ class OranSlicingPricingEnv(gym.Env):
                     C_E, self._prev_L_E, C_U, self._prev_L_U)
                 if n_join > 0:
                     self._active_mask[cand_idx[:n_join]] = True
+                    self._last_joined_ids = cand_idx[:n_join].tolist()  # [M13c]
             else:
                 n_join = 0
 
@@ -748,8 +730,11 @@ class OranSlicingPricingEnv(gym.Env):
         r -= smooth_penalty
         r -= retention_penalty
         r += pop_bonus
-        r -= lagrangian_penalty
-        return float(np.clip(r, -2.0, 2.0))
+        # [D2] Lagrangian penalty applied OUTSIDE base reward clip
+        # to preserve constraint gradient  [Paternain CDC 2019]
+        r_base = float(np.clip(r, -2.0, 2.0))
+        r_final = r_base - lagrangian_penalty
+        return float(np.clip(r_final, -4.0, 4.0))
 
     # ── Observation ───────────────────────────────────────────────────
 
@@ -787,12 +772,10 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_action[3] * max(N_E, 1), 1e-6)
         obs[21] = (self.T - self._cycle_step) / max(self.T, 1)
 
-        # [D5] v9 features
+        # [D5][D6] v9 extended features
         if self._obs_dim >= 24:
-            total_attempts = (self._prev_n_rejected
-                              + self._prev_n_join + 1e-6)
-            obs[22] = self._prev_n_rejected / total_attempts
+            obs[22] = self._pviol_E_ema          # [D6] pviol_E trend (EMA)
             obs[23] = max(0.0, 1.0 - self._prev_L_E / max(
-                self._prev_C_E, 1e-6))
+                self._prev_C_E, 1e-6))            # load headroom
 
         return np.clip(obs, self._obs_lo, self._obs_hi)

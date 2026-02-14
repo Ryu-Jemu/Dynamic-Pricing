@@ -163,6 +163,29 @@ else
 fi
 echo ""
 
+# ── Step 5c: Comprehensive PNG dashboard sheets [M11] ──
+echo "===== Step 5c: PNG Dashboard Sheets ====="
+python -m oran3pt.png_dashboard \
+    --output "$OUTPUT_DIR" \
+    --config "$CONFIG" \
+    --mode auto \
+    --dpi 150 || echo "  PNG dashboard generation skipped"
+echo ""
+
+# ── Step 5d: 3D simulation dashboard [M12][M13] ──
+echo "===== Step 5d: 3D Simulation Dashboard ====="
+if [ -f "$ROLLOUT_CSV" ]; then
+    SIM3D_ARGS="--csv $ROLLOUT_CSV --output $OUTPUT_DIR/sim3d_dashboard.html"
+    [ -f "$USERS_CSV" ] && SIM3D_ARGS="$SIM3D_ARGS --users $USERS_CSV"
+    EVENTS_CSV="$OUTPUT_DIR/user_events_log.csv"
+    [ -f "$EVENTS_CSV" ] && SIM3D_ARGS="$SIM3D_ARGS --events $EVENTS_CSV"
+    python -m oran3pt.sim3d_dashboard $SIM3D_ARGS || echo "  3D dashboard generation skipped"
+    echo "  -> $OUTPUT_DIR/sim3d_dashboard.html"
+else
+    echo "No rollout log — skipping 3D dashboard"
+fi
+echo ""
+
 echo "============================================"
 echo " Fast Pipeline complete.  Outputs: $PROJECT_DIR/$OUTPUT_DIR/"
 echo "============================================"

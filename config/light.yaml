@@ -2,7 +2,7 @@
 # 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
 # LIGHTWEIGHT CONFIG — 개발/디버깅용 경량 구성
-# base: config/default.yaml (v8)
+# base: config/default.yaml (v9)
 # [M10] 경량 훈련 구성  [Henderson 2018; Haarnoja 2018]
 #
 # 주요 변경:
@@ -39,7 +39,7 @@ action:
   p_over_E_min: 200.0
   p_over_E_max: 3000.0
   rho_U_min: 0.05
-  rho_U_max: 0.35
+  rho_U_max: 0.45              # [D1] 0.35→0.45
 
 # ── §5  3-Part tariff allowances ──
 tariff:
@@ -80,8 +80,8 @@ radio:
 qos:
   alpha_congestion: 10.0
   lambda_U: 500000.0
-  lambda_E: 200000.0
-  gamma_sla_E: 2.0
+  lambda_E: 500000.0            # [D3] 200K→500K
+  gamma_sla_E: 3.0              # [D3] 2.0→3.0
 
 # ── §9  Cost (Capex excluded) ──
 cost:
@@ -124,6 +124,13 @@ population:
     price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
+  # [M13a] Spatial distribution
+  spatial:
+    cell_radius: 20.0
+    segment_radii:
+      qos_sensitive: [2.0, 10.0]
+      balanced: [3.0, 18.0]
+      price_sensitive: [8.0, 20.0]
 
 # ── §12  Training ──
 training:
@@ -145,11 +152,21 @@ training:
   n_seeds: 1                    # [M10] 5→1  (5x 감소)
   curriculum:
     enabled: true
-    phase1_fraction: 0.20
+    # [D5] 3-phase curriculum
+    phases:
+      - fraction: 0.15
+        churn_join: false
+        lagrangian_boost: 0.0
+      - fraction: 0.25
+        churn_join: true
+        lagrangian_boost: 2.0
+      - fraction: 0.60
+        churn_join: true
+        lagrangian_boost: 1.0
 
-# ── §3.2  Observation ──
+# ── §3.2  Observation  [D5] 24-D ──
 observation:
-  dim: 22
+  dim: 24                       # [D5][D6] 24-D (pviol_E EMA + load headroom)
   clip_min: -10.0
   clip_max: 10.0
 
@@ -157,7 +174,7 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.01]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.03]  # [D1] rho_U 0.01→0.03
 
 # ── §15c  Population-aware reward ──
 population_reward:
@@ -165,13 +182,31 @@ population_reward:
   beta_pop: 0.3
   target_ratio: 0.4
 
-# ── §15d  Lagrangian QoS constraint  [M6] ──
+# ── §15d  Lagrangian QoS constraint  [M6][D2] ──
 lagrangian_qos:
   enabled: true
   pviol_E_threshold: 0.15
-  lr_lambda: 0.01
-  lambda_max: 5.0
-  update_freq: 1000
+  Kp: 0.05                      # [D2] PID gains  [Stooke 2020]
+  Ki: 0.005
+  Kd: 0.01
+  lambda_max: 10.0               # [D2] 5.0→10.0
+  update_freq: 200               # [D2] 1000→200
+
+# ── §16  [D1] Admission control (NSACF) ──
+admission_control:
+  enabled: true
+  load_threshold: 0.85
+  pviol_ceiling: 0.30
+  per_user_load_estimate_E_gb: 1.5
+  per_user_load_estimate_U_gb: 0.15
+
+# ── §17  [D2] Hierarchical action timing ──
+hierarchical_actions:
+  enabled: true
+
+# ── §18  [D3] Hard capacity guard ──
+capacity_enforcement:
+  hard_cap: false
 
 # ── Calibration targets ──
 calibration:

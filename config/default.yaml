@@ -1,44 +1,6 @@
 # ================================================================
 # 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
-# REVISION 8 — Fixes from v7 root-cause diagnosis.
-# Change log vs. v7:
-#   [M1] total_timesteps 10K → 1M       [Haarnoja 2018; Henderson 2018; D'Oro 2023]
-#   [M2] Curriculum: absolute → fraction [Narvekar 2020; Bengio 2009]
-#   [M3] lambda_E 50K → 200K + convex   [Tessler 2019; Paternain 2019; KCC 2023]
-#   [M4] rho_U_max 0.60 → 0.35          [Huang IoT-J 2020; Dulac-Arnold 2021]
-#   [M5] beta_pop 0.1 → 0.3             [Mguni 2019; Zheng 2022; Wiewiora 2003]
-#   [M6] Lagrangian safety for pviol_E   [Tessler 2019; Stooke 2020]
-#   [M7] train_freq/gradient_steps 1→4   [Fedus 2020]
-#   [M8] Eval diagnostic columns         [Dulac-Arnold 2021]
-#   [M9] Unit tests T11 for v8           [Henderson 2018]
-# Prior revisions (v1–v7):
-#   [R1] total_timesteps 50K → 1M       [Henderson et al. AAAI 2018]
-#   [R2] alpha_retention 0.15 → 2.0     [Fader & Hardie 2010; Wiewiora 2003]
-#   [R4] Per-dimension action smoothing  [Dalal et al. NeurIPS 2018]
-#   [R5] Observation dim 20 → 22        [Dulac-Arnold et al. JMLR 2021]
-#   [R6] Population-aware reward term    [Mguni 2019; Zheng 2022]
-#   [R8] Entropy coefficient schedule    [Zhou et al. ICLR 2022]
-#   [E1] F_E_max 110K → 150K            [KISDI 2023 Korean 5G plans]
-#   [E2] total_timesteps 300K → 1M      [Henderson et al. AAAI 2018]
-#   [E3] beta_p_churn 1.5 → 3.0         [Kim & Yoon 2004; Ahn 2006]
-#   [E4] Observation dim 16 → 20        [Dulac-Arnold et al. JMLR 2021]
-#   [E5] episode_cycles 12 → 24         [Gupta JSR 2006: CLV horizon]
-#   [E6] CLV-aware reward shaping        [Ng et al. ICML 1999]
-#   [E7] Learning rate linear schedule   [Loshchilov & Hutter ICLR 2019]
-#   [E8] action_smoothing weight ↑       [Dulac-Arnold 2021 Challenge #7]
-#   [E9] EvalCallback best-model ckpt    [Henderson et al. 2018]
-#   [C1] C_total 50 → 400               [TS 38.306]
-#   [C2] Churn/join logit recalibration  [Ahn 2006, Verbeke 2012]
-#   [C3] price_norm re-multiplication fix
-#   [C4] Demand-price elasticity         [Nevo et al. 2016]
-#   [C5] Action smoothing penalty        [Dulac-Arnold et al. 2021]
-#   [F1] Transparent SB3 install/import
-#   [F5] CSVLogger SB3 episode-boundary fix
-# ================================================================
-# ================================================================
-# 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
-# ================================================================
 # REVISION 9 (v9) — Design improvements from verification report
 #
 # New in v9:
@@ -49,16 +11,19 @@
 #   [D5] Observation dim 22 → 24           [Dulac-Arnold JMLR 2021]
 #   CMDP framing                            [Altman 1999; Berry RAND 1994]
 #
-# Prior revisions (v1–v8):
+# v8 changes:
 #   [M1] total_timesteps 10K→1M            [Haarnoja 2018; Henderson 2018]
 #   [M2] Curriculum fraction-based          [Narvekar 2020; Bengio 2009]
-#   [M3] Convex SLA penalty                [Tessler 2019; Paternain 2019]
-#   [M4] rho_U_max 0.60→0.35              [Huang IoT-J 2020]
+#   [M3] Convex SLA penalty (λ_E 50K→200K) [Tessler 2019; Paternain 2019]
+#   [M4] rho_U_max 0.60→0.35→0.45 [D1]   [Huang IoT-J 2020; 3GPP TS 23.501]
 #   [M5] beta_pop 0.1→0.3                 [Mguni 2019; Zheng 2022]
 #   [M6] Lagrangian safety layer           [Tessler 2019; Stooke 2020]
 #   [M7] train_freq/gradient_steps 1→4    [Fedus 2020]
+#
+# Prior revisions (v1–v7):
 #   [E1–E9] Feature engineering, CLV, multi-seed
 #   [C1–C5] Calibration fixes
+#   [R1–R8] Training / observation / reward improvements
 # ================================================================
 
 # ── §1  Scenario ──
@@ -82,7 +47,7 @@ action:
   p_over_E_min: 200.0
   p_over_E_max: 3000.0
   rho_U_min: 0.05
-  rho_U_max: 0.35              # [M4]  [Huang IoT-J 2020]
+  rho_U_max: 0.45              # [D1] 0.35→0.45  [Huang IoT-J 2020; 3GPP TS 23.501]
 
 # ── §5  3-Part tariff allowances ──
 # Q_U=5GB: Korean URLLC average  [MSIT 2023; ITU DDI 2023]
@@ -127,8 +92,8 @@ radio:
 qos:
   alpha_congestion: 10.0
   lambda_U: 500000.0
-  lambda_E: 200000.0            # [M3]  [Tessler 2019; KCC 2023]
-  gamma_sla_E: 2.0              # [M3]  [Paternain 2019]
+  lambda_E: 500000.0            # [D3] 200K→500K  [Tessler 2019; KCC 2023]
+  gamma_sla_E: 3.0              # [D3] 2.0→3.0   [Paternain 2019; Berry 1994]
 
 # ── §9  Cost (Capex excluded) ──
 cost:
@@ -180,6 +145,14 @@ population:
     price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
+  # [M13a] Spatial distribution — segment-aware radial bands
+  # [3GPP TR 38.913 Table 6.1-1; Devroye 1986]
+  spatial:
+    cell_radius: 20.0
+    segment_radii:
+      qos_sensitive: [2.0, 10.0]
+      balanced: [3.0, 18.0]
+      price_sensitive: [8.0, 20.0]
 
 # ── §12  Training ──
 training:
@@ -201,11 +174,21 @@ training:
   n_seeds: 5
   curriculum:
     enabled: true
-    phase1_fraction: 0.20       # [M2]  [Narvekar 2020; Bengio 2009]
+    # [D5] 3-phase curriculum  [Narvekar 2020; Bengio 2009; Achiam 2017]
+    phases:
+      - fraction: 0.15          # Phase 1: pricing/capacity isolation (no churn/join)
+        churn_join: false
+        lagrangian_boost: 0.0
+      - fraction: 0.25          # Phase 2: QoS-focused with boosted Lagrangian
+        churn_join: true
+        lagrangian_boost: 2.0
+      - fraction: 0.60          # Phase 3: full optimization
+        churn_join: true
+        lagrangian_boost: 1.0
 
 # ── §3.2  Observation  [D5] 24-D ──
 observation:
-  dim: 24                       # [D5] 22→24 (admission rejection rate + load headroom)
+  dim: 24                       # [D5][D6] 24-D (pviol_E EMA + load headroom)
   clip_min: -10.0
   clip_max: 10.0
 
@@ -213,7 +196,7 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.01]   # [R4] per-dimension  [Dalal 2018]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.03]   # [D1] rho_U 0.01→0.03  [Dalal 2018]
 
 # ── §15c  Population-aware reward ──
 population_reward:
@@ -221,13 +204,16 @@ population_reward:
   beta_pop: 0.3                 # [M5]  [Mguni 2019; Zheng 2022]
   target_ratio: 0.4
 
-# ── §15d  Lagrangian QoS constraint  [M6] ──
+# ── §15d  Lagrangian QoS constraint  [M6][D2] ──
+# [D2] PID control replaces simple dual ascent  [Stooke ICLR 2020]
 lagrangian_qos:
   enabled: true
   pviol_E_threshold: 0.15       # [ETSI QoS 003; KCC 2022]
-  lr_lambda: 0.01               # [Stooke 2020; Boyd 2004]
-  lambda_max: 5.0
-  update_freq: 1000
+  Kp: 0.05                      # [D2] Proportional gain  [Stooke 2020]
+  Ki: 0.005                     # [D2] Integral gain
+  Kd: 0.01                      # [D2] Derivative gain
+  lambda_max: 10.0               # [D2] 5.0→10.0  [Boyd 2004]
+  update_freq: 200               # [D2] 1000→200  [Stooke 2020]
 
 # ── §16  [D1] Admission control (NSACF) ──
 # [3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019]

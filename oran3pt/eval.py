@@ -1,7 +1,9 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 8 — Changes from v7:
+REVISION 9 — Changes from v8:
+  [M13d] Per-user event logging (user_events_log.csv) for 3D dashboard
+         [Dulac-Arnold 2021 — per-user observability]
   [M8] Derived diagnostic columns (utilisation, margins, pop delta)
        [Dulac-Arnold 2021 — observability for real-world RL]
   Prior revisions:
@@ -10,9 +12,10 @@ REVISION 8 — Changes from v7:
   [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
 Outputs:
-  outputs/rollout_log.csv   — per-step metrics across repeats
-  outputs/eval_summary.csv  — aggregate statistics
-  outputs/clv_report.csv    — CLV analysis
+  outputs/rollout_log.csv       — per-step metrics across repeats
+  outputs/eval_summary.csv      — aggregate statistics
+  outputs/clv_report.csv        — CLV analysis
+  outputs/user_events_log.csv   — [M13d] per-user join/churn events
 
 Usage:
   python -m oran3pt.eval --config config/default.yaml --model outputs/best_model.zip
@@ -36,9 +39,24 @@ logger = logging.getLogger("oran3pt.eval")
 
 
 def evaluate_episode(env: OranSlicingPricingEnv,
-                     model, repeat_id: int) -> List[Dict[str, Any]]:
+                     model, repeat_id: int
+                     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Run one evaluation episode, returning (records, user_events).
+
+    [M13d] user_events contains per-user join/churn events for the
+    3D dashboard visualization.
+    """
     obs, _ = env.reset()
     records: List[Dict[str, Any]] = []
+    user_events: List[Dict[str, Any]] = []
+
+    # [M13d] Record initial active users
+    for uid in range(env.N_total):
+        if env._active_mask[uid]:
+            user_events.append({
+                "step": 0, "event_type": "initial_active", "user_id": int(uid),
+            })
+
     done = False
     while not done:
         if model is not None:
@@ -46,10 +64,24 @@ def evaluate_episode(env: OranSlicingPricingEnv,
         else:
             action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
+
+        # [M13d] Extract user events before DataFrame conversion
+        churned = info.pop("churned_user_ids", [])
+        joined = info.pop("joined_user_ids", [])
+        step_num = info["step"]
+        for uid in churned:
+            user_events.append({
+                "step": step_num, "event_type": "churn", "user_id": int(uid),
+            })
+        for uid in joined:
+            user_events.append({
+                "step": step_num, "event_type": "join", "user_id": int(uid),
+            })
+
         info["repeat"] = repeat_id
         records.append(info)
         done = terminated or truncated
-    return records
+    return records, user_events
 
 
 def run_evaluation(cfg: Dict[str, Any],
@@ -76,9 +108,11 @@ def run_evaluation(cfg: Dict[str, Any],
             logger.warning("Could not load model (%s) — using random.", e)
 
     all_records: List[Dict[str, Any]] = []
+    all_user_events: dict[int, List[Dict[str, Any]]] = {}  # [M13d] per-repeat
     for rep in tqdm(range(n_repeats), desc="Eval repeats"):
-        records = evaluate_episode(env, model, repeat_id=rep)
+        records, user_events = evaluate_episode(env, model, repeat_id=rep)
         all_records.extend(records)
+        all_user_events[rep] = user_events
 
     rollout_path = out / "rollout_log.csv"
     if all_records:
@@ -93,6 +127,16 @@ def run_evaluation(cfg: Dict[str, Any],
 
         df.to_csv(rollout_path, index=False)
         logger.info("Rollout log: %d rows -> %s", len(df), rollout_path)
+
+        # [M13d] Write user events for best repeat (highest cumulative profit)
+        profits_per_rep = df.groupby("repeat")["profit"].sum()
+        best_rep = int(profits_per_rep.idxmax())
+        best_events = all_user_events.get(best_rep, [])
+        if best_events:
+            events_path = out / "user_events_log.csv"
+            pd.DataFrame(best_events).to_csv(events_path, index=False)
+            logger.info("User events log: %d events (repeat %d) -> %s",
+                        len(best_events), best_rep, events_path)
 
         summary_path = out / "eval_summary.csv"
         num_cols = df.select_dtypes(include="number").columns

@@ -2,17 +2,26 @@
 Synthetic user population generator (Requirement 6 / §13).
 
 Produces ``data/users_init.csv`` with per-user lognormal traffic parameters,
-price/QoS sensitivities, switching cost, and CLV discount rate.
+price/QoS sensitivities, switching cost, CLV discount rate, and spatial
+coordinates within the cell coverage area.
 
 Parameter calibration policy (§13.3):
   - Lognormal (mu, sigma) fitted to target p50/p90 daily usage per slice.
   - Segment-level sensitivities drawn from literature-grounded ranges.
+
+[M13a] Spatial coordinate generation:
+  - Each user assigned persistent (x, y) within circular cell.
+  - Segment-aware radial distribution: QoS-sensitive users cluster near tower,
+    price-sensitive users toward cell edge.
+  - sqrt-uniform radial sampling for uniform area density.
 
 References:
   [Grubb AER 2009]       — 3-part tariff user heterogeneity
   [Nevo et al. 2015]     — broadband usage heterogeneity
   [Gupta JSR 2006]       — CLV discount rate
   [CHURN logit]          — switching-cost distributions
+  [3GPP TR 38.913 §6.1]  — Urban Macro user spatial distribution
+  [Devroye 1986]         — sqrt-uniform radial sampling for disk
 """
 from __future__ import annotations
 
@@ -42,6 +51,16 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
     qsens = pop["segments"]["qos_sensitivity"]
     swcost = pop["segments"]["switching_cost"]
 
+    # [M13a] Spatial config — segment-aware radial distribution
+    spatial = pop.get("spatial", {})
+    cell_radius = spatial.get("cell_radius", 20.0)
+    default_radii = {
+        "qos_sensitive": [2.0, 10.0],
+        "balanced": [3.0, 18.0],
+        "price_sensitive": [8.0, 20.0],
+    }
+    seg_radii = spatial.get("segment_radii", default_radii)
+
     # Calibrate lognormal params from config targets
     traf = cfg["traffic"]
     mu_u, sig_u = fit_lognormal_quantiles(
@@ -70,6 +89,14 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
 
         is_active = 1 if uid < N_act else 0
 
+        # [M13a] Spatial coordinates within cell  [3GPP TR 38.913; Devroye 1986]
+        r_range = seg_radii.get(seg, [3.0, 18.0])
+        r_min, r_max = float(r_range[0]), min(float(r_range[1]), cell_radius)
+        r = float(np.sqrt(rng.uniform(r_min**2, r_max**2)))
+        theta = float(rng.uniform(0, 2 * np.pi))
+        x = round(r * np.cos(theta), 3)
+        y = round(r * np.sin(theta), 3)
+
         rows.append({
             "user_id": uid,
             "slice": sl,
@@ -83,6 +110,8 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
             "switching_cost": round(sc, 4),
             "clv_discount_rate": round(dr, 5),
             "is_active_init": is_active,
+            "x": x,
+            "y": y,
         })
 
     return pd.DataFrame(rows)

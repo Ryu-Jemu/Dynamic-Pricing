@@ -1,0 +1,1888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>O-RAN 3D Simulation — Best Model Behavior</title>
+<style>
+  :root {
+    --bg: #0c0e14;
+    --card: rgba(20, 23, 34, 0.92);
+    --border: #1e2336;
+    --text: #e8eaf0;
+    --text2: #8890a4;
+    --blue: #4a9eff;
+    --green: #34d399;
+    --red: #f87171;
+    --orange: #fb923c;
+    --purple: #a78bfa;
+    --cyan: #22d3ee;
+    --yellow: #fbbf24;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    user-select: none;
+  }
+  #canvas-container {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+  }
+  canvas { display: block; }
+
+  /* ── HUD Overlay ── */
+  .hud {
+    position: absolute;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .hud-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    pointer-events: auto;
+  }
+
+  /* ── Top-left: Title ── */
+  #hud-title {
+    top: 16px; left: 16px;
+  }
+  #hud-title h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 3px;
+    color: var(--cyan);
+    letter-spacing: 0.5px;
+  }
+  #hud-title .sub {
+    font-size: 11px;
+    color: var(--text2);
+    font-family: 'Courier New', monospace;
+  }
+
+  /* ── Top-right: Financial ── */
+  #hud-finance {
+    top: 16px; right: 16px;
+  }
+  .fin-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    min-width: 300px;
+  }
+  .fin-item { text-align: center; }
+  .fin-label {
+    font-size: 9px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .fin-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+  }
+  .fin-value.revenue { color: var(--blue); }
+  .fin-value.cost { color: var(--red); }
+  .fin-value.profit { color: var(--green); }
+
+  /* ── Left: URLLC ── */
+  #hud-urllc {
+    top: 110px; left: 16px;
+  }
+  /* ── Right: eMBB ── */
+  #hud-embb {
+    top: 110px; right: 16px;
+  }
+  .price-title {
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 5px;
+  }
+  .price-title.urllc { color: var(--cyan); }
+  .price-title.embb { color: var(--purple); }
+  .price-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 2px 0;
+    min-width: 155px;
+  }
+  .price-key {
+    font-size: 9px;
+    color: var(--text2);
+  }
+  .price-val {
+    font-size: 13px;
+    font-weight: 600;
+    font-family: 'Courier New', monospace;
+  }
+
+  /* ── Bottom-left: Network ── */
+  #hud-network {
+    bottom: 80px; left: 16px;
+  }
+  .net-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0;
+    font-size: 11px;
+  }
+  .net-bar-bg {
+    width: 90px;
+    height: 7px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .net-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+  .net-join-churn {
+    font-size: 10px;
+    margin-top: 4px;
+    color: var(--text2);
+    font-family: 'Courier New', monospace;
+  }
+  .net-join-churn .join-count { color: var(--green); }
+  .net-join-churn .churn-count { color: var(--red); }
+
+  /* ── Bottom-right: Reward ── */
+  #hud-reward {
+    bottom: 240px; right: 16px;
+  }
+  .reward-value {
+    font-size: 26px;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    text-align: center;
+  }
+  .reward-label {
+    font-size: 9px;
+    color: var(--text2);
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  /* ── Mini-Map ── */
+  #hud-minimap {
+    bottom: 80px; right: 16px;
+  }
+  #minimap-canvas {
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    display: block;
+  }
+  .minimap-title {
+    font-size: 9px;
+    color: var(--text2);
+    text-align: center;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+
+  /* ── Legend ── */
+  #hud-legend {
+    bottom: 72px; left: 50%;
+    transform: translateX(-50%);
+  }
+  .legend-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .legend-row {
+    display: flex;
+    gap: 12px;
+    font-size: 9px;
+    color: var(--text2);
+    justify-content: center;
+  }
+  .legend-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 3px;
+    vertical-align: middle;
+  }
+  .legend-poly {
+    display: inline-block;
+    width: 8px; height: 8px;
+    margin-right: 3px;
+    vertical-align: middle;
+    clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+  }
+
+  /* ── Timeline ── */
+  #hud-timeline {
+    bottom: 0; left: 0; right: 0;
+    height: 62px;
+    background: rgba(20,23,34,0.96);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 10px;
+    z-index: 20;
+    pointer-events: auto;
+  }
+  .tl-btn {
+    background: var(--border);
+    border: none;
+    color: var(--text);
+    width: 34px; height: 34px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .tl-btn:hover { background: var(--blue); }
+  .tl-btn.active { background: var(--blue); }
+  #slider {
+    flex: 1;
+    height: 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--border);
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+  }
+  #slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--cyan);
+    cursor: pointer;
+  }
+  #slider::-moz-range-thumb {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--cyan);
+    cursor: pointer;
+    border: none;
+  }
+  .tl-info {
+    font-size: 11px;
+    color: var(--text2);
+    min-width: 110px;
+    text-align: center;
+    font-family: 'Courier New', monospace;
+    flex-shrink: 0;
+  }
+  .speed-btns {
+    display: flex;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+  .speed-btn {
+    background: var(--border);
+    border: none;
+    color: var(--text2);
+    padding: 4px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    transition: background 0.15s;
+  }
+  .speed-btn:hover { background: #2a2f45; }
+  .speed-btn.active {
+    background: var(--cyan);
+    color: var(--bg);
+    font-weight: 600;
+  }
+
+  /* ── Welcome Overlay ── */
+  #welcome-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100;
+    background: rgba(6, 8, 14, 0.88);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  #welcome-overlay.hidden { display: none; }
+  .welcome-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 36px;
+    max-width: 520px;
+    width: 90%;
+    text-align: left;
+  }
+  .welcome-card h2 {
+    font-size: 18px;
+    color: var(--cyan);
+    margin-bottom: 6px;
+    font-weight: 700;
+  }
+  .welcome-sep {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 10px 0 14px;
+  }
+  .welcome-card p {
+    font-size: 12px;
+    color: var(--text2);
+    line-height: 1.7;
+    margin-bottom: 6px;
+  }
+  .welcome-card .wl {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.8;
+    margin: 8px 0;
+    padding-left: 6px;
+  }
+  .welcome-card .wl span.wh {
+    color: var(--cyan);
+    font-weight: 600;
+  }
+  .welcome-card .wl span.wp {
+    color: var(--purple);
+    font-weight: 600;
+  }
+  .welcome-card .ctrl {
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 10px;
+    font-family: 'Courier New', monospace;
+    line-height: 1.6;
+  }
+  #welcome-start {
+    display: block;
+    width: 100%;
+    margin-top: 18px;
+    padding: 10px;
+    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    border: none;
+    color: var(--bg);
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 8px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+  }
+  #welcome-start:hover { opacity: 0.9; }
+
+  /* ── Help Button ── */
+  #btn-help {
+    position: absolute;
+    bottom: 76px; right: 180px;
+    z-index: 15;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+  }
+  #btn-help:hover { color: var(--cyan); border-color: var(--cyan); }
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<!-- Welcome Overlay -->
+<div id="welcome-overlay">
+  <div class="welcome-card">
+    <h2>O-RAN 5G Single-Cell Simulation</h2>
+    <hr class="welcome-sep">
+    <p>What you are seeing:</p>
+    <div class="wl">
+      <span class="wh">Central tower</span>: 5G base station (gNB)<br>
+      <span class="wh">Blue dome</span>: cell coverage area<br>
+      <span class="wh">Colored shapes</span>: mobile subscribers<br>
+      &nbsp;&nbsp;- <span class="wh">Cyan polyhedra</span>: URLLC (low-latency)<br>
+      &nbsp;&nbsp;- <span class="wp">Purple spheres</span>: eMBB (high-bandwidth)<br>
+      &nbsp;&nbsp;- Brighter = QoS-sensitive, Dimmer = Price-sensitive<br>
+      <span class="wh">Pie sectors</span>: radio resource allocation (rho_U)<br>
+      <span class="wh">Vertical bars</span>: network load vs capacity<br>
+      <span style="color:var(--red);">Red glow</span>: QoS violation overlay
+    </div>
+    <p>The AI agent (SAC) sets pricing and resource allocation each step to maximize long-term profit while maintaining QoS constraints.</p>
+    <div class="ctrl">
+      Controls: Space=Play &nbsp; Arrow=Step &nbsp; Mouse=Rotate<br>
+      Scroll=Zoom &nbsp; T=Top View
+    </div>
+    <button id="welcome-start">Start Exploring &rarr;</button>
+  </div>
+</div>
+
+<!-- HUD: Title -->
+<div id="hud-title" class="hud hud-panel">
+  <h1>O-RAN 5G &middot; Best Model Behavior</h1>
+  <div class="sub" id="step-info">Step 0 / 720 &nbsp;|&nbsp; Cycle 1 / 24 &nbsp;|&nbsp; Day 0 / 30</div>
+</div>
+
+<!-- HUD: Financial -->
+<div id="hud-finance" class="hud hud-panel">
+  <div class="fin-grid">
+    <div class="fin-item">
+      <div class="fin-label">Revenue</div>
+      <div class="fin-value revenue" id="val-revenue">0K</div>
+    </div>
+    <div class="fin-item">
+      <div class="fin-label">Cost</div>
+      <div class="fin-value cost" id="val-cost">0K</div>
+    </div>
+    <div class="fin-item">
+      <div class="fin-label">Profit</div>
+      <div class="fin-value profit" id="val-profit">0K</div>
+    </div>
+  </div>
+</div>
+
+<!-- HUD: URLLC -->
+<div id="hud-urllc" class="hud hud-panel">
+  <div class="price-title urllc">URLLC Slice</div>
+  <div class="price-row"><span class="price-key">Base Fee (F_U)</span><span class="price-val" id="val-FU">-</span></div>
+  <div class="price-row"><span class="price-key">Overage (p_over_U)</span><span class="price-val" id="val-pU">-</span></div>
+  <div class="price-row"><span class="price-key">Users (N_U)</span><span class="price-val" id="val-NU">-</span></div>
+  <div class="price-row"><span class="price-key">pviol_U</span><span class="price-val" id="val-pvU" style="color:var(--text);">-</span></div>
+</div>
+
+<!-- HUD: eMBB -->
+<div id="hud-embb" class="hud hud-panel">
+  <div class="price-title embb">eMBB Slice</div>
+  <div class="price-row"><span class="price-key">Base Fee (F_E)</span><span class="price-val" id="val-FE">-</span></div>
+  <div class="price-row"><span class="price-key">Overage (p_over_E)</span><span class="price-val" id="val-pE">-</span></div>
+  <div class="price-row"><span class="price-key">Users (N_E)</span><span class="price-val" id="val-NE">-</span></div>
+  <div class="price-row"><span class="price-key">pviol_E</span><span class="price-val" id="val-pvE" style="color:var(--text);">-</span></div>
+</div>
+
+<!-- HUD: Network -->
+<div id="hud-network" class="hud hud-panel">
+  <div class="price-title" style="color:var(--orange);">Network Load</div>
+  <div class="net-row">
+    <span style="width:42px; color:var(--cyan); font-size:10px;">URLLC</span>
+    <div class="net-bar-bg"><div class="net-bar" id="bar-urllc" style="width:0%; background:var(--green);"></div></div>
+    <span id="val-loadU" style="width:42px; text-align:right; font-family:'Courier New',monospace; font-size:10px;">0%</span>
+  </div>
+  <div class="net-row">
+    <span style="width:42px; color:var(--purple); font-size:10px;">eMBB</span>
+    <div class="net-bar-bg"><div class="net-bar" id="bar-embb" style="width:0%; background:var(--green);"></div></div>
+    <span id="val-loadE" style="width:42px; text-align:right; font-family:'Courier New',monospace; font-size:10px;">0%</span>
+  </div>
+  <div class="price-row" style="margin-top:5px;">
+    <span class="price-key">rho_U (PRB)</span>
+    <span class="price-val" id="val-rhoU" style="color:var(--cyan);">-</span>
+  </div>
+  <div class="net-join-churn" id="val-joinchurn">
+    <span class="join-count">+0 joined</span> &nbsp; <span class="churn-count">-0 churned</span>
+  </div>
+</div>
+
+<!-- HUD: Reward -->
+<div id="hud-reward" class="hud hud-panel">
+  <div class="reward-label">Reward</div>
+  <div class="reward-value" id="val-reward" style="color:var(--orange);">0.0000</div>
+  <div class="reward-label" style="margin-top:3px;" id="val-users">Active: 0</div>
+</div>
+
+<!-- HUD: Minimap -->
+<div id="hud-minimap" class="hud hud-panel">
+  <div class="minimap-title">Cell Map</div>
+  <canvas id="minimap-canvas" width="150" height="150"></canvas>
+</div>
+
+<!-- HUD: Legend -->
+<div id="hud-legend" class="hud hud-panel">
+  <div class="legend-rows">
+    <div class="legend-row">
+      <span><span class="legend-poly" style="background:#22d3ee;"></span>URLLC QoS</span>
+      <span><span class="legend-poly" style="background:#0ea5e9;"></span>URLLC Bal</span>
+      <span><span class="legend-poly" style="background:#14b8a6;"></span>URLLC Price</span>
+      <span><span class="legend-dot" style="background:#a78bfa;"></span>eMBB QoS</span>
+      <span><span class="legend-dot" style="background:#8b5cf6;"></span>eMBB Bal</span>
+      <span><span class="legend-dot" style="background:#6366f1;"></span>eMBB Price</span>
+    </div>
+    <div class="legend-row">
+      <span><span class="legend-dot" style="background:var(--green);"></span>Joining</span>
+      <span><span class="legend-dot" style="background:var(--red);"></span>Churning</span>
+      <span><span class="legend-dot" style="background:#333344;"></span>Inactive</span>
+    </div>
+  </div>
+</div>
+
+<!-- Help Button -->
+<button id="btn-help">?</button>
+
+<!-- Timeline -->
+<div id="hud-timeline" class="hud">
+  <button class="tl-btn" id="btn-play" title="Play / Pause (Space)">&#9654;</button>
+  <button class="tl-btn" id="btn-prev" title="Previous Step (Left Arrow)">&#9664;</button>
+  <button class="tl-btn" id="btn-next" title="Next Step (Right Arrow)">&#9654;</button>
+  <input type="range" id="slider" min="0" max="0" value="0">
+  <div class="tl-info" id="tl-info">Step 0 / 0</div>
+  <div class="speed-btns">
+    <button class="speed-btn active" data-speed="1">1x</button>
+    <button class="speed-btn" data-speed="5">5x</button>
+    <button class="speed-btn" data-speed="10">10x</button>
+    <button class="speed-btn" data-speed="30">30x</button>
+  </div>
+</div>
+
+<!-- Three.js via import map (r160 supports setColorAt) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ====================================================================
+// DATA INJECTION (replaced by Python backend)
+// ====================================================================
+const STEPS       = __STEP_DATA__;
+const NORMS       = __NORMS__;
+const META        = __META__;
+const USERS       = __USER_DATA__;
+const USER_EVENTS = __USER_EVENTS__;
+const USER_META   = __USER_META__;
+
+const HAS_USER_DATA = USERS.length > 0;
+const N_TOTAL       = USER_META.N_total || 500;
+const CELL_RADIUS   = USER_META.cell_radius || 20.0;
+
+// ====================================================================
+// ANIMATION STATE
+// ====================================================================
+let currentStep    = 0;
+let playing        = false;
+let speed          = 1;
+let stepAccum      = 0;
+let topDownMode    = false;
+let topDownLerp    = 0;
+
+// ====================================================================
+// THREE.JS SCENE
+// ====================================================================
+const container = document.getElementById('canvas-container');
+const scene     = new THREE.Scene();
+scene.background = new THREE.Color(0x0c0e14);
+scene.fog        = new THREE.FogExp2(0x0c0e14, 0.007);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(25, 20, 25);
+camera.lookAt(0, 3, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+// ── Lighting ──
+scene.add(new THREE.AmbientLight(0x334466, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(20, 30, 10);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 1024;
+dirLight.shadow.mapSize.height = 1024;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 80;
+dirLight.shadow.camera.left = -30;
+dirLight.shadow.camera.right = 30;
+dirLight.shadow.camera.top = 30;
+dirLight.shadow.camera.bottom = -30;
+scene.add(dirLight);
+
+const ptLight = new THREE.PointLight(0x4a9eff, 0.4, 50);
+ptLight.position.set(0, 15, 0);
+scene.add(ptLight);
+
+// ── Ground ──
+const groundGeo = new THREE.PlaneGeometry(60, 60);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x0a0c12, roughness: 1, metalness: 0 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.01;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(60, 30, 0x1e2336, 0x1a1e30);
+scene.add(grid);
+
+// ── Concentric distance rings ──
+function makeRing(radius, color, opacity) {
+  const segs = 96;
+  const pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = (i / segs) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * radius, 0.01, Math.sin(a) * radius));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+  return new THREE.Line(geo, mat);
+}
+scene.add(makeRing(5, 0x1e2336, 0.3));
+scene.add(makeRing(10, 0x1e2336, 0.25));
+scene.add(makeRing(15, 0x1e2336, 0.2));
+scene.add(makeRing(20, 0x4a9eff, 0.35));
+
+// ====================================================================
+// BASE STATION TOWER
+// ====================================================================
+const towerGroup = new THREE.Group();
+
+// Main cylinder
+const towerGeo = new THREE.CylinderGeometry(0.4, 0.6, 12, 16);
+const towerMat = new THREE.MeshStandardMaterial({ color: 0x3a3f55, metalness: 0.7, roughness: 0.3 });
+const towerMesh = new THREE.Mesh(towerGeo, towerMat);
+towerMesh.position.y = 6;
+towerMesh.castShadow = true;
+towerGroup.add(towerMesh);
+
+// Platform at top
+const platGeo = new THREE.CylinderGeometry(1.0, 0.8, 0.3, 16);
+const platMat = new THREE.MeshStandardMaterial({ color: 0x4a4f66, metalness: 0.6, roughness: 0.4 });
+const platform = new THREE.Mesh(platGeo, platMat);
+platform.position.y = 12.15;
+towerGroup.add(platform);
+
+// 3 antenna arrays around top
+for (let i = 0; i < 3; i++) {
+  const antGeo = new THREE.BoxGeometry(0.15, 1.5, 0.8);
+  const antMat = new THREE.MeshStandardMaterial({ color: 0x556688, metalness: 0.8, roughness: 0.2 });
+  const ant = new THREE.Mesh(antGeo, antMat);
+  const angle = (i / 3) * Math.PI * 2;
+  ant.position.set(Math.cos(angle) * 0.85, 12.8, Math.sin(angle) * 0.85);
+  ant.rotation.y = angle;
+  ant.castShadow = true;
+  towerGroup.add(ant);
+}
+
+// Beacon light at top
+const beaconGeo = new THREE.SphereGeometry(0.2, 8, 8);
+const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff3333 });
+const beacon = new THREE.Mesh(beaconGeo, beaconMat);
+beacon.position.y = 13.7;
+towerGroup.add(beacon);
+
+scene.add(towerGroup);
+
+// ── gNB label ──
+function makeTextSprite(text, color, fontSize) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = color;
+  ctx.font = `bold ${fontSize || 28}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(3.0, 0.75, 1);
+  return sprite;
+}
+
+const gnbLabel = makeTextSprite('gNB', '#22d3ee', 30);
+gnbLabel.position.set(0, 15, 0);
+scene.add(gnbLabel);
+
+// ====================================================================
+// COVERAGE DOME
+// ====================================================================
+const domeGeo = new THREE.SphereGeometry(CELL_RADIUS, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2);
+const domeMat = new THREE.MeshBasicMaterial({
+  color: 0x4a9eff, transparent: true, opacity: 0.04,
+  side: THREE.BackSide, depthWrite: false
+});
+const dome = new THREE.Mesh(domeGeo, domeMat);
+scene.add(dome);
+
+// ====================================================================
+// SLICE SECTORS
+// ====================================================================
+let urllcSectorMesh = null;
+let embbSectorMesh  = null;
+let urllcLabelSprite = null;
+let embbLabelSprite  = null;
+
+function buildSectorGeometry(innerR, outerR, startAngle, endAngle) {
+  const segs = 48;
+  const verts = [];
+  const indices = [];
+  const span = endAngle - startAngle;
+
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const a = startAngle + t * span;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    verts.push(ca * innerR, 0, sa * innerR);
+    verts.push(ca * outerR, 0, sa * outerR);
+  }
+  for (let i = 0; i < segs; i++) {
+    const base = i * 2;
+    indices.push(base, base + 1, base + 3);
+    indices.push(base, base + 3, base + 2);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function updateSectors(rhoU) {
+  if (urllcSectorMesh) { scene.remove(urllcSectorMesh); urllcSectorMesh.geometry.dispose(); }
+  if (embbSectorMesh)  { scene.remove(embbSectorMesh);  embbSectorMesh.geometry.dispose(); }
+  if (urllcLabelSprite) scene.remove(urllcLabelSprite);
+  if (embbLabelSprite)  scene.remove(embbLabelSprite);
+
+  const urllcAngle = rhoU * Math.PI * 2;
+  const embbAngle  = (1 - rhoU) * Math.PI * 2;
+
+  // URLLC sector: from -urllcAngle/2 to +urllcAngle/2
+  const uGeo = buildSectorGeometry(2, 8, -urllcAngle / 2, urllcAngle / 2);
+  const uMat = new THREE.MeshBasicMaterial({
+    color: 0x22d3ee, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false
+  });
+  urllcSectorMesh = new THREE.Mesh(uGeo, uMat);
+  urllcSectorMesh.position.y = 0.1;
+  scene.add(urllcSectorMesh);
+
+  // eMBB sector: remaining angle
+  const eStart = urllcAngle / 2;
+  const eEnd   = eStart + embbAngle;
+  const eGeo   = buildSectorGeometry(2, 8, eStart, eEnd);
+  const eMat   = new THREE.MeshBasicMaterial({
+    color: 0xa78bfa, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false
+  });
+  embbSectorMesh = new THREE.Mesh(eGeo, eMat);
+  embbSectorMesh.position.y = 0.1;
+  scene.add(embbSectorMesh);
+
+  // Labels inside sectors
+  const uMidAngle = 0;
+  const eMidAngle = eStart + embbAngle / 2;
+  const labelR = 5;
+
+  urllcLabelSprite = makeTextSprite('URLLC', '#22d3ee', 22);
+  urllcLabelSprite.position.set(Math.cos(uMidAngle) * labelR, 0.5, Math.sin(uMidAngle) * labelR);
+  urllcLabelSprite.scale.set(2.5, 0.6, 1);
+  scene.add(urllcLabelSprite);
+
+  embbLabelSprite = makeTextSprite('eMBB', '#a78bfa', 22);
+  embbLabelSprite.position.set(Math.cos(eMidAngle) * labelR, 0.5, Math.sin(eMidAngle) * labelR);
+  embbLabelSprite.scale.set(2.5, 0.6, 1);
+  scene.add(embbLabelSprite);
+}
+updateSectors(0.2);
+
+// ====================================================================
+// USER VISUALIZATION (InstancedMesh) [M13]
+// ====================================================================
+// Segment color map
+const SEGMENT_COLORS = {
+  URLLC: {
+    qos_sensitive:   new THREE.Color('#22d3ee'),
+    balanced:        new THREE.Color('#0ea5e9'),
+    price_sensitive: new THREE.Color('#14b8a6'),
+  },
+  eMBB: {
+    qos_sensitive:   new THREE.Color('#a78bfa'),
+    balanced:        new THREE.Color('#8b5cf6'),
+    price_sensitive: new THREE.Color('#6366f1'),
+  },
+};
+const INACTIVE_COLOR = new THREE.Color('#333344');
+const JOIN_COLOR     = new THREE.Color('#34d399');
+const CHURN_COLOR    = new THREE.Color('#f87171');
+
+// User state arrays
+const userActive    = new Uint8Array(N_TOTAL);      // 0=inactive, 1=active
+const userAnimType  = new Int8Array(N_TOTAL);        // 0=none, 1=join, -1=churn
+const userAnimProg  = new Float32Array(N_TOTAL);     // 0..1 progress
+const ANIM_DURATION = 0.4;                           // seconds base
+
+// State cache: every 30th step
+const stateCache    = {};
+const CACHE_INTERVAL = 30;
+
+// InstancedMesh for URLLC users (icosahedron)
+let urllcInstancedMesh = null;
+let embbInstancedMesh  = null;
+let urllcUserIndices   = [];  // maps instance index -> user id
+let embbUserIndices    = [];
+
+// Fallback points (when no spatial data)
+let fallbackPoints     = null;
+const MAX_FALLBACK     = 600;
+const fbPositions      = new Float32Array(MAX_FALLBACK * 3);
+const fbColors         = new Float32Array(MAX_FALLBACK * 3);
+const fbAngles         = [];
+const fbRadii          = [];
+for (let i = 0; i < MAX_FALLBACK; i++) {
+  fbAngles.push(Math.random() * Math.PI * 2);
+  fbRadii.push(3 + Math.random() * 15);
+}
+
+const _tmpMatrix  = new THREE.Matrix4();
+const _tmpPos     = new THREE.Vector3();
+const _tmpScale   = new THREE.Vector3();
+const _tmpQuat    = new THREE.Quaternion();
+const _tmpColor   = new THREE.Color();
+
+function getUserColor(user) {
+  const sliceColors = SEGMENT_COLORS[user.slice] || SEGMENT_COLORS.eMBB;
+  return sliceColors[user.segment] || sliceColors.balanced;
+}
+
+function setupInstancedMeshes() {
+  if (!HAS_USER_DATA) {
+    // Fallback: simple points
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(fbPositions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(fbColors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: 0.4, vertexColors: true, transparent: true, opacity: 0.8, sizeAttenuation: true
+    });
+    fallbackPoints = new THREE.Points(geo, mat);
+    scene.add(fallbackPoints);
+    return;
+  }
+
+  // Partition users by slice
+  urllcUserIndices = [];
+  embbUserIndices  = [];
+  for (let i = 0; i < USERS.length; i++) {
+    if (USERS[i].slice === 'URLLC') {
+      urllcUserIndices.push(i);
+    } else {
+      embbUserIndices.push(i);
+    }
+  }
+
+  // URLLC: icosahedron
+  const urllcGeo = new THREE.IcosahedronGeometry(0.3, 0);
+  const urllcMat = new THREE.MeshStandardMaterial({
+    metalness: 0.3, roughness: 0.6, transparent: false
+  });
+  urllcInstancedMesh = new THREE.InstancedMesh(urllcGeo, urllcMat, urllcUserIndices.length);
+  urllcInstancedMesh.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(urllcUserIndices.length * 3), 3
+  );
+  scene.add(urllcInstancedMesh);
+
+  // eMBB: sphere
+  const embbGeo = new THREE.SphereGeometry(0.3, 8, 6);
+  const embbMat = new THREE.MeshStandardMaterial({
+    metalness: 0.3, roughness: 0.6, transparent: false
+  });
+  embbInstancedMesh = new THREE.InstancedMesh(embbGeo, embbMat, embbUserIndices.length);
+  embbInstancedMesh.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(embbUserIndices.length * 3), 3
+  );
+  scene.add(embbInstancedMesh);
+
+  // Initialize all users hidden (scale 0)
+  for (let ii = 0; ii < urllcUserIndices.length; ii++) {
+    _tmpMatrix.compose(
+      new THREE.Vector3(0, -100, 0),
+      _tmpQuat.identity(),
+      new THREE.Vector3(0.001, 0.001, 0.001)
+    );
+    urllcInstancedMesh.setMatrixAt(ii, _tmpMatrix);
+    urllcInstancedMesh.setColorAt(ii, INACTIVE_COLOR);
+  }
+  for (let ii = 0; ii < embbUserIndices.length; ii++) {
+    _tmpMatrix.compose(
+      new THREE.Vector3(0, -100, 0),
+      _tmpQuat.identity(),
+      new THREE.Vector3(0.001, 0.001, 0.001)
+    );
+    embbInstancedMesh.setMatrixAt(ii, _tmpMatrix);
+    embbInstancedMesh.setColorAt(ii, INACTIVE_COLOR);
+  }
+  urllcInstancedMesh.instanceMatrix.needsUpdate = true;
+  urllcInstancedMesh.instanceColor.needsUpdate = true;
+  embbInstancedMesh.instanceMatrix.needsUpdate = true;
+  embbInstancedMesh.instanceColor.needsUpdate = true;
+}
+
+function rebuildUserState(targetStep) {
+  // Find nearest cached state at or before targetStep
+  let startStep = 0;
+  userActive.fill(0);
+
+  const cacheKeys = Object.keys(stateCache).map(Number).sort((a, b) => a - b);
+  for (const k of cacheKeys) {
+    if (k <= targetStep) {
+      startStep = k;
+      const cached = stateCache[k];
+      userActive.set(cached);
+    } else {
+      break;
+    }
+  }
+
+  // Replay events from startStep+1 to targetStep (or from 0 if startStep is 0 and we loaded cache at 0)
+  const replayFrom = (startStep === 0 && stateCache[0]) ? 1 : startStep;
+  // If startStep === 0 and no cache at 0, we need to process step 0 events
+  if (startStep === 0 && !stateCache[0]) {
+    applyEventsForStep(0);
+  }
+
+  for (let s = (startStep === 0 && !stateCache[0] ? 1 : (startStep === 0 ? 1 : startStep + 1)); s <= targetStep; s++) {
+    applyEventsForStep(s);
+  }
+
+  // Clear animations
+  userAnimType.fill(0);
+  userAnimProg.fill(0);
+}
+
+function applyEventsForStep(step) {
+  const events = USER_EVENTS[String(step)];
+  if (!events) return;
+  for (const ev of events) {
+    const uid = ev.uid;
+    if (uid < 0 || uid >= N_TOTAL) continue;
+    if (ev.type === 'initial_active' || ev.type === 'join') {
+      userActive[uid] = 1;
+    } else if (ev.type === 'churn') {
+      userActive[uid] = 0;
+    }
+  }
+}
+
+function cacheStateIfNeeded(step) {
+  if (step % CACHE_INTERVAL === 0 && !stateCache[step]) {
+    stateCache[step] = new Uint8Array(userActive);
+  }
+}
+
+function triggerAnimations(step) {
+  const events = USER_EVENTS[String(step)];
+  if (!events) return;
+  for (const ev of events) {
+    const uid = ev.uid;
+    if (uid < 0 || uid >= N_TOTAL) continue;
+    if (ev.type === 'join') {
+      userAnimType[uid]  = 1;
+      userAnimProg[uid]  = 0.001;
+    } else if (ev.type === 'churn') {
+      userAnimType[uid]  = -1;
+      userAnimProg[uid]  = 0.001;
+    }
+  }
+}
+
+// Build user lookup: user id -> instanced mesh index
+const userToUrllcIdx = {};
+const userToEmbbIdx  = {};
+if (HAS_USER_DATA) {
+  for (let ii = 0; ii < urllcUserIndices.length; ii++) {
+    userToUrllcIdx[urllcUserIndices[ii]] = ii;
+  }
+  for (let ii = 0; ii < embbUserIndices.length; ii++) {
+    userToEmbbIdx[embbUserIndices[ii]] = ii;
+  }
+}
+
+function updateInstancedMeshes(dt) {
+  if (!HAS_USER_DATA) return;
+
+  let urllcDirty = false;
+  let embbDirty  = false;
+
+  for (let uid = 0; uid < Math.min(USERS.length, N_TOTAL); uid++) {
+    const user    = USERS[uid];
+    const active  = userActive[uid] === 1;
+    const animT   = userAnimType[uid];
+    let   animP   = userAnimProg[uid];
+
+    // Advance animation
+    if (animT !== 0 && animP > 0) {
+      const animSpeed = Math.max(dt / ANIM_DURATION, 0.02);
+      animP = Math.min(animP + animSpeed, 1.0);
+      userAnimProg[uid] = animP;
+      if (animP >= 1.0) {
+        userAnimType[uid] = 0;
+        userAnimProg[uid] = 0;
+      }
+    }
+
+    // Compute position, scale, color
+    let px = user.x;
+    let py = 0.5;
+    let pz = user.y;
+    let s  = 1.0;
+    let color = getUserColor(user);
+
+    if (animT === 1 && animP > 0 && animP < 1) {
+      // Join animation: elastic scale up + green flash
+      const t = animP;
+      const elastic = 1.0 - Math.pow(2, -10 * t) * Math.cos(t * Math.PI * 2);
+      s = Math.max(0.01, elastic);
+      const greenAmount = Math.max(0, 1 - t * 3);
+      color = color.clone().lerp(JOIN_COLOR, greenAmount);
+    } else if (animT === -1 && animP > 0 && animP < 1) {
+      // Churn animation: turn red, rise, shrink
+      const t = animP;
+      s = Math.max(0.01, 1.0 - t);
+      py = 0.5 + t * 2.5;
+      color = color.clone().lerp(CHURN_COLOR, Math.min(t * 2, 1));
+    } else if (!active) {
+      s = 0.001;
+      py = -100;
+      color = INACTIVE_COLOR;
+    }
+
+    // Update the correct instanced mesh
+    const isUrllc = user.slice === 'URLLC';
+    const meshIdx = isUrllc ? userToUrllcIdx[uid] : userToEmbbIdx[uid];
+    const mesh    = isUrllc ? urllcInstancedMesh : embbInstancedMesh;
+
+    if (mesh !== null && meshIdx !== undefined) {
+      _tmpMatrix.compose(
+        _tmpPos.set(px, py, pz),
+        _tmpQuat.identity(),
+        _tmpScale.set(s, s, s)
+      );
+      mesh.setMatrixAt(meshIdx, _tmpMatrix);
+      mesh.setColorAt(meshIdx, color);
+      if (isUrllc) urllcDirty = true;
+      else embbDirty = true;
+    }
+  }
+
+  if (urllcDirty && urllcInstancedMesh) {
+    urllcInstancedMesh.instanceMatrix.needsUpdate = true;
+    urllcInstancedMesh.instanceColor.needsUpdate  = true;
+  }
+  if (embbDirty && embbInstancedMesh) {
+    embbInstancedMesh.instanceMatrix.needsUpdate = true;
+    embbInstancedMesh.instanceColor.needsUpdate  = true;
+  }
+}
+
+function updateFallbackParticles(d) {
+  if (!fallbackPoints) return;
+  const nU = d.N_U || 0;
+  const nE = d.N_E || 0;
+  const nI = d.N_inactive || 0;
+  const total = nU + nE + nI;
+  const cU = new THREE.Color(0x22d3ee);
+  const cE = new THREE.Color(0xa78bfa);
+  const cI = new THREE.Color(0x333344);
+
+  for (let i = 0; i < MAX_FALLBACK; i++) {
+    let color, y, radius;
+    if (i < nU) {
+      color = cU; y = 0.5 + Math.random() * 2; radius = 3 + fbRadii[i] * 0.35;
+    } else if (i < nU + nE) {
+      color = cE; y = 0.5 + Math.random() * 1.5; radius = fbRadii[i];
+    } else if (i < total && i < MAX_FALLBACK) {
+      color = cI; y = 0.2; radius = 18 + (fbRadii[i] % 5);
+    } else {
+      fbPositions[i * 3] = 0; fbPositions[i * 3 + 1] = -100; fbPositions[i * 3 + 2] = 0;
+      fbColors[i * 3] = 0; fbColors[i * 3 + 1] = 0; fbColors[i * 3 + 2] = 0;
+      continue;
+    }
+    const a = fbAngles[i];
+    fbPositions[i * 3]     = Math.cos(a) * radius;
+    fbPositions[i * 3 + 1] = y;
+    fbPositions[i * 3 + 2] = Math.sin(a) * radius;
+    fbColors[i * 3]     = color.r;
+    fbColors[i * 3 + 1] = color.g;
+    fbColors[i * 3 + 2] = color.b;
+  }
+  fallbackPoints.geometry.attributes.position.needsUpdate = true;
+  fallbackPoints.geometry.attributes.color.needsUpdate    = true;
+}
+
+setupInstancedMeshes();
+
+// ====================================================================
+// TRAFFIC FLOW PARTICLES
+// ====================================================================
+const N_TRAFFIC = 80;
+const trafPositions = new Float32Array(N_TRAFFIC * 3);
+const trafColors    = new Float32Array(N_TRAFFIC * 3);
+
+const trafGeo = new THREE.BufferGeometry();
+trafGeo.setAttribute('position', new THREE.Float32BufferAttribute(trafPositions, 3));
+trafGeo.setAttribute('color',    new THREE.Float32BufferAttribute(trafColors, 3));
+const trafMat = new THREE.PointsMaterial({
+  size: 0.25, vertexColors: true, transparent: true, opacity: 0.7, sizeAttenuation: true, depthWrite: false
+});
+const trafPoints = new THREE.Points(trafGeo, trafMat);
+scene.add(trafPoints);
+
+// Traffic particle state
+const trafProgress   = new Float32Array(N_TRAFFIC);  // 0..1
+const trafSpeed      = new Float32Array(N_TRAFFIC);   // per frame
+const trafStartX     = new Float32Array(N_TRAFFIC);
+const trafStartZ     = new Float32Array(N_TRAFFIC);
+const trafIsUrllc    = new Uint8Array(N_TRAFFIC);
+const trafActive     = new Uint8Array(N_TRAFFIC);
+
+const cTrafficU = new THREE.Color(0x22d3ee);
+const cTrafficE = new THREE.Color(0xa78bfa);
+
+function resetTrafficParticle(i, d) {
+  const nU = d.N_U || 0;
+  const nE = d.N_E || 0;
+  const loadU = (d.L_U || 0) / Math.max(d.C_U || 1, 0.001);
+  const loadE = (d.L_E || 0) / Math.max(d.C_E || 1, 0.001);
+  const totalLoad = loadU + loadE;
+
+  // Decide if active based on load
+  if (totalLoad < 0.01 || (nU + nE) < 1) {
+    trafActive[i] = 0;
+    trafPositions[i * 3 + 1] = -100;
+    return;
+  }
+
+  const activeProbability = Math.min(totalLoad * 0.6, 1.0);
+  if (Math.random() > activeProbability) {
+    trafActive[i] = 0;
+    trafPositions[i * 3 + 1] = -100;
+    return;
+  }
+
+  trafActive[i] = 1;
+  const isU = Math.random() < (loadU / Math.max(totalLoad, 0.001));
+  trafIsUrllc[i] = isU ? 1 : 0;
+  trafSpeed[i] = isU ? (1.0 / 30) : (1.0 / 60);
+  trafProgress[i] = Math.random();
+
+  // Start position: random within dome
+  if (HAS_USER_DATA && USERS.length > 0) {
+    const activeUsers = [];
+    for (let u = 0; u < USERS.length; u++) {
+      if (userActive[u] === 1) {
+        const uSlice = USERS[u].slice;
+        if ((isU && uSlice === 'URLLC') || (!isU && uSlice === 'eMBB')) {
+          activeUsers.push(u);
+        }
+      }
+    }
+    if (activeUsers.length > 0) {
+      const pick = activeUsers[Math.floor(Math.random() * activeUsers.length)];
+      trafStartX[i] = USERS[pick].x;
+      trafStartZ[i] = USERS[pick].y;
+    } else {
+      const a = Math.random() * Math.PI * 2;
+      const r = 3 + Math.random() * 14;
+      trafStartX[i] = Math.cos(a) * r;
+      trafStartZ[i] = Math.sin(a) * r;
+    }
+  } else {
+    const a = Math.random() * Math.PI * 2;
+    const r = 3 + Math.random() * 14;
+    trafStartX[i] = Math.cos(a) * r;
+    trafStartZ[i] = Math.sin(a) * r;
+  }
+}
+
+function updateTrafficParticles(d) {
+  for (let i = 0; i < N_TRAFFIC; i++) {
+    if (!trafActive[i]) {
+      resetTrafficParticle(i, d);
+      if (!trafActive[i]) continue;
+    }
+
+    trafProgress[i] += trafSpeed[i];
+    if (trafProgress[i] >= 1.0) {
+      resetTrafficParticle(i, d);
+      trafProgress[i] = 0;
+      if (!trafActive[i]) continue;
+    }
+
+    const t = trafProgress[i];
+    // Quadratic bezier: start -> mid-air control -> tower top
+    const sx = trafStartX[i], sz = trafStartZ[i];
+    const mx = sx * 0.3, mz = sz * 0.3, my = 10;
+    const ex = 0, ey = 13, ez = 0;
+
+    const oneMinusT = 1 - t;
+    const px = oneMinusT * oneMinusT * sx + 2 * oneMinusT * t * mx + t * t * ex;
+    const py = oneMinusT * oneMinusT * 0.5 + 2 * oneMinusT * t * my + t * t * ey;
+    const pz = oneMinusT * oneMinusT * sz + 2 * oneMinusT * t * mz + t * t * ez;
+
+    trafPositions[i * 3]     = px;
+    trafPositions[i * 3 + 1] = py;
+    trafPositions[i * 3 + 2] = pz;
+
+    const c = trafIsUrllc[i] ? cTrafficU : cTrafficE;
+    trafColors[i * 3]     = c.r;
+    trafColors[i * 3 + 1] = c.g;
+    trafColors[i * 3 + 2] = c.b;
+  }
+  trafGeo.attributes.position.needsUpdate = true;
+  trafGeo.attributes.color.needsUpdate    = true;
+}
+
+// ====================================================================
+// LOAD BARS
+// ====================================================================
+const barGroup = new THREE.Group();
+barGroup.position.set(-4, 0, -4);
+scene.add(barGroup);
+
+const urllcBarGeo = new THREE.BoxGeometry(0.8, 1, 0.8);
+const urllcBarMat = new THREE.MeshStandardMaterial({ color: 0x34d399 });
+const urllcBar    = new THREE.Mesh(urllcBarGeo, urllcBarMat);
+urllcBar.position.set(0, 0.5, 0);
+barGroup.add(urllcBar);
+
+const urllcCapGeo = new THREE.BoxGeometry(0.82, 10, 0.82);
+const urllcCapMat = new THREE.MeshBasicMaterial({
+  color: 0x22d3ee, wireframe: true, transparent: true, opacity: 0.3
+});
+const urllcCapWire = new THREE.Mesh(urllcCapGeo, urllcCapMat);
+urllcCapWire.position.set(0, 5, 0);
+barGroup.add(urllcCapWire);
+
+const embbBarGeo = new THREE.BoxGeometry(0.8, 1, 0.8);
+const embbBarMat = new THREE.MeshStandardMaterial({ color: 0x34d399 });
+const embbBar    = new THREE.Mesh(embbBarGeo, embbBarMat);
+embbBar.position.set(2, 0.5, 0);
+barGroup.add(embbBar);
+
+const embbCapGeo = new THREE.BoxGeometry(0.82, 10, 0.82);
+const embbCapMat = new THREE.MeshBasicMaterial({
+  color: 0xa78bfa, wireframe: true, transparent: true, opacity: 0.3
+});
+const embbCapWire = new THREE.Mesh(embbCapGeo, embbCapMat);
+embbCapWire.position.set(2, 5, 0);
+barGroup.add(embbCapWire);
+
+// Bar labels
+const lblU = makeTextSprite('URLLC', '#22d3ee', 20);
+lblU.position.set(-4, 11, -4);
+lblU.scale.set(2, 0.5, 1);
+scene.add(lblU);
+
+const lblE = makeTextSprite('eMBB', '#a78bfa', 20);
+lblE.position.set(-2, 11, -4);
+lblE.scale.set(2, 0.5, 1);
+scene.add(lblE);
+
+// ====================================================================
+// QoS VIOLATION OVERLAYS
+// ====================================================================
+const violGeoU = new THREE.SphereGeometry(8, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+const violMatU = new THREE.MeshBasicMaterial({
+  color: 0xf87171, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false
+});
+const violOverlayU = new THREE.Mesh(violGeoU, violMatU);
+violOverlayU.position.y = 0.1;
+scene.add(violOverlayU);
+
+const violGeoE = new THREE.SphereGeometry(16, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
+const violMatE = new THREE.MeshBasicMaterial({
+  color: 0xf87171, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false
+});
+const violOverlayE = new THREE.Mesh(violGeoE, violMatE);
+violOverlayE.position.y = 0.1;
+scene.add(violOverlayE);
+
+// ====================================================================
+// BILLING CYCLE RING
+// ====================================================================
+let billingRingMesh = null;
+let billingPulseMesh = null;
+let billingPulseProgress = -1;
+
+function buildBillingArc(fraction) {
+  if (billingRingMesh) { scene.remove(billingRingMesh); billingRingMesh.geometry.dispose(); }
+  if (fraction <= 0) return;
+
+  const angle = fraction * Math.PI * 2;
+  const segs = 64;
+  const pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = (i / segs) * angle - Math.PI / 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * 3, 0.08, Math.sin(a) * 3));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  const mat = new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.7, linewidth: 2 });
+  billingRingMesh = new THREE.Line(geo, mat);
+  scene.add(billingRingMesh);
+}
+
+function triggerBillingPulse() {
+  billingPulseProgress = 0;
+}
+
+function updateBillingPulse() {
+  if (billingPulseProgress < 0) {
+    if (billingPulseMesh) billingPulseMesh.visible = false;
+    return;
+  }
+
+  billingPulseProgress += 0.03;
+  if (billingPulseProgress >= 1) {
+    billingPulseProgress = -1;
+    if (billingPulseMesh) billingPulseMesh.visible = false;
+    return;
+  }
+
+  if (!billingPulseMesh) {
+    const geo = new THREE.RingGeometry(0.5, 1.0, 48);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xfbbf24, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false
+    });
+    billingPulseMesh = new THREE.Mesh(geo, mat);
+    billingPulseMesh.rotation.x = -Math.PI / 2;
+    billingPulseMesh.position.y = 0.12;
+    scene.add(billingPulseMesh);
+  }
+
+  billingPulseMesh.visible = true;
+  const r = 1 + billingPulseProgress * 12;
+  billingPulseMesh.scale.set(r, r, 1);
+  billingPulseMesh.material.opacity = 0.5 * (1 - billingPulseProgress);
+}
+
+// ====================================================================
+// JOIN/CHURN EFFECTS (small particle bursts)
+// ====================================================================
+const effectParticles = [];
+const MAX_EFFECTS = 200;
+
+function spawnJoinEffect(x, z) {
+  // Green ring pulse at position
+  for (let i = 0; i < 4; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const speed = 0.03 + Math.random() * 0.02;
+    effectParticles.push({
+      x, y: 0.6, z,
+      vx: Math.cos(a) * speed,
+      vy: 0.02 + Math.random() * 0.01,
+      vz: Math.sin(a) * speed,
+      life: 1.0,
+      color: JOIN_COLOR.clone()
+    });
+  }
+}
+
+function spawnChurnEffect(x, z) {
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const speed = 0.04 + Math.random() * 0.03;
+    effectParticles.push({
+      x, y: 1.0, z,
+      vx: Math.cos(a) * speed,
+      vy: 0.04 + Math.random() * 0.03,
+      vz: Math.sin(a) * speed,
+      life: 1.0,
+      color: CHURN_COLOR.clone()
+    });
+  }
+  // Trim
+  while (effectParticles.length > MAX_EFFECTS) effectParticles.shift();
+}
+
+// Effect particles rendering
+const effectPositions = new Float32Array(MAX_EFFECTS * 3);
+const effectColors    = new Float32Array(MAX_EFFECTS * 3);
+const effectGeo       = new THREE.BufferGeometry();
+effectGeo.setAttribute('position', new THREE.Float32BufferAttribute(effectPositions, 3));
+effectGeo.setAttribute('color',    new THREE.Float32BufferAttribute(effectColors, 3));
+const effectMat = new THREE.PointsMaterial({
+  size: 0.2, vertexColors: true, transparent: true, opacity: 0.8, sizeAttenuation: true, depthWrite: false
+});
+const effectPoints = new THREE.Points(effectGeo, effectMat);
+scene.add(effectPoints);
+
+function updateEffectParticles() {
+  for (let i = effectParticles.length - 1; i >= 0; i--) {
+    const p = effectParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.z += p.vz;
+    p.vy -= 0.001; // gravity
+    p.life -= 0.025;
+    if (p.life <= 0) effectParticles.splice(i, 1);
+  }
+
+  for (let i = 0; i < MAX_EFFECTS; i++) {
+    if (i < effectParticles.length) {
+      const p = effectParticles[i];
+      effectPositions[i * 3]     = p.x;
+      effectPositions[i * 3 + 1] = p.y;
+      effectPositions[i * 3 + 2] = p.z;
+      effectColors[i * 3]     = p.color.r * p.life;
+      effectColors[i * 3 + 1] = p.color.g * p.life;
+      effectColors[i * 3 + 2] = p.color.b * p.life;
+    } else {
+      effectPositions[i * 3 + 1] = -100;
+      effectColors[i * 3] = 0;
+      effectColors[i * 3 + 1] = 0;
+      effectColors[i * 3 + 2] = 0;
+    }
+  }
+  effectGeo.attributes.position.needsUpdate = true;
+  effectGeo.attributes.color.needsUpdate    = true;
+}
+
+// ====================================================================
+// MINI-MAP
+// ====================================================================
+const minimapCanvas = document.getElementById('minimap-canvas');
+const mmCtx = minimapCanvas.getContext('2d');
+const MM_SIZE = 150;
+const MM_SCALE = MM_SIZE / (CELL_RADIUS * 2.4);
+const MM_CX = MM_SIZE / 2;
+const MM_CY = MM_SIZE / 2;
+
+const MINIMAP_SEGMENT_COLORS = {
+  URLLC: { qos_sensitive: '#22d3ee', balanced: '#0ea5e9', price_sensitive: '#14b8a6' },
+  eMBB:  { qos_sensitive: '#a78bfa', balanced: '#8b5cf6', price_sensitive: '#6366f1' },
+};
+
+function drawMinimap() {
+  mmCtx.clearRect(0, 0, MM_SIZE, MM_SIZE);
+
+  // Background
+  mmCtx.fillStyle = '#0a0c12';
+  mmCtx.fillRect(0, 0, MM_SIZE, MM_SIZE);
+
+  // Cell radius circle
+  mmCtx.beginPath();
+  mmCtx.arc(MM_CX, MM_CY, CELL_RADIUS * MM_SCALE, 0, Math.PI * 2);
+  mmCtx.strokeStyle = 'rgba(74, 158, 255, 0.4)';
+  mmCtx.lineWidth = 1;
+  mmCtx.stroke();
+
+  // Tower dot
+  mmCtx.beginPath();
+  mmCtx.arc(MM_CX, MM_CY, 3, 0, Math.PI * 2);
+  mmCtx.fillStyle = '#22d3ee';
+  mmCtx.fill();
+
+  if (!HAS_USER_DATA) return;
+
+  // Draw users
+  for (let i = 0; i < USERS.length; i++) {
+    const u = USERS[i];
+    const active = userActive[i] === 1;
+    if (!active) continue;
+
+    const sx = MM_CX + u.x * MM_SCALE;
+    const sy = MM_CY + u.y * MM_SCALE;
+
+    const sliceMap = MINIMAP_SEGMENT_COLORS[u.slice] || MINIMAP_SEGMENT_COLORS.eMBB;
+    const color = sliceMap[u.segment] || sliceMap.balanced;
+
+    // Animating users
+    const animT = userAnimType[i];
+    let drawColor = color;
+    if (animT === 1) drawColor = '#34d399';
+    else if (animT === -1) drawColor = '#f87171';
+
+    mmCtx.beginPath();
+    mmCtx.arc(sx, sy, 2.0, 0, Math.PI * 2);
+    mmCtx.fillStyle = drawColor;
+    mmCtx.fill();
+  }
+}
+
+// ====================================================================
+// HUD UPDATE
+// ====================================================================
+function fmtK(v) {
+  return (v / 1000).toFixed(1) + 'K';
+}
+
+function updateHUD(d, stepIdx) {
+  const cycle     = d.cycle || Math.floor(stepIdx / (META.steps_per_cycle || 30)) + 1;
+  const cycleStep = d.cycle_step || (stepIdx % (META.steps_per_cycle || 30));
+  const totalCycles = META.n_cycles || 24;
+  const spc = META.steps_per_cycle || 30;
+
+  document.getElementById('step-info').textContent =
+    `Step ${stepIdx} / ${STEPS.length}  |  Cycle ${cycle} / ${totalCycles}  |  Day ${cycleStep} / ${spc}`;
+  document.getElementById('tl-info').textContent =
+    `Step ${stepIdx + 1} / ${STEPS.length}`;
+
+  // Financial
+  document.getElementById('val-revenue').textContent = fmtK(d.revenue || 0);
+  document.getElementById('val-cost').textContent = fmtK(d.cost_total || 0);
+  const profit = d.profit || 0;
+  const profitEl = document.getElementById('val-profit');
+  profitEl.textContent = fmtK(profit);
+  profitEl.style.color = profit >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // URLLC
+  document.getElementById('val-FU').textContent = fmtK(d.F_U || 0);
+  document.getElementById('val-pU').textContent = Math.round(d.p_over_U || 0).toLocaleString();
+  document.getElementById('val-NU').textContent = (d.N_U || 0).toString();
+  const pvU = d.pviol_U || 0;
+  const pvUEl = document.getElementById('val-pvU');
+  pvUEl.textContent = pvU.toFixed(4);
+  pvUEl.style.color = pvU > 0.1 ? 'var(--red)' : pvU > 0.01 ? 'var(--yellow)' : 'var(--green)';
+
+  // eMBB
+  document.getElementById('val-FE').textContent = fmtK(d.F_E || 0);
+  document.getElementById('val-pE').textContent = Math.round(d.p_over_E || 0).toLocaleString();
+  document.getElementById('val-NE').textContent = (d.N_E || 0).toString();
+  const pvE = d.pviol_E || 0;
+  const pvEEl = document.getElementById('val-pvE');
+  pvEEl.textContent = pvE.toFixed(4);
+  pvEEl.style.color = pvE > 0.1 ? 'var(--red)' : pvE > 0.01 ? 'var(--yellow)' : 'var(--green)';
+
+  // Network
+  const loadRatioU = (d.L_U || 0) / Math.max(d.C_U || 1, 0.001);
+  const loadRatioE = (d.L_E || 0) / Math.max(d.C_E || 1, 0.001);
+
+  document.getElementById('bar-urllc').style.width = Math.min(loadRatioU * 100, 100) + '%';
+  document.getElementById('bar-urllc').style.background =
+    loadRatioU < 0.7 ? 'var(--green)' : loadRatioU < 1.0 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('val-loadU').textContent = (loadRatioU * 100).toFixed(1) + '%';
+
+  document.getElementById('bar-embb').style.width = Math.min(loadRatioE * 100, 100) + '%';
+  document.getElementById('bar-embb').style.background =
+    loadRatioE < 0.7 ? 'var(--green)' : loadRatioE < 1.0 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('val-loadE').textContent = (loadRatioE * 100).toFixed(1) + '%';
+
+  document.getElementById('val-rhoU').textContent = (d.rho_U || 0).toFixed(3);
+
+  const jc = document.getElementById('val-joinchurn');
+  jc.innerHTML = `<span class="join-count">+${d.n_join || 0} joined</span> &nbsp; <span class="churn-count">-${d.n_churn || 0} churned</span>`;
+
+  // Reward
+  const reward = d.reward || 0;
+  const rewardEl = document.getElementById('val-reward');
+  rewardEl.textContent = reward.toFixed(4);
+  rewardEl.style.color = reward >= 0 ? 'var(--green)' : 'var(--red)';
+
+  document.getElementById('val-users').textContent =
+    `Active: ${d.N_active || 0}`;
+}
+
+// ====================================================================
+// SCENE UPDATE
+// ====================================================================
+let prevStep = -1;
+
+function updateScene(stepIdx, triggeredByPlayback) {
+  if (stepIdx < 0 || stepIdx >= STEPS.length) return;
+  const d = STEPS[stepIdx];
+
+  // User state management
+  if (HAS_USER_DATA) {
+    if (triggeredByPlayback && stepIdx === prevStep + 1) {
+      // Forward step: just apply this step's events
+      applyEventsForStep(stepIdx);
+      cacheStateIfNeeded(stepIdx);
+      triggerAnimations(stepIdx);
+
+      // Spawn effects for this step
+      const events = USER_EVENTS[String(stepIdx)];
+      if (events) {
+        for (const ev of events) {
+          if (ev.uid >= 0 && ev.uid < USERS.length) {
+            const u = USERS[ev.uid];
+            if (ev.type === 'join') spawnJoinEffect(u.x, u.y);
+            else if (ev.type === 'churn') spawnChurnEffect(u.x, u.y);
+          }
+        }
+      }
+    } else if (stepIdx !== prevStep) {
+      // Non-sequential: rebuild from scratch
+      rebuildUserState(stepIdx);
+      cacheStateIfNeeded(stepIdx);
+    }
+  }
+  prevStep = stepIdx;
+
+  // Beacon blink
+  beaconMat.color.setHex((stepIdx % 60 < 30) ? 0xff3333 : 0x440000);
+
+  // Sectors
+  updateSectors(d.rho_U || 0.2);
+
+  // Load bars
+  const maxBarH = 10;
+  const loadRatioU = Math.min((d.L_U || 0) / Math.max(d.C_U || 1, 0.001), 2);
+  const loadRatioE = Math.min((d.L_E || 0) / Math.max(d.C_E || 1, 0.001), 2);
+
+  const hU = Math.max(0.1, loadRatioU * maxBarH);
+  urllcBar.scale.y = hU;
+  urllcBar.position.y = hU / 2;
+  urllcBarMat.color.setHex(loadRatioU < 0.7 ? 0x34d399 : loadRatioU < 1.0 ? 0xfbbf24 : 0xf87171);
+
+  const hE = Math.max(0.1, loadRatioE * maxBarH);
+  embbBar.scale.y = hE;
+  embbBar.position.y = hE / 2;
+  embbBarMat.color.setHex(loadRatioE < 0.7 ? 0x34d399 : loadRatioE < 1.0 ? 0xfbbf24 : 0xf87171);
+
+  // Fallback particles
+  if (!HAS_USER_DATA) {
+    updateFallbackParticles(d);
+  }
+
+  // QoS overlays
+  violMatU.opacity = Math.min((d.pviol_U || 0) * 0.3, 0.2);
+  violMatE.opacity = Math.min((d.pviol_E || 0) * 0.3, 0.2);
+
+  // Billing cycle
+  const cycleStep = d.cycle_step || (stepIdx % (META.steps_per_cycle || 30));
+  const spc = META.steps_per_cycle || 30;
+  const cycleFrac = cycleStep / spc;
+  buildBillingArc(cycleFrac);
+  if (cycleStep === 0 && stepIdx > 0) {
+    triggerBillingPulse();
+  }
+
+  // HUD
+  updateHUD(d, stepIdx);
+}
+
+// ====================================================================
+// CAMERA ORBIT
+// ====================================================================
+let cameraAngle  = Math.PI / 4;
+let cameraHeight = 20;
+let cameraRadius = 35;
+let autoRotate   = true;
+let isDragging   = false;
+let prevMouseX   = 0;
+let prevMouseY   = 0;
+
+// Saved orbit state for top-down toggle
+let savedAngle   = cameraAngle;
+let savedHeight  = cameraHeight;
+let savedRadius  = cameraRadius;
+
+container.addEventListener('mousedown', e => {
+  if (e.target.closest('.hud-panel, .hud, .tl-btn, .speed-btn, #welcome-overlay, #btn-help')) return;
+  isDragging = true;
+  autoRotate = false;
+  prevMouseX = e.clientX;
+  prevMouseY = e.clientY;
+});
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  const dx = e.clientX - prevMouseX;
+  const dy = e.clientY - prevMouseY;
+  cameraAngle  += dx * 0.005;
+  cameraHeight  = Math.max(3, Math.min(60, cameraHeight - dy * 0.15));
+  prevMouseX = e.clientX;
+  prevMouseY = e.clientY;
+});
+window.addEventListener('mouseup', () => { isDragging = false; });
+container.addEventListener('wheel', e => {
+  cameraRadius = Math.max(15, Math.min(80, cameraRadius + e.deltaY * 0.04));
+  e.preventDefault();
+}, { passive: false });
+
+// ====================================================================
+// MAIN RENDER LOOP
+// ====================================================================
+let lastTime = performance.now();
+const clock = { dt: 0 };
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  clock.dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+
+  // Step advancement
+  if (playing) {
+    stepAccum += speed * clock.dt;
+    while (stepAccum >= 1.0 && currentStep < STEPS.length - 1) {
+      stepAccum -= 1.0;
+      currentStep++;
+      slider.value = currentStep;
+      updateScene(currentStep, true);
+    }
+    if (currentStep >= STEPS.length - 1) {
+      playing = false;
+      document.getElementById('btn-play').innerHTML = '&#9654;';
+    }
+  }
+
+  // Auto rotate
+  if (autoRotate && !topDownMode) {
+    cameraAngle += 0.002;
+  }
+
+  // Top-down lerp
+  if (topDownMode) {
+    topDownLerp = Math.min(topDownLerp + clock.dt * 3, 1);
+  } else {
+    topDownLerp = Math.max(topDownLerp - clock.dt * 3, 0);
+  }
+
+  const t = topDownLerp;
+  const effectiveAngle  = cameraAngle;
+  const effectiveHeight = cameraHeight * (1 - t) + 55 * t;
+  const effectiveRadius = cameraRadius * (1 - t) + 2 * t;
+  const lookY           = 3 * (1 - t) + 0 * t;
+
+  camera.position.x = Math.cos(effectiveAngle) * effectiveRadius;
+  camera.position.z = Math.sin(effectiveAngle) * effectiveRadius;
+  camera.position.y = effectiveHeight;
+  camera.lookAt(0, lookY, 0);
+
+  // Update animations
+  if (HAS_USER_DATA) {
+    updateInstancedMeshes(clock.dt);
+  }
+  updateTrafficParticles(STEPS[currentStep] || STEPS[0]);
+  updateEffectParticles();
+  updateBillingPulse();
+  drawMinimap();
+
+  renderer.render(scene, camera);
+}
+
+// ====================================================================
+// TIMELINE CONTROLS
+// ====================================================================
+const slider = document.getElementById('slider');
+slider.max = STEPS.length - 1;
+
+slider.addEventListener('input', () => {
+  currentStep = parseInt(slider.value);
+  updateScene(currentStep, false);
+});
+
+document.getElementById('btn-play').addEventListener('click', () => {
+  playing = !playing;
+  document.getElementById('btn-play').innerHTML = playing ? '&#9646;&#9646;' : '&#9654;';
+});
+
+document.getElementById('btn-prev').addEventListener('click', () => {
+  if (currentStep > 0) {
+    currentStep--;
+    slider.value = currentStep;
+    updateScene(currentStep, false);
+  }
+});
+
+document.getElementById('btn-next').addEventListener('click', () => {
+  if (currentStep < STEPS.length - 1) {
+    currentStep++;
+    slider.value = currentStep;
+    updateScene(currentStep, true);
+  }
+});
+
+document.querySelectorAll('.speed-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    speed = parseInt(btn.dataset.speed);
+  });
+});
+
+// Keyboard
+document.addEventListener('keydown', e => {
+  // Don't capture if welcome is visible
+  if (!document.getElementById('welcome-overlay').classList.contains('hidden')) {
+    if (e.code === 'Enter' || e.code === 'Space') {
+      e.preventDefault();
+      dismissWelcome();
+    }
+    return;
+  }
+
+  if (e.code === 'Space') {
+    e.preventDefault();
+    document.getElementById('btn-play').click();
+  } else if (e.code === 'ArrowRight') {
+    e.preventDefault();
+    document.getElementById('btn-next').click();
+  } else if (e.code === 'ArrowLeft') {
+    e.preventDefault();
+    document.getElementById('btn-prev').click();
+  } else if (e.code === 'KeyT') {
+    topDownMode = !topDownMode;
+    if (topDownMode) {
+      savedAngle  = cameraAngle;
+      savedHeight = cameraHeight;
+      savedRadius = cameraRadius;
+      autoRotate  = false;
+    } else {
+      cameraAngle  = savedAngle;
+      cameraHeight = savedHeight;
+      cameraRadius = savedRadius;
+    }
+  }
+});
+
+// ====================================================================
+// WELCOME OVERLAY
+// ====================================================================
+function dismissWelcome() {
+  document.getElementById('welcome-overlay').classList.add('hidden');
+}
+
+document.getElementById('welcome-start').addEventListener('click', dismissWelcome);
+document.getElementById('welcome-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('welcome-overlay')) dismissWelcome();
+});
+
+document.getElementById('btn-help').addEventListener('click', () => {
+  document.getElementById('welcome-overlay').classList.remove('hidden');
+});
+
+// ====================================================================
+// RESIZE
+// ====================================================================
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ====================================================================
+// INITIALIZE
+// ====================================================================
+// Build initial user state
+if (HAS_USER_DATA) {
+  rebuildUserState(0);
+  cacheStateIfNeeded(0);
+}
+updateScene(0, false);
+requestAnimationFrame(animate);
+
+</script>
+</body>
+</html>
