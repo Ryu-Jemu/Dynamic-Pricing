@@ -8,7 +8,6 @@ References:
 """
 from __future__ import annotations
 
-import copy
 import logging
 from pathlib import Path
 from typing import Any, Dict
@@ -27,23 +26,6 @@ def load_config(path: str | Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Config not found: {path}")
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-def save_config(cfg: Dict[str, Any], path: str | Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
-
-
-def merge_configs(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
-    merged = copy.deepcopy(base)
-    for k, v in over.items():
-        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
-            merged[k] = merge_configs(merged[k], v)
-        else:
-            merged[k] = copy.deepcopy(v)
-    return merged
 
 # ── Math ──────────────────────────────────────────────────────────────
 

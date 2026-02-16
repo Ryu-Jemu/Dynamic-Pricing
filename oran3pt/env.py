@@ -1,14 +1,20 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Constrained MDP  (§§3–11)
 
-REVISION 9 — Changes from v8:
+REVISION 10 — Changes from v9:
+  [EP1] 1-Cycle Continuous Episode Design      [Pardo ICML 2018; Wan arXiv 2025]
+        - episode_cycles 24→1, episode_mode="continuous"
+        - truncated=True (not terminated) at cycle boundary
+        - Population persists across reset; only billing accumulators reset
+        - obs[15] redefined: episode_progress → churn_rate_ema
+        - _total_steps global counter for warmup
+        - Eliminates value function bias from terminated=True at step 720
+  Prior revisions (v1–v9):
   [D1] NSACF-style admission control          [3GPP TS 23.501 §5.2.3; Caballero JSAC 2019]
   [D2] Hierarchical action timing              [Vezhnevets ICML 2017; Bacon AAAI 2017]
-  [D3] Hard capacity guard (traffic shedding)  [3GPP TS 23.501 §5.15; Samdanis CommMag 2016]
   [D4] Slice-specific QoS signal per user     [Kim & Yoon 2004; Ahn 2006]
   [D5] Observation dim 22 → 24                [Dulac-Arnold JMLR 2021]
   [D6] pviol_E EMA in obs[22]                 [Dulac-Arnold JMLR 2021]
-  Prior revisions (v1–v8):
   [M3] Convex SLA penalty for eMBB            [Tessler 2019; Paternain 2019]
   [M4] rho_U_max 0.60 → 0.35                 [Huang IoT-J 2020]
   [M5] beta_pop 0.1 → 0.3                    [Mguni 2019; Zheng 2022]
@@ -47,9 +53,8 @@ Revenue per step (§5.2 — online accrual):
   OverRev_t = Σ_s p_s^over · ΔOver_s(t)
 
 Cost per step (§9):
-  Cost_t = c_opex·N_active + c_energy·(L_eff_U+L_eff_E) + c_cac·N_join + SLA
+  Cost_t = c_opex·N_active + c_energy·(L_U+L_E) + c_cac·N_join + SLA
   [M3] SLA = λ_U·pviol_U + λ_E·pviol_E^γ  (convex)
-  [D3] L_eff = min(L, C) when hard_cap enabled
 
 Reward (§15 + §11b + §15c + §15d):
   reward = log_profit − smooth_penalty − retention_penalty
@@ -103,6 +108,12 @@ class OranSlicingPricingEnv(gym.Env):
         self.T: int = tc["steps_per_cycle"]
         self.n_cycles: int = tc["episode_cycles"]
         self.episode_len: int = self.T * self.n_cycles
+
+        # [EP1] Episode mode: "continuous" or "episodic" (legacy)
+        # [Pardo ICML 2018; Wan arXiv 2025]
+        self._episode_mode: str = tc.get("episode_mode", "episodic")
+        self._total_steps: int = 0       # global step counter (persists across resets)
+        self._first_reset_done: bool = False  # track if first reset has occurred
 
         # Action bounds (§4)
         ac = cfg["action"]
@@ -202,12 +213,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._pop_beta: float = pop_rw.get("beta_pop", 0.1)
         self._pop_target_ratio: float = pop_rw.get("target_ratio", 0.4)
 
-        # CLV (§11)
-        clv_cfg = cfg.get("clv", {})
-        self.clv_enabled: bool = clv_cfg.get("enabled", True)
-        self.clv_horizon: int = clv_cfg.get("horizon_months", 24)
-        self.clv_d: float = clv_cfg.get("discount_rate_monthly", 0.01)
-
         # ── [D1] Admission control (NSACF) ───────────────────────────
         # 3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019
         ac_cfg = cfg.get("admission_control", {})
@@ -225,11 +230,6 @@ class OranSlicingPricingEnv(gym.Env):
         # Vezhnevets et al. ICML 2017; Bacon et al. AAAI 2017
         ha_cfg = cfg.get("hierarchical_actions", {})
         self._hier_enabled: bool = ha_cfg.get("enabled", False)
-
-        # ── [D3] Hard capacity guard ─────────────────────────────────
-        # 3GPP TS 23.501 §5.15; Samdanis et al. IEEE CommMag 2016
-        ce_cfg = cfg.get("capacity_enforcement", {})
-        self._hard_cap_enabled: bool = ce_cfg.get("hard_cap", False)
 
         # Load users
         self._users_csv_path = users_csv
@@ -265,6 +265,7 @@ class OranSlicingPricingEnv(gym.Env):
         self._last_joined_ids: list = []    # [M13c]
         self._pviol_E_ema: float = 0.0     # [D6] EMA for obs trend
         self._lagrangian_boost: float = 1.0  # [D5] curriculum phase boost
+        self._churn_rate_ema: float = 0.0  # [EP1] churn rate EMA for obs[15]
 
     def _load_users(self, csv_path: Optional[str]) -> None:
         if csv_path is not None and Path(csv_path).exists():
@@ -285,7 +286,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._psens = df["price_sensitivity"].values.astype(np.float64)
         self._qsens = df["qos_sensitivity"].values.astype(np.float64)
         self._swcost = df["switching_cost"].values.astype(np.float64)
-        self._clv_dr = df["clv_discount_rate"].values.astype(np.float64)
         self._init_active = df["is_active_init"].values.astype(bool)
 
     # ── Public setters ────────────────────────────────────────────────
@@ -308,41 +308,71 @@ class OranSlicingPricingEnv(gym.Env):
               ) -> Tuple[np.ndarray, Dict[str, Any]]:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+
+        # [EP1] Continuous mode: preserve population and financial state
+        # across resets (billing-cycle boundaries). Full init only on first
+        # reset or in legacy episodic mode.
+        # [Pardo ICML 2018] — truncation boundary; [Wan arXiv 2025] — continuing
+        is_continuous = (self._episode_mode == "continuous"
+                         and self._first_reset_done)
+
         self.t = 0
-        self._active_mask = self._init_active.copy()
+
+        # Always reset billing accumulators (cycle boundary)
         self._cycle_usage_U = 0.0
         self._cycle_usage_E = 0.0
         self._prev_over_U = 0.0
         self._prev_over_E = 0.0
-        mid = (self._a_lo + self._a_hi) / 2.0
-        self._prev_action = mid.copy()
-        self._prev_revenue = 0.0
-        self._prev_cost = 0.0
-        self._prev_profit = 0.0
-        self._prev_n_join = 0
-        self._prev_n_churn = 0
-        self._prev_pviol_U = 0.0
-        self._prev_pviol_E = 0.0
-        self._prev_L_U = 0.0
-        self._prev_L_E = 0.0
-        self._prev_C_U = self.C_total * 0.5 * self.kappa_U
-        self._prev_C_E = self.C_total * 0.5
-        self._prev_over_rev_E = 0.0
-        self._prev_n_rejected = 0
-        self._cycle_pricing = mid[:4].copy()
         self._last_churned_ids = []   # [M13c]
         self._last_joined_ids = []    # [M13c]
-        self._pviol_E_ema = 0.0       # [D6]
+
+        if not is_continuous:
+            # Full reset — first call or episodic mode
+            self._active_mask = self._init_active.copy()
+            mid = (self._a_lo + self._a_hi) / 2.0
+            self._prev_action = mid.copy()
+            self._prev_revenue = 0.0
+            self._prev_cost = 0.0
+            self._prev_profit = 0.0
+            self._prev_n_join = 0
+            self._prev_n_churn = 0
+            self._prev_pviol_U = 0.0
+            self._prev_pviol_E = 0.0
+            self._prev_L_U = 0.0
+            self._prev_L_E = 0.0
+            self._prev_C_U = self.C_total * 0.5 * self.kappa_U
+            self._prev_C_E = self.C_total * 0.5
+            self._prev_over_rev_E = 0.0
+            self._prev_n_rejected = 0
+            self._cycle_pricing = mid[:4].copy()
+            self._pviol_E_ema = 0.0       # [D6]
+            self._churn_rate_ema = 0.0     # [EP1]
+        # else: continuous mode — population, prev_action, pviol_E_ema,
+        #       financial state, churn_rate_ema all persist
+
+        self._first_reset_done = True
         return self._build_obs(), {}
 
     def step(self, action: np.ndarray
              ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         self.t += 1
+        self._total_steps += 1    # [EP1] global counter persists across resets
         info = self._run_step(action)
         obs = self._build_obs()
         reward = info["reward"]
-        terminated = self.t >= self.episode_len
-        return obs, reward, terminated, False, info
+
+        # [EP1] Continuous mode: truncated=True (not terminated) at cycle end
+        # SB3 ReplayBuffer bootstraps V(s') for truncated transitions
+        # [Pardo ICML 2018; Gymnasium API]
+        done = self.t >= self.episode_len
+        if self._episode_mode == "continuous":
+            terminated = False
+            truncated = done
+        else:
+            terminated = done
+            truncated = False
+
+        return obs, reward, terminated, truncated, info
 
     # ── Action mapping ────────────────────────────────────────────────
 
@@ -461,11 +491,7 @@ class OranSlicingPricingEnv(gym.Env):
         C_U = max(C_U, 1e-6)
         C_E = max(C_E, 1e-6)
 
-        # [D3] Hard capacity guard — shed traffic exceeding capacity
-        L_U_eff = min(L_U, C_U) if self._hard_cap_enabled else L_U
-        L_E_eff = min(L_E, C_E) if self._hard_cap_enabled else L_E
-
-        # QoS violation — computed on raw load (not shed)
+        # QoS violation
         pviol_U = float(sigmoid(
             self.alpha_cong * (L_U / C_U - 1.0)))
         pviol_E = float(sigmoid(
@@ -473,6 +499,10 @@ class OranSlicingPricingEnv(gym.Env):
 
         # [D6] Update pviol_E exponential moving average (α=0.3)
         self._pviol_E_ema = 0.3 * pviol_E + 0.7 * self._pviol_E_ema
+
+        # [EP1] Update churn rate EMA for obs[15] (α=0.3)
+        churn_rate = n_churn / max(N_act, 1)
+        self._churn_rate_ema = 0.3 * churn_rate + 0.7 * self._churn_rate_ema
 
         # Revenue
         base_rev = (F_U * N_U + F_E * N_E) / self.T
@@ -489,9 +519,9 @@ class OranSlicingPricingEnv(gym.Env):
         over_rev = over_rev_U + over_rev_E
         revenue = base_rev + over_rev
 
-        # Cost — [D3] energy uses effective (served) load
+        # Cost
         cost_opex = self.c_opex * N_act
-        cost_energy = self.c_energy * (L_U_eff + L_E_eff)
+        cost_energy = self.c_energy * (L_U + L_E)
         cost_cac = self.c_cac * n_join
         sla_penalty = (self.lambda_U * pviol_U
                        + self.lambda_E * (pviol_E ** self._gamma_sla_E))
@@ -509,7 +539,9 @@ class OranSlicingPricingEnv(gym.Env):
                 self._smooth_weights * (a_norm - prev_norm) ** 2))
 
         retention_penalty = 0.0
-        if (self._clv_rs_enabled and self.t > self._clv_rs_warmup
+        # [EP1] Use _total_steps for warmup — self.t resets every episode
+        if (self._clv_rs_enabled
+                and self._total_steps > self._clv_rs_warmup
                 and N_act > 0):
             retention_penalty = self._clv_rs_alpha * (
                 n_churn / max(N_act, 1))
@@ -559,8 +591,6 @@ class OranSlicingPricingEnv(gym.Env):
             "n_join": n_join, "n_churn": n_churn,
             "n_rejected": n_rejected,
             "L_U": L_U, "L_E": L_E,
-            "L_U_effective": L_U_eff,
-            "L_E_effective": L_E_eff,
             "C_U": C_U, "C_E": C_E,
             "pviol_U": pviol_U, "pviol_E": pviol_E,
             "base_rev": base_rev, "over_rev": over_rev,
@@ -761,7 +791,14 @@ class OranSlicingPricingEnv(gym.Env):
                       ).astype(np.float32)
 
         obs[14] = ((self.t - 1) % self.T) / max(self.T, 1)
-        obs[15] = self.t / max(self.episode_len, 1)
+        # [EP1] obs[15]: churn_rate_ema (continuous) or episode_progress (episodic)
+        # In continuous mode, episode_progress is spurious (no seasonality).
+        # churn_rate_ema provides actionable market signal.
+        # [Pardo ICML 2018; Dulac-Arnold JMLR 2021]
+        if self._episode_mode == "continuous":
+            obs[15] = self._churn_rate_ema
+        else:
+            obs[15] = self.t / max(self.episode_len, 1)
         obs[16] = self._cycle_usage_U / max(
             self.Q_U * max(N_U, 1), 1e-6)
         obs[17] = self._cycle_usage_E / max(

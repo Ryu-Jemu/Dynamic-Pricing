@@ -1,11 +1,14 @@
 """
 Unit tests for O-RAN 3-Part Tariff environment.
 
-REVISION 9 — Changes from v8:
+REVISION 10 — Changes from v9:
+  [EP1] T16 — Continuous episode mode tests (truncation, population
+       continuity, global counter, obs[15] churn EMA, backward compat)
+  Updated T1 tests for continuous mode compatibility
+  Prior revisions (v1–v9):
   [D1–D5] v9 design tests (T12) — admission control, hierarchical actions,
        hard capacity guard, 24D observation, backward compat
   [T13] Dashboard smoke tests (PNG + 3D)
-  Prior revisions (v1–v8):
   [M9] v8 tests (T11): curriculum fraction, convex SLA, Lagrangian,
        rho_U bound, pop_bonus scale, eval diagnostics
   [R4] Per-dimension smoothing tests
@@ -16,7 +19,7 @@ REVISION 9 — Changes from v8:
   [E6] CLV reward shaping tests
   [E8] Stronger smoothing tests
 
-Test groups (72 tests, 15 classes):
+Test groups (77 tests, 16 classes):
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
   T3  Market dynamics (join/churn, conservation)
@@ -32,6 +35,7 @@ Test groups (72 tests, 15 classes):
   T13 Dashboard smoke tests (PNG + 3D)
   T14 [M13] Spatial visualization & per-user events
   T15 [D1-D7] Revision design (slice QoS, PID Lagrangian, 3-phase curriculum)
+  T16 [EP1] Continuous episode mode (truncation, pop continuity, obs[15])
 """
 from __future__ import annotations
 
@@ -101,6 +105,13 @@ class TestEnvBasics:
         assert done, f"Episode did not terminate in {steps} steps"
         assert steps == env.episode_len, \
             f"Terminated at step {steps}, expected {env.episode_len}"
+        # [EP1] In continuous mode, done signal should be truncated, not terminated
+        if env._episode_mode == "continuous":
+            assert truncated and not terminated, \
+                "Continuous mode should use truncated=True"
+        else:
+            assert terminated and not truncated, \
+                "Episodic mode should use terminated=True"
 
     def test_episode_length_matches_config(self, env, cfg):
         expected = cfg["time"]["steps_per_cycle"] * cfg["time"]["episode_cycles"]
@@ -458,17 +469,13 @@ class TestV7Enhancements:
 # T11  v8 enhancements
 # =====================================================================
 class TestV8Enhancements:
-    def test_T11_1_curriculum_fraction(self, cfg):
-        """[M2] Curriculum phase1_fraction is a float in (0, 1)."""
-        cfg_copy = {**cfg}
-        cfg_copy["training"] = {**cfg.get("training", {})}
-        cfg_copy["training"]["total_timesteps"] = 100
-        cfg_copy["training"]["curriculum"] = {"enabled": True, "phase1_fraction": 0.20}
-        fraction = cfg_copy["training"]["curriculum"]["phase1_fraction"]
-        total = cfg_copy["training"]["total_timesteps"]
-        phase1_steps = int(total * fraction)
-        assert phase1_steps == 20, \
-            f"phase1_steps should be 20 (20% of 100), got {phase1_steps}"
+    def test_T11_1_curriculum_phases(self, cfg):
+        """[D5] Curriculum phases fractions sum to 1.0."""
+        phases = cfg.get("training", {}).get("curriculum", {}).get("phases", [])
+        assert len(phases) >= 2, "Curriculum must have at least 2 phases"
+        total_frac = sum(p["fraction"] for p in phases)
+        assert abs(total_frac - 1.0) < 1e-6, \
+            f"Phase fractions must sum to 1.0, got {total_frac}"
 
     def test_T11_2_convex_sla_penalty(self, cfg):
         """[M3] SLA penalty with gamma_sla_E=2.0 produces convex curve."""
@@ -641,46 +648,13 @@ class TestV9Design:
         _, _, _, _, info2 = env.step(a2)
         assert abs(info2["rho_U"] - info1["rho_U"]) > 0.05
 
-    # ── [D3] Hard capacity guard ──────────────────────────────────────
-
-    def test_T12_9_effective_load_capped(self, cfg):
-        """[D3] L_effective ≤ C when hard_cap enabled."""
-        cfg_copy = {**cfg}
-        cfg_copy["capacity_enforcement"] = {"hard_cap": True}
-        env = OranSlicingPricingEnv(cfg_copy, seed=42)
-        env.reset(seed=42)
-
-        for _ in range(60):
-            action = env.action_space.sample()
-            _, _, term, _, info = env.step(action)
-            assert info["L_E_effective"] <= info["C_E"] + 1e-6
-            assert info["L_U_effective"] <= info["C_U"] + 1e-6
-            if term:
-                break
-
-    def test_T12_10_hard_cap_pviol_uses_raw_load(self, cfg):
-        """[D3] QoS penalty uses raw load, not capped."""
-        cfg_copy = {**cfg}
-        cfg_copy["capacity_enforcement"] = {"hard_cap": True}
-        env = OranSlicingPricingEnv(cfg_copy, seed=42)
-        env.reset(seed=42)
-
-        high_rho = np.array([0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-        for _ in range(30):
-            _, _, term, _, info = env.step(high_rho)
-            if info["L_E"] > info["C_E"]:
-                assert info["pviol_E"] > 0.5
-            if term:
-                break
-
     # ── Backward compat ───────────────────────────────────────────────
 
     def test_T12_11_disabled_features_backward_compat(self, cfg):
-        """All v9 features can be disabled."""
+        """v9 features can be disabled."""
         cfg_copy = {**cfg}
         cfg_copy["admission_control"] = {"enabled": False}
         cfg_copy["hierarchical_actions"] = {"enabled": False}
-        cfg_copy["capacity_enforcement"] = {"hard_cap": False}
         cfg_copy["observation"] = {**cfg.get("observation", {}), "dim": 22}
 
         env = OranSlicingPricingEnv(cfg_copy, seed=42)
@@ -690,7 +664,6 @@ class TestV9Design:
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
         assert info["n_rejected"] == 0
-        assert info["L_E_effective"] == info["L_E"]
 
     def test_T12_12_numerical_safety_v9(self, env):
         """Full episode with v9 features, no NaN/Inf."""
@@ -918,6 +891,116 @@ class TestRevisionDesign:
         # Boosted
         env.set_lagrangian_boost(2.0)
         assert env._lagrangian_boost == 2.0
+
+
+# =====================================================================
+# T16  [EP1] Continuous episode mode
+# =====================================================================
+class TestContinuousEpisodeMode:
+
+    @pytest.fixture
+    def cont_cfg(self, cfg):
+        """Config with episode_mode=continuous, episode_cycles=1."""
+        import copy
+        c = copy.deepcopy(cfg)
+        c["time"]["episode_cycles"] = 1
+        c["time"]["episode_mode"] = "continuous"
+        return c
+
+    @pytest.fixture
+    def cont_env(self, cont_cfg):
+        return OranSlicingPricingEnv(cont_cfg, seed=42)
+
+    @pytest.fixture
+    def epis_cfg(self, cfg):
+        """Config with episode_mode=episodic (legacy)."""
+        import copy
+        c = copy.deepcopy(cfg)
+        c["time"]["episode_cycles"] = 1
+        c["time"]["episode_mode"] = "episodic"
+        return c
+
+    @pytest.fixture
+    def epis_env(self, epis_cfg):
+        return OranSlicingPricingEnv(epis_cfg, seed=42)
+
+    def test_T16_1_truncated_not_terminated(self, cont_env):
+        """[EP1] Continuous mode returns truncated=True, terminated=False."""
+        cont_env.reset(seed=42)
+        terminated, truncated = False, False
+        for _ in range(cont_env.episode_len):
+            _, _, terminated, truncated, _ = cont_env.step(
+                cont_env.action_space.sample())
+        assert truncated is True, "Should be truncated at episode end"
+        assert terminated is False, "Should NOT be terminated in continuous mode"
+
+    def test_T16_2_episodic_backward_compat(self, epis_env):
+        """[EP1] Episodic mode returns terminated=True, truncated=False."""
+        epis_env.reset(seed=42)
+        terminated, truncated = False, False
+        for _ in range(epis_env.episode_len):
+            _, _, terminated, truncated, _ = epis_env.step(
+                epis_env.action_space.sample())
+        assert terminated is True, "Should be terminated in episodic mode"
+        assert truncated is False, "Should NOT be truncated in episodic mode"
+
+    def test_T16_3_population_persists_across_reset(self, cont_env):
+        """[EP1] Population state survives reset in continuous mode."""
+        cont_env.reset(seed=42)
+        # Run one full episode (30 steps with market dynamics)
+        for _ in range(cont_env.episode_len):
+            cont_env.step(cont_env.action_space.sample())
+        pop_before = int(cont_env._active_mask.sum())
+
+        # Reset — population should persist
+        cont_env.reset()
+        pop_after = int(cont_env._active_mask.sum())
+        assert pop_after == pop_before, \
+            f"Population should persist: {pop_before} → {pop_after}"
+
+    def test_T16_4_population_resets_in_episodic(self, epis_env, epis_cfg):
+        """[EP1] Population resets to N_active_init in episodic mode."""
+        epis_env.reset(seed=42)
+        for _ in range(epis_env.episode_len):
+            epis_env.step(epis_env.action_space.sample())
+
+        epis_env.reset()
+        pop_after = int(epis_env._active_mask.sum())
+        expected = epis_cfg["population"]["N_active_init"]
+        assert pop_after == expected, \
+            f"Population should reset to {expected}, got {pop_after}"
+
+    def test_T16_5_total_steps_increments(self, cont_env):
+        """[EP1] _total_steps increments across resets."""
+        cont_env.reset(seed=42)
+        for _ in range(cont_env.episode_len):
+            cont_env.step(cont_env.action_space.sample())
+        assert cont_env._total_steps == cont_env.episode_len
+
+        cont_env.reset()
+        for _ in range(cont_env.episode_len):
+            cont_env.step(cont_env.action_space.sample())
+        assert cont_env._total_steps == 2 * cont_env.episode_len, \
+            f"_total_steps should be {2 * cont_env.episode_len}, " \
+            f"got {cont_env._total_steps}"
+
+    def test_T16_6_obs15_churn_ema_in_continuous(self, cont_env):
+        """[EP1] obs[15] = churn_rate_ema in continuous mode."""
+        cont_env.reset(seed=42)
+        for _ in range(10):
+            obs, _, _, _, _ = cont_env.step(cont_env.action_space.sample())
+        # In continuous mode, obs[15] should be churn_rate_ema (small value)
+        assert np.isfinite(obs[15])
+        assert 0.0 <= obs[15] <= 1.0 + 1e-6, \
+            f"obs[15] churn_rate_ema out of range: {obs[15]}"
+
+    def test_T16_7_obs15_episode_progress_in_episodic(self, epis_env):
+        """[EP1] obs[15] = episode_progress in episodic mode."""
+        epis_env.reset(seed=42)
+        obs, _, _, _, _ = epis_env.step(epis_env.action_space.sample())
+        expected = 1.0 / epis_env.episode_len
+        assert abs(obs[15] - expected) < 1e-4, \
+            f"obs[15] should be episode progress {expected}, got {obs[15]}"
 
 
 if __name__ == "__main__":

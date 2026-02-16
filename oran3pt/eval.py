@@ -1,13 +1,17 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 9 — Changes from v8:
+REVISION 10 — Changes from v9:
+  [EP1] Chained episode evaluation for continuous mode
+        In continuous mode (episode_cycles=1), chains 24 episodes into
+        one repeat to produce 720-row rollout logs identical to v9 format.
+        Population state persists across chained episodes.
+        [Pardo ICML 2018; Gupta JSR 2006 — 24-month CLV horizon]
+  Prior revisions:
   [M13d] Per-user event logging (user_events_log.csv) for 3D dashboard
          [Dulac-Arnold 2021 — per-user observability]
   [M8] Derived diagnostic columns (utilisation, margins, pop delta)
        [Dulac-Arnold 2021 — observability for real-world RL]
-  Prior revisions:
-  Updated for new info keys (pop_bonus, over_rev_E, lagrangian_penalty)
   [E9] Multi-seed model selection (evaluates best model across seeds)
   [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
@@ -39,9 +43,15 @@ logger = logging.getLogger("oran3pt.eval")
 
 
 def evaluate_episode(env: OranSlicingPricingEnv,
-                     model, repeat_id: int
+                     model, repeat_id: int,
+                     n_chains: int = 1,
                      ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Run one evaluation episode, returning (records, user_events).
+    """Run evaluation episodes, returning (records, user_events).
+
+    [EP1] In continuous mode, chains `n_chains` consecutive episodes
+    into one repeat. Population persists across episodes via env's
+    continuous reset. Step numbers are renumbered globally (1..n_chains*T)
+    so rollout_log.csv has the same 720-row format as v9.
 
     [M13d] user_events contains per-user join/churn events for the
     3D dashboard visualization.
@@ -49,6 +59,7 @@ def evaluate_episode(env: OranSlicingPricingEnv,
     obs, _ = env.reset()
     records: List[Dict[str, Any]] = []
     user_events: List[Dict[str, Any]] = []
+    global_step = 0
 
     # [M13d] Record initial active users
     for uid in range(env.N_total):
@@ -57,30 +68,43 @@ def evaluate_episode(env: OranSlicingPricingEnv,
                 "step": 0, "event_type": "initial_active", "user_id": int(uid),
             })
 
-    done = False
-    while not done:
-        if model is not None:
-            action, _ = model.predict(obs, deterministic=True)
-        else:
-            action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
+    for chain_idx in range(n_chains):
+        if chain_idx > 0:
+            # In continuous mode, reset preserves population state
+            obs, _ = env.reset()
 
-        # [M13d] Extract user events before DataFrame conversion
-        churned = info.pop("churned_user_ids", [])
-        joined = info.pop("joined_user_ids", [])
-        step_num = info["step"]
-        for uid in churned:
-            user_events.append({
-                "step": step_num, "event_type": "churn", "user_id": int(uid),
-            })
-        for uid in joined:
-            user_events.append({
-                "step": step_num, "event_type": "join", "user_id": int(uid),
-            })
+        done = False
+        while not done:
+            if model is not None:
+                action, _ = model.predict(obs, deterministic=True)
+            else:
+                action = env.action_space.sample()
+            obs, reward, terminated, truncated, info = env.step(action)
 
-        info["repeat"] = repeat_id
-        records.append(info)
-        done = terminated or truncated
+            # [M13d] Extract user events before DataFrame conversion
+            churned = info.pop("churned_user_ids", [])
+            joined = info.pop("joined_user_ids", [])
+
+            # [EP1] Renumber step globally across chained episodes
+            global_step += 1
+            info["step"] = global_step
+            info["cycle"] = (global_step - 1) // env.T + 1
+
+            for uid in churned:
+                user_events.append({
+                    "step": global_step, "event_type": "churn",
+                    "user_id": int(uid),
+                })
+            for uid in joined:
+                user_events.append({
+                    "step": global_step, "event_type": "join",
+                    "user_id": int(uid),
+                })
+
+            info["repeat"] = repeat_id
+            records.append(info)
+            done = terminated or truncated
+
     return records, user_events
 
 
@@ -107,10 +131,22 @@ def run_evaluation(cfg: Dict[str, Any],
         except Exception as e:
             logger.warning("Could not load model (%s) — using random.", e)
 
+    # [EP1] In continuous mode (episode_cycles=1), chain 24 episodes
+    # per repeat to produce 720 rows matching v9 rollout format.
+    # CLV computation uses (step-1)//T grouping which works correctly.
+    # [Gupta JSR 2006] — 24-month CLV horizon
+    episode_mode = cfg.get("time", {}).get("episode_mode", "episodic")
+    if episode_mode == "continuous":
+        clv_horizon = cfg.get("clv", {}).get("horizon_months", 24)
+        n_chains = clv_horizon  # 24 episodes chained = 24 billing cycles
+    else:
+        n_chains = 1
+
     all_records: List[Dict[str, Any]] = []
     all_user_events: dict[int, List[Dict[str, Any]]] = {}  # [M13d] per-repeat
     for rep in tqdm(range(n_repeats), desc="Eval repeats"):
-        records, user_events = evaluate_episode(env, model, repeat_id=rep)
+        records, user_events = evaluate_episode(
+            env, model, repeat_id=rep, n_chains=n_chains)
         all_records.extend(records)
         all_user_events[rep] = user_events
 

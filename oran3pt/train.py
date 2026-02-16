@@ -1,11 +1,15 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
-REVISION 8 — Changes from v7:
+REVISION 10 — Changes from v9:
+  [EP1] 1-Cycle continuous episode mode support
+        SB3 auto-handles truncated=True via ReplayBuffer
+        n_eval_episodes increased (5→20) for shorter episodes
+        [Pardo ICML 2018; Wan arXiv 2025]
+  Prior revisions (v1–v9):
   [M2] Curriculum: fraction-based phase boundary  [Narvekar 2020; Bengio 2009]
   [M6] Lagrangian QoS callback for pviol_E        [Tessler 2019; Stooke 2020]
   [M7] train_freq/gradient_steps 1→4              [Fedus 2020]
-  Prior revisions (v1–v7):
   [R3] Curriculum learning (Phase 1: no churn/join; Phase 2: full dynamics)
        [Narvekar et al., JMLR 2020; Bengio et al., ICML 2009]
   [R8] Higher initial entropy coefficient for broader exploration
@@ -258,17 +262,12 @@ def train_single_seed(cfg: Dict[str, Any],
 
     curriculum_cfg = tc.get("curriculum", {})
     curriculum_enabled = curriculum_cfg.get("enabled", False)
-    # [D5] 3-phase curriculum support with backward compat
-    curriculum_phases = curriculum_cfg.get("phases", None)
-    if curriculum_phases is None:
-        # Legacy 2-phase format
-        phase1_fraction = curriculum_cfg.get("phase1_fraction", 0.20)
-        curriculum_phases = [
-            {"fraction": phase1_fraction, "churn_join": False,
-             "lagrangian_boost": 0.0},
-            {"fraction": 1.0 - phase1_fraction, "churn_join": True,
-             "lagrangian_boost": 1.0},
-        ]
+    # [D5] 3-phase curriculum
+    curriculum_phases = curriculum_cfg.get("phases", [
+        {"fraction": 0.15, "churn_join": False, "lagrangian_boost": 0.0},
+        {"fraction": 0.25, "churn_join": True, "lagrangian_boost": 2.0},
+        {"fraction": 0.60, "churn_join": True, "lagrangian_boost": 1.0},
+    ])
 
     ent_coef_init = tc.get("ent_coef_init", None)
     ent_coef = tc.get("ent_coef", "auto")
@@ -394,26 +393,6 @@ def train_single_seed(cfg: Dict[str, Any],
                         "Kp=%.4f  Ki=%.4f  Kd=%.4f  λ_max=%.1f  freq=%d",
                         lag_cb._Kp, lag_cb._Ki, lag_cb._Kd,
                         lag_cb._lambda_max, lag_cb._update_freq)
-
-        ent_warmup = tc.get("ent_coef_warmup_steps", 0)
-        if ent_coef_init is not None and ent_coef == "auto" and ent_warmup > 0:
-            class _EntropyTransitionCallback(BaseCallback):
-                def __init__(self, warmup: int):
-                    super().__init__()
-                    self._warmup = warmup
-                    self._transitioned = False
-
-                def _on_step(self) -> bool:
-                    if (not self._transitioned
-                            and self.num_timesteps >= self._warmup):
-                        logger.info(
-                            "[R8] Entropy warmup complete at step %d. "
-                            "Current ent_coef will be managed by SAC auto-tuning.",
-                            self.num_timesteps)
-                        self._transitioned = True
-                    return True
-
-            callbacks.append(_EntropyTransitionCallback(ent_warmup))
 
         model.learn(total_timesteps=total_timesteps,
                     callback=callbacks,

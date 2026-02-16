@@ -26,15 +26,14 @@
 #   [R1–R8] Training / observation / reward improvements
 # ================================================================
 
-# ── §1  Scenario ──
-scenario:
-  name: "5G_ORAN_1Cell_3PT"
-  slices: ["URLLC", "eMBB"]
-
 # ── §3.1  Time axis ──
+# [EP1] episode_cycles 24→1, episode_mode continuous  [Pardo ICML 2018; Wan arXiv 2025]
+# 1-cycle episodes with truncated=True; population state persists across resets.
+# CLV 24-month horizon is post-hoc (eval.py chains 24 episodes per repeat).
 time:
   steps_per_cycle: 30
-  episode_cycles: 24
+  episode_cycles: 1               # [EP1] 24→1  [Pardo 2018; Wan 2025]
+  episode_mode: "continuous"      # [EP1] "continuous" or "episodic" (legacy)
 
 # ── §4  Action bounds (5-D continuous) ──
 action:
@@ -81,11 +80,9 @@ demand_elasticity:
 # ── §7  RAN / PRB capacity ──
 # C_total=400GB: 100MHz NR, 273 PRBs  [3GPP TS 38.306 R16]
 # kappa_U=1.2: URLLC scheduling gain  [3GPP TR 38.913 §7.1; Bennis IEEE Comms 2018]
+# bandwidth_mhz=100, scs_khz=30, prb_total=273 → C_total derivation only
 radio:
-  bandwidth_mhz: 100
-  scs_khz: 30
-  prb_total: 273
-  C_total_gb_per_step: 400.0
+  C_total_gb_per_step: 400.0       # Derived: 100MHz NR, 273 PRBs [3GPP TS 38.306 R16]
   kappa_U: 1.2
 
 # ── §8  QoS / SLA violation ──
@@ -123,7 +120,7 @@ clv:
 clv_reward_shaping:
   enabled: true
   alpha_retention: 2.0
-  warmup_steps: 100
+  warmup_steps: 0              # [EP1] 100→0; uses _total_steps internally
 
 # ── §13  Population ──
 # N_total=500: single gNB suburban cell  [3GPP TR 38.913 §6.1 Table 6.1-1]
@@ -170,7 +167,7 @@ training:
   train_freq: 4                 # [M7]  [Fedus 2020]
   gradient_steps: 4             # [M7]
   eval_freq: 10000
-  n_eval_episodes: 5
+  n_eval_episodes: 20            # [EP1] 5→20; compensate shorter 30-step episodes
   n_seeds: 5
   curriculum:
     enabled: true
@@ -231,15 +228,6 @@ admission_control:
 hierarchical_actions:
   enabled: true
 
-# ── §18  [D3] Hard capacity guard ──
-# [3GPP TS 23.501 §5.15; Samdanis et al. IEEE CommMag 2016]
-# When enabled, L_effective = min(L, C) for energy cost.
-# QoS penalty still uses raw load ratio.
-capacity_enforcement:
-  hard_cap: false               # Default off — soft penalty preferred
-
 # ── Calibration targets ──
 calibration:
-  demand_tolerance: 0.10
   churn_target_monthly: 0.03
-  join_target_monthly: 0.05
