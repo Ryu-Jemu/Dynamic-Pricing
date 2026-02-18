@@ -268,6 +268,17 @@ class OranSlicingPricingEnv(gym.Env):
             "revenue_ratio_threshold", 0.05)
         self._sla_aw_scale: float = sla_aw_cfg.get("penalty_scale", 0.1)
 
+        # ── [FIX-S4] Domain Randomization ─────────────────────────
+        # Randomize initial active population count for robustness
+        # [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
+        pop_cfg = cfg.get("population", {})
+        dr_cfg = pop_cfg.get("domain_randomization", {})
+        self._dr_enabled: bool = dr_cfg.get("enabled", False)
+        _n_init = pop_cfg.get("N_active_init", 200)
+        _dr_range = dr_cfg.get("N_active_init_range", [_n_init, _n_init])
+        self._dr_N_range: Tuple[int, int] = (int(_dr_range[0]),
+                                              int(_dr_range[1]))
+
         # Load users
         self._users_csv_path = users_csv
         self._load_users(users_csv)
@@ -367,6 +378,25 @@ class OranSlicingPricingEnv(gym.Env):
         if not is_continuous:
             # Full reset — first call or episodic mode
             self._active_mask = self._init_active.copy()
+            # [FIX-S4] Domain Randomization on initial population
+            if self._dr_enabled:
+                n_target = int(self._rng.integers(
+                    self._dr_N_range[0], self._dr_N_range[1] + 1))
+                current_n = int(self._active_mask.sum())
+                if n_target > current_n:
+                    inactive_idx = np.where(~self._active_mask)[0]
+                    to_add = min(n_target - current_n, len(inactive_idx))
+                    if to_add > 0:
+                        chosen = self._rng.choice(
+                            inactive_idx, size=to_add, replace=False)
+                        self._active_mask[chosen] = True
+                elif n_target < current_n:
+                    active_idx = np.where(self._active_mask)[0]
+                    to_rm = min(current_n - n_target, len(active_idx))
+                    if to_rm > 0:
+                        chosen = self._rng.choice(
+                            active_idx, size=to_rm, replace=False)
+                        self._active_mask[chosen] = False
             mid = (self._a_lo + self._a_hi) / 2.0
             self._prev_action = mid.copy()
             self._prev_revenue = 0.0

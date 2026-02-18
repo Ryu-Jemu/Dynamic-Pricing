@@ -21,5 +21,8 @@ plotly>=5.18.0
 # Progress
 tqdm>=4.65.0
 
+# Testing
+pytest>=7.0.0
+
 # PyTorch (MPS on Apple Silicon)
 torch>=2.0.0

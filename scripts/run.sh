@@ -51,54 +51,58 @@ echo "Recreating virtual environment..."
 rm -rf .venv
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip -q
+
+echo "Clearing pip cache (prevents AssertionError from corrupted wheels)..."
+pip cache purge 2>/dev/null || true
 
 echo "Installing dependencies..."
-pip install -r requirements.txt 2>&1 | tee /tmp/pip_install.log | tail -5
+pip install -r requirements.txt 2>&1 | tee /tmp/pip_install.log
+PIP_EXIT=${PIPESTATUS[0]}
+if [ "$PIP_EXIT" -ne 0 ]; then
+    echo ""
+    echo "ERROR: pip install failed (exit code $PIP_EXIT). Last 10 lines:"
+    tail -10 /tmp/pip_install.log
+    echo ""
+    echo "Attempting fresh install without cache..."
+    pip install --no-cache-dir -r requirements.txt 2>&1 | tee /tmp/pip_install.log
+    PIP_EXIT=${PIPESTATUS[0]}
+    if [ "$PIP_EXIT" -ne 0 ]; then
+        echo "ERROR: pip install failed again. Aborting."
+        exit 1
+    fi
+fi
 echo ""
 
-# Verify critical packages
+# Verify ALL critical packages (not just SB3)
 echo "Verifying critical packages..."
 python -c "
 import sys
 errors = []
-
-try:
-    import stable_baselines3
-    print(f'  stable-baselines3 {stable_baselines3.__version__}')
-except ImportError as e:
-    errors.append(f'stable-baselines3: {e}')
-    print(f'  stable-baselines3 MISSING: {e}')
-
-try:
-    import torch
-    from oran3pt.utils import select_device
-    dev = select_device()
-    print(f'  torch {torch.__version__} (device: {dev})')
-except ImportError as e:
-    errors.append(f'torch: {e}')
-    print(f'  torch MISSING: {e}')
-
-try:
-    import gymnasium
-    print(f'  gymnasium {gymnasium.__version__}')
-except ImportError as e:
-    errors.append(f'gymnasium: {e}')
-    print(f'  gymnasium MISSING: {e}')
+for mod, name in [
+    ('numpy', 'numpy'), ('scipy', 'scipy'), ('pandas', 'pandas'),
+    ('torch', 'torch'), ('gymnasium', 'gymnasium'),
+    ('stable_baselines3', 'stable-baselines3'),
+    ('matplotlib', 'matplotlib'), ('yaml', 'pyyaml'),
+]:
+    try:
+        m = __import__(mod)
+        ver = getattr(m, '__version__', 'OK')
+        print(f'  {name} {ver}')
+    except ImportError as e:
+        errors.append(name)
+        print(f'  {name} MISSING: {e}')
 
 if errors:
     print()
-    print('  Some packages failed. Attempting targeted install...')
+    print(f'  FATAL: {len(errors)} missing packages: {errors}')
     sys.exit(1)
 else:
     print('  All critical packages verified.')
 " || {
     echo ""
-    echo "Attempting targeted SB3 install..."
-    pip install "stable-baselines3[extra]>=2.3.0" --force-reinstall 2>&1 | tail -5
-    python -c "import stable_baselines3; print(f'  SB3 {stable_baselines3.__version__} installed')" || {
-        echo "  SB3 install failed. Training will use random baseline."
-    }
+    echo "ERROR: Critical packages missing after install. Aborting."
+    echo "Check /tmp/pip_install.log for details."
+    exit 1
 }
 echo ""
 

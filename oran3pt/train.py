@@ -165,11 +165,18 @@ if _SB3_AVAILABLE:
                 cumulative += int(p["fraction"] * total_timesteps)
                 self._boundaries.append(cumulative)
             self._current_phase = 0
+            # [FIX-S3] Boost decay state for gradual phase transitions
+            self._prev_boost: float = phases[0].get("lagrangian_boost", 0.0)
+            self._decay_start: int = 0
+            self._decay_steps: int = 0
+            self._decay_target: float = 0.0
 
         def _on_step(self) -> bool:
             while (self._current_phase < len(self._phases) - 1
                    and self.num_timesteps
                    >= self._boundaries[self._current_phase + 1]):
+                prev_boost = self._phases[self._current_phase].get(
+                    "lagrangian_boost", 1.0)
                 self._current_phase += 1
                 phase_cfg = self._phases[self._current_phase]
                 # [F6] Use .unwrapped to bypass SB3 Monitor wrapper
@@ -178,15 +185,50 @@ if _SB3_AVAILABLE:
                 if hasattr(env, 'set_curriculum_phase'):
                     phase_val = 0 if phase_cfg.get("churn_join", True) else 1
                     env.set_curriculum_phase(phase_val)
-                if hasattr(env, 'set_lagrangian_boost'):
-                    env.set_lagrangian_boost(
-                        phase_cfg.get("lagrangian_boost", 1.0))
+                # [FIX-S3] Check for boost_decay_steps
+                target_boost = phase_cfg.get("lagrangian_boost", 1.0)
+                decay_steps = phase_cfg.get("boost_decay_steps", 0)
+                if decay_steps > 0 and prev_boost != target_boost:
+                    self._prev_boost = prev_boost
+                    self._decay_start = self.num_timesteps
+                    self._decay_steps = decay_steps
+                    self._decay_target = target_boost
+                    # Start at prev_boost; linear interpolation below
+                    if hasattr(env, 'set_lagrangian_boost'):
+                        env.set_lagrangian_boost(prev_boost)
+                else:
+                    self._decay_steps = 0   # no decay for this phase
+                    if hasattr(env, 'set_lagrangian_boost'):
+                        env.set_lagrangian_boost(target_boost)
                 logger.info(
                     "[D5] Curriculum: → Phase %d at step %d "
-                    "(churn_join=%s, lagrangian_boost=%.1f)",
+                    "(churn_join=%s, lagrangian_boost=%.1f%s)",
                     self._current_phase + 1, self.num_timesteps,
                     phase_cfg.get("churn_join", True),
-                    phase_cfg.get("lagrangian_boost", 1.0))
+                    target_boost,
+                    f", decay from {prev_boost:.1f} over {decay_steps} steps"
+                    if decay_steps > 0 else "")
+
+            # [FIX-S3] Gradual boost decay interpolation
+            if self._decay_steps > 0:
+                elapsed = self.num_timesteps - self._decay_start
+                if elapsed < self._decay_steps:
+                    alpha = elapsed / self._decay_steps
+                    current_boost = (self._prev_boost
+                                     + alpha * (self._decay_target
+                                                - self._prev_boost))
+                    raw_env = self.training_env.envs[0]
+                    env = getattr(raw_env, 'unwrapped', raw_env)
+                    if hasattr(env, 'set_lagrangian_boost'):
+                        env.set_lagrangian_boost(current_boost)
+                else:
+                    # Decay complete
+                    raw_env = self.training_env.envs[0]
+                    env = getattr(raw_env, 'unwrapped', raw_env)
+                    if hasattr(env, 'set_lagrangian_boost'):
+                        env.set_lagrangian_boost(self._decay_target)
+                    self._decay_steps = 0
+
             return True
 
     class _LagrangianPIDCallback(BaseCallback):

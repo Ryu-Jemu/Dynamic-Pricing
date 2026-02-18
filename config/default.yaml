@@ -151,6 +151,11 @@ population:
     price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
+  # [FIX-S4] Domain Randomization on population initialization
+  # [Tobin IROS 2017; Rajeswaran NeurIPS 2017; Henderson AAAI 2018]
+  domain_randomization:
+    enabled: true
+    N_active_init_range: [160, 240]   # ±20% around N_active_init=200
 
 # ── §12  Training ──
 training:
@@ -185,6 +190,7 @@ training:
       - fraction: 0.60          # Phase 3: full optimization
         churn_join: true
         lagrangian_boost: 1.0
+        boost_decay_steps: 5000   # [FIX-S3] Phase 2 boost(2.0)에서 선형 감소  [Narvekar 2020; Achiam 2017]
   # [OPT-C] Early stopping  [Prechelt 2002; Henderson 2018]
   # [ME-5] min_timesteps = 60% × total_timesteps = Phase 3 시작(40%) + 20% 추가 학습 보장
   early_stopping:
@@ -218,14 +224,14 @@ population_reward:
 # [D2] PID control replaces simple dual ascent  [Stooke ICLR 2020]
 lagrangian_qos:
   enabled: true
-  pviol_E_threshold: 0.10       # [F3] 0.15→0.10; train-eval robustness margin  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
+  pviol_E_threshold: 0.08       # [FIX-S2] 0.10→0.08; 20% 추가 마진 for train-eval shift  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
   Kp: 0.05                      # [D2] Proportional gain  [Stooke 2020]
   Ki: 0.02                      # [F4] 0.005→0.02; 4× increase for timely constraint enforcement  [Stooke 2020; Mao 2025]
   Kd: 0.01                      # [D2] Derivative gain
-  lambda_max: 10.0               # [D2] 5.0→10.0  [Boyd 2004]
+  lambda_max: 20.0               # [FIX-S1] 10.0→20.0; λ 포화 해소, penalty headroom 확보  [Boyd 2004; Stooke 2020]
   lambda_min: 0.5                # [FIX-M3] 0.1→0.5; penalty at pviol=0.2: 0.5×0.1=0.05 (2.8% of reward range)  [Paternain CDC 2019; TAC 2022]
   update_freq: 200               # [D2] 1000→200  [Stooke 2020]
-  eval_lambda_floor: 1.0         # [FIX-C3] Minimum λ during eval  [Tessler 2019 §5; Tobin IROS 2017]
+  eval_lambda_floor: 2.0         # [FIX-S5] 1.0→2.0; eval 시 최소 QoS 인센티브 강화  [Tessler 2019 §5; Tobin IROS 2017]
 
 # ── §16  [D1] Admission control (NSACF) ──
 # [3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019]

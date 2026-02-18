@@ -895,16 +895,24 @@ class TestContinuousEpisodeMode:
             f"Population should persist: {pop_before} → {pop_after}"
 
     def test_T16_4_population_resets_in_episodic(self, epis_env, epis_cfg):
-        """[EP1] Population resets to N_active_init in episodic mode."""
+        """[EP1] Population resets in episodic mode (within DR range if enabled)."""
         epis_env.reset(seed=42)
         for _ in range(epis_env.episode_len):
             epis_env.step(epis_env.action_space.sample())
 
         epis_env.reset()
         pop_after = int(epis_env._active_mask.sum())
-        expected = epis_cfg["population"]["N_active_init"]
-        assert pop_after == expected, \
-            f"Population should reset to {expected}, got {pop_after}"
+        # [FIX-S4] With domain randomization, population resets within range
+        dr_cfg = epis_cfg.get("population", {}).get(
+            "domain_randomization", {})
+        if dr_cfg.get("enabled", False):
+            lo, hi = dr_cfg["N_active_init_range"]
+            assert lo <= pop_after <= hi, \
+                f"Population should be in [{lo}, {hi}], got {pop_after}"
+        else:
+            expected = epis_cfg["population"]["N_active_init"]
+            assert pop_after == expected, \
+                f"Population should reset to {expected}, got {pop_after}"
 
     def test_T16_5_total_steps_increments(self, cont_env):
         """[EP1] _total_steps increments across resets."""
@@ -1697,7 +1705,7 @@ class TestStructuralImprovements:
             pytest.skip("SB3 not available")
         lag = cfg.get("lagrangian_qos", {})
         cb = _LagrangianPIDCallback(
-            lambda_max=10.0, lambda_min=0.5)
+            lambda_max=20.0, lambda_min=0.5)
         assert cb.lambda_val == 0.5, \
             f"Initial lambda should be lambda_min=0.5, got {cb.lambda_val}"
         assert cb._lambda_min == 0.5
@@ -1831,11 +1839,11 @@ class TestStructuralImprovements:
     # ── F3: pviol_E threshold conservative ─────────────────────────────
 
     def test_T23_17_pviol_threshold_conservative(self, cfg):
-        """[F3] pviol_E_threshold ≤ 0.10 for train-eval robustness margin.
+        """[FIX-S2] pviol_E_threshold ≤ 0.08 for train-eval robustness margin.
         [Tobin IROS 2017; Rajeswaran NeurIPS 2017]"""
         threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.15)
-        assert threshold <= 0.10, \
-            f"pviol_E_threshold should be ≤ 0.10 for eval margin, got {threshold}"
+        assert threshold <= 0.08, \
+            f"pviol_E_threshold should be ≤ 0.08 for eval margin, got {threshold}"
 
     # ── F4: Ki adequate for timely enforcement ─────────────────────────
 
@@ -1879,7 +1887,7 @@ class TestV53Fixes:
         eval_env.reset(seed=42)
         cb = _LagrangianPIDCallback(
             threshold=0.10, Kp=0.05, Ki=0.02, Kd=0.01,
-            lambda_max=10.0, lambda_min=0.5,
+            lambda_max=20.0, lambda_min=0.5,
             eval_env=eval_env)
         # Directly set lambda and verify propagation path
         target_lambda = 2.5
@@ -1895,7 +1903,7 @@ class TestV53Fixes:
             from oran3pt.train import _LagrangianPIDCallback
         except ImportError:
             pytest.skip("SB3 not available")
-        cb = _LagrangianPIDCallback(lambda_max=10.0, lambda_min=0.5)
+        cb = _LagrangianPIDCallback(lambda_max=20.0, lambda_min=0.5)
         assert cb._eval_env is None
         assert cb.lambda_val == 0.5
 
@@ -1907,10 +1915,10 @@ class TestV53Fixes:
             from oran3pt.train import _LagrangianPIDCallback
         except ImportError:
             pytest.skip("SB3 not available")
-        cb = _LagrangianPIDCallback(lambda_max=10.0, Ki=0.02,
+        cb = _LagrangianPIDCallback(lambda_max=20.0, Ki=0.02,
                                      lambda_min=0.5)
-        assert cb._integral_min == pytest.approx(-0.5), \
-            f"integral_min should be -0.5, got {cb._integral_min}"
+        assert cb._integral_min == pytest.approx(-1.0), \
+            f"integral_min should be -1.0, got {cb._integral_min}"
         assert abs(cb._integral_min) < abs(cb._integral_max)
 
     # ── FIX-C3: eval lambda floor ────────────────────────────────
@@ -1978,6 +1986,124 @@ class TestV53Fixes:
         assert cb.lambda_val >= 0.5, \
             f"Initial lambda should be >= 0.5, got {cb.lambda_val}"
         assert cb._lambda_min >= 0.5
+
+
+# =====================================================================
+# T25  v5.5 학습 안정성 및 Train-Eval 일반화 개선
+# =====================================================================
+class TestV55Improvements:
+    """Tests for v5.5 fixes: lambda_max headroom, threshold margin,
+    boost decay, domain randomization, eval lambda floor.
+
+    References:
+      [Boyd 2004]       — Dual variable headroom
+      [Tobin IROS 2017] — Domain randomization, conservative margins
+      [Narvekar 2020]   — Gradual curriculum transitions
+      [Henderson 2018]  — Multi-seed, initialization diversity
+    """
+
+    # ── FIX-S1: lambda_max headroom ─────────────────────────────────
+
+    def test_T25_1_lambda_max_headroom(self, cfg):
+        """[FIX-S1] lambda_max >= 20.0 for penalty headroom.
+        [Boyd & Vandenberghe 2004; Stooke ICLR 2020 §3.2]"""
+        lag = cfg.get("lagrangian_qos", {})
+        assert lag.get("lambda_max", 0) >= 20.0, \
+            f"lambda_max should be >= 20.0, got {lag.get('lambda_max')}"
+
+    def test_T25_2_integral_bounds_scaled(self, cfg):
+        """[FIX-S1] Integral bounds scale with lambda_max=20.0."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            lambda_max=lag["lambda_max"], Ki=lag["Ki"],
+            lambda_min=lag.get("lambda_min", 0.5))
+        expected_max = lag["lambda_max"] / lag["Ki"]
+        expected_min = -lag["lambda_max"] * 0.05
+        assert cb._integral_max == pytest.approx(expected_max), \
+            f"integral_max mismatch: {cb._integral_max} vs {expected_max}"
+        assert cb._integral_min == pytest.approx(expected_min), \
+            f"integral_min mismatch: {cb._integral_min} vs {expected_min}"
+
+    # ── FIX-S2: Conservative threshold ──────────────────────────────
+
+    def test_T25_3_threshold_conservative(self, cfg):
+        """[FIX-S2] pviol_E_threshold <= 0.08 for train-eval margin.
+        [Tobin IROS 2017; Rajeswaran NeurIPS 2017]"""
+        threshold = cfg.get("lagrangian_qos", {}).get(
+            "pviol_E_threshold", 0.15)
+        assert threshold <= 0.08, \
+            f"pviol_E_threshold should be <= 0.08, got {threshold}"
+
+    # ── FIX-S3: Boost decay configuration ───────────────────────────
+
+    def test_T25_4_boost_decay_config(self, cfg):
+        """[FIX-S3] At least one phase has boost_decay_steps > 0.
+        [Narvekar JMLR 2020; Achiam ICML 2017]"""
+        phases = cfg.get("training", {}).get("curriculum", {}).get(
+            "phases", [])
+        has_decay = any(
+            p.get("boost_decay_steps", 0) > 0 for p in phases)
+        assert has_decay, \
+            "At least one curriculum phase should have boost_decay_steps > 0"
+
+    def test_T25_5_boost_decay_callback_attrs(self, cfg):
+        """[FIX-S3] CurriculumCallback has boost decay state."""
+        try:
+            from oran3pt.train import _CurriculumCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        phases = cfg["training"]["curriculum"]["phases"]
+        total = cfg["training"]["total_timesteps"]
+        cb = _CurriculumCallback(phases, total)
+        assert hasattr(cb, '_prev_boost'), \
+            "CurriculumCallback should have _prev_boost attribute"
+        assert hasattr(cb, '_decay_steps'), \
+            "CurriculumCallback should have _decay_steps attribute"
+
+    # ── FIX-S4: Domain randomization ────────────────────────────────
+
+    def test_T25_6_domain_randomization_config(self, cfg):
+        """[FIX-S4] Domain randomization config exists and valid.
+        [Tobin IROS 2017; Rajeswaran NeurIPS 2017]"""
+        dr = cfg.get("population", {}).get("domain_randomization", {})
+        assert dr.get("enabled") is True, \
+            "domain_randomization should be enabled"
+        rng = dr.get("N_active_init_range", [])
+        assert len(rng) == 2, \
+            f"N_active_init_range should have 2 elements, got {len(rng)}"
+        N_init = cfg["population"]["N_active_init"]
+        assert rng[0] <= N_init <= rng[1], \
+            f"N_active_init={N_init} should be within range {rng}"
+
+    def test_T25_7_domain_randomization_varies_population(self, cfg):
+        """[FIX-S4] Different seeds produce different initial populations.
+        [Tobin IROS 2017; Henderson AAAI 2018]"""
+        populations = set()
+        for seed in range(20):
+            env = OranSlicingPricingEnv(cfg, seed=seed)
+            env.reset(seed=seed)
+            populations.add(int(env._active_mask.sum()))
+        assert len(populations) >= 3, \
+            f"DR should vary population; got {len(populations)} unique values"
+
+    # ── Full integration ────────────────────────────────────────────
+
+    def test_T25_8_full_episode_no_nan(self, cfg):
+        """All v5.5 fixes active, full episode, no NaN/Inf."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert np.all(np.isfinite(obs)), "Initial obs has NaN/Inf"
+        for _ in range(env.episode_len):
+            obs, reward, term, trunc, info = env.step(
+                env.action_space.sample())
+            assert np.all(np.isfinite(obs)), "Obs has NaN/Inf"
+            assert np.isfinite(reward), f"Reward is {reward}"
+            if term or trunc:
+                break
 
 
 if __name__ == "__main__":
