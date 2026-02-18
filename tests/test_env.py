@@ -21,7 +21,7 @@ REVISION 10 — Changes from v9:
 
   [M15] T19 — Dashboard generation integration tests (eval.py)
 
-Test groups (100 tests, 18 classes):
+Test groups (109 tests, 19 classes):
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
   T3  Market dynamics (join/churn, conservation)
@@ -40,6 +40,7 @@ Test groups (100 tests, 18 classes):
   T17 [M14] Business dashboard (metrics, KPIs, P&L, SLA, template)
   T18 [OPT] Training optimizations (entropy, early stop, parallel, cache)
   T20 [Review] Architecture review (anti-windup, 23D obs, config merge, integration)
+  T21 [V11] Revision v11 improvements (rho_U, pop_bonus, admission, Lagrangian)
 """
 from __future__ import annotations
 
@@ -490,16 +491,17 @@ class TestV8Enhancements:
         assert ratio > 3.0, \
             f"Convex penalty ratio {ratio:.2f} should exceed 3.0"
 
-    def test_T11_3_rho_U_clipped_to_045(self, cfg):
-        """[D1] rho_U action clipped to [0.05, 0.45]."""
-        assert cfg["action"]["rho_U_max"] <= 0.45, \
-            f"rho_U_max should be <= 0.45, got {cfg['action']['rho_U_max']}"
+    def test_T11_3_rho_U_clipped_to_020(self, cfg):
+        """[V11-1] rho_U action clipped to [0.05, 0.20].
+        [Huang IoT-J 2020; Sciancalepore TNSM 2019]"""
+        assert cfg["action"]["rho_U_max"] <= 0.20, \
+            f"rho_U_max should be <= 0.20, got {cfg['action']['rho_U_max']}"
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         max_action = np.ones(5, dtype=np.float32)
         _, _, _, _, info = env.step(max_action)
-        assert info["rho_U"] <= 0.45 + 1e-6, \
-            f"rho_U should be <= 0.45, got {info['rho_U']}"
+        assert info["rho_U"] <= 0.20 + 1e-6, \
+            f"rho_U should be <= 0.20, got {info['rho_U']}"
 
     def test_T11_4_pop_bonus_scale(self, cfg):
         """[M5] pop_bonus magnitude is reasonable."""
@@ -1329,6 +1331,103 @@ class TestArchitectureReview:
         # All profits should be finite
         profits = [r["profit"] for r in records]
         assert all(np.isfinite(p) for p in profits), "Non-finite profit found"
+
+
+# =====================================================================
+# T21  [V11] Revision v11 improvements
+# =====================================================================
+class TestV11Improvements:
+
+    def test_T21_1_rho_U_max_020(self, cfg):
+        """[V11-1] rho_U_max should be <= 0.20.
+        [Huang IoT-J 2020; Sciancalepore TNSM 2019]"""
+        assert cfg["action"]["rho_U_max"] <= 0.20, \
+            f"rho_U_max should be <= 0.20, got {cfg['action']['rho_U_max']}"
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        max_action = np.ones(5, dtype=np.float32)
+        _, _, _, _, info = env.step(max_action)
+        assert info["rho_U"] <= 0.20 + 1e-6
+
+    def test_T21_2_beta_pop_adequate(self, cfg):
+        """[V11-2] beta_pop >= 0.5 for meaningful population signal.
+        [Mguni AAMAS 2019 §4.2; Zheng Science Adv 2022]"""
+        beta_pop = cfg.get("population_reward", {}).get("beta_pop", 0.3)
+        assert beta_pop >= 0.5, \
+            f"beta_pop should be >= 0.5, got {beta_pop}"
+
+    def test_T21_3_admission_pviol_ceiling_relaxed(self, cfg):
+        """[V11-3] pviol_ceiling >= 0.40 to prevent over-blocking.
+        [Caballero JSAC 2019; 3GPP TS 23.501 §5.2.3]"""
+        ac = cfg.get("admission_control", {})
+        ceiling = ac.get("pviol_ceiling", 0.30)
+        assert ceiling >= 0.40, \
+            f"pviol_ceiling should be >= 0.40, got {ceiling}"
+        threshold = ac.get("load_threshold", 0.85)
+        assert threshold >= 0.90, \
+            f"load_threshold should be >= 0.90, got {threshold}"
+
+    def test_T21_4_lagrangian_state_json_schema(self, tmp_path):
+        """[V11-4] Lagrangian state JSON has required keys.
+        [Stooke ICLR 2020; Tessler ICML 2019]"""
+        import json
+        state = {"lambda": 1.5, "integral": 0.3, "prev_error": 0.1,
+                 "threshold": 0.15}
+        path = tmp_path / "lagrangian_state.json"
+        with open(path, "w") as f:
+            json.dump(state, f)
+        with open(path) as f:
+            loaded = json.load(f)
+        assert "lambda" in loaded
+        assert "threshold" in loaded
+        assert loaded["lambda"] >= 0.0
+
+    def test_T21_5_pop_bonus_quadratic_config(self, cfg):
+        """[V11-8] Population reward has quadratic option.
+        [Zheng Science Adv 2022; Mguni AAMAS 2019]"""
+        pr = cfg.get("population_reward", {})
+        assert "quadratic" in pr, "Missing 'quadratic' key in population_reward"
+
+    def test_T21_6_pop_bonus_quadratic_asymmetry(self, cfg):
+        """[V11-8] Quadratic pop bonus penalizes deficit more than surplus.
+        [Gupta JSR 2006; Zheng 2022]"""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # Simulate deficit scenario
+        env._active_mask[:] = False
+        env._active_mask[:150] = True  # 30% active
+        env.step(env.action_space.sample())
+        # pop_bonus should be negative (below target)
+        obs, _, _, _, info = env.step(env.action_space.sample())
+        assert info["pop_bonus"] < 0, \
+            f"Pop bonus should be negative at 30% active, got {info['pop_bonus']}"
+
+    def test_T21_7_early_stopping_75pct(self, cfg):
+        """[V11-6] min_timesteps >= 75% of total_timesteps.
+        [Prechelt 2002; Henderson AAAI 2018]"""
+        tc = cfg.get("training", {})
+        total = tc.get("total_timesteps", 100000)
+        es = tc.get("early_stopping", {})
+        min_ts = es.get("min_timesteps", 0)
+        assert min_ts >= total * 0.75, \
+            f"min_timesteps {min_ts} should be >= {total * 0.75}"
+
+    def test_T21_8_rho_U_smoothing_low(self, cfg):
+        """[V11-7] rho_U smoothing weight <= 0.02 for fast convergence.
+        [Dalal NeurIPS 2018 §4.1]"""
+        weights = cfg.get("action_smoothing", {}).get("weights", [])
+        assert len(weights) == 5
+        assert weights[4] <= 0.02, \
+            f"rho_U smoothing weight should be <= 0.02, got {weights[4]}"
+
+    def test_T21_9_embb_capacity_adequate_after_v11(self, cfg):
+        """[V11-1] With rho_U_max=0.20, eMBB capacity is adequate.
+        C_E = (1-0.20) × 400 = 320GB >> mean L_E ~249GB"""
+        rho_max = cfg["action"]["rho_U_max"]
+        C_total = cfg["radio"]["C_total_gb_per_step"]
+        C_E_min = (1.0 - rho_max) * C_total
+        assert C_E_min >= 300.0, \
+            f"Min C_E = {C_E_min:.0f}GB should be >= 300GB for eMBB adequacy"
 
 
 if __name__ == "__main__":

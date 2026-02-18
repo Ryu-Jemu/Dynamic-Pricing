@@ -212,6 +212,7 @@ class OranSlicingPricingEnv(gym.Env):
         self._pop_reward_enabled: bool = pop_rw.get("enabled", False)
         self._pop_beta: float = pop_rw.get("beta_pop", 0.1)
         self._pop_target_ratio: float = pop_rw.get("target_ratio", 0.4)
+        self._pop_quadratic: bool = pop_rw.get("quadratic", False)  # [V11-8]
 
         # ── [D1] Admission control (NSACF) ───────────────────────────
         # 3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019
@@ -554,9 +555,18 @@ class OranSlicingPricingEnv(gym.Env):
 
         pop_bonus = 0.0
         if self._pop_reward_enabled:
-            pop_bonus = self._pop_beta * (
-                N_act / max(self.N_total, 1)
-                - self._pop_target_ratio)
+            ratio_diff = (N_act / max(self.N_total, 1)
+                          - self._pop_target_ratio)
+            if self._pop_quadratic:
+                # [V11-8] Asymmetric quadratic  [Zheng 2022; Mguni 2019]
+                # Below target: stronger penalty (×3 amplification)
+                # Above target: moderate linear reward
+                if ratio_diff < 0:
+                    pop_bonus = self._pop_beta * ratio_diff * abs(ratio_diff) * 3.0
+                else:
+                    pop_bonus = self._pop_beta * ratio_diff
+            else:
+                pop_bonus = self._pop_beta * ratio_diff
 
         lagrangian_penalty = 0.0
         if self._lagrangian_enabled and self._lagrangian_lambda > 0.0:

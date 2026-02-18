@@ -114,6 +114,20 @@ def run_evaluation(cfg: Dict[str, Any],
         except Exception as e:
             logger.warning("Could not load model (%s) — using random.", e)
 
+    # [V11-5] Restore Lagrangian state from training
+    # [Stooke ICLR 2020; Paternain CDC 2019]
+    lag_path = Path(output_dir) / "lagrangian_state.json"
+    if lag_path.exists():
+        import json
+        with open(lag_path) as f:
+            lag_state = json.load(f)
+        lambda_val = lag_state.get("lambda", 0.0)
+        env.set_lagrangian_lambda(lambda_val)
+        logger.info("[V11-5] Lagrangian λ=%.4f restored from %s",
+                    lambda_val, lag_path)
+    else:
+        logger.info("[V11-5] No lagrangian_state.json found; λ=0.0 (default)")
+
     # [EP1] In continuous mode (episode_cycles=1), chain 24 episodes
     # per repeat to produce 720 rows matching v9 rollout format.
     # CLV computation uses (step-1)//T grouping which works correctly.

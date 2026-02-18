@@ -20,4 +20,5 @@ training:
   eval_freq: 10000             # More frequent evaluation with larger budget
   n_eval_episodes: 20          # [EP1] Sufficient for short-episode variance
   early_stopping:
-    min_timesteps: 600000      # [ME-5] 60% × 1M = Phase 3 start + 200K learning
+    min_timesteps: 750000      # [V11-6] 600K→750K; 0.75 × 1M  [Prechelt 2002]
+    patience: 15               # [V11-6] 10→15  [Henderson AAAI 2018]

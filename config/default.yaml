@@ -46,7 +46,9 @@ action:
   p_over_E_min: 200.0
   p_over_E_max: 3000.0
   rho_U_min: 0.05
-  rho_U_max: 0.45              # [D1] 0.35→0.45  [Huang IoT-J 2020; 3GPP TS 23.501]
+  rho_U_max: 0.20              # [V11-1] 0.45→0.20  [Huang IoT-J 2020; Sciancalepore TNSM 2019]
+                                # URLLC load ~11GB vs C_total 400GB (2.7%)
+                                # rho_U=0.20 → C_U=96GB (8.8× headroom)
 
 # ── §5  3-Part tariff allowances ──
 # Q_U=5GB: Korean URLLC average  [MSIT 2023; ITU DDI 2023]
@@ -179,8 +181,8 @@ training:
   # [ME-5] min_timesteps = 60% × total_timesteps = Phase 3 시작(40%) + 20% 추가 학습 보장
   early_stopping:
     enabled: true
-    patience: 10               # 10 evals × eval_freq(20K) = 200K steps 무개선 시 중지
-    min_timesteps: 60000       # [ME-5] 50K→60K; 0.60 × 100K — Phase 3 충분 학습 보장
+    patience: 15               # [V11-6] 10→15  [Henderson AAAI 2018]
+    min_timesteps: 75000       # [V11-6] 60K→75K; 0.75 × 100K  [Prechelt 2002]
     min_improvement: 0.01      # 1% 상대 개선 임계값
 
 # ── §3.2  Observation  [ME-1] 23-D ──
@@ -195,13 +197,14 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.03]   # [D1] rho_U 0.01→0.03  [Dalal 2018]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.01]   # [V11-7] rho_U: 0.03→0.01  [Dalal NeurIPS 2018 §4.1]
 
 # ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 0.3                 # [M5]  [Mguni 2019; Zheng 2022]
+  beta_pop: 0.6                 # [V11-2] 0.3→0.6  [Mguni 2019 §4.2; Zheng 2022 ExtData Fig.3]
   target_ratio: 0.4
+  quadratic: true               # [V11-8] Asymmetric quadratic  [Zheng 2022; Mguni 2019]
 
 # ── §15d  Lagrangian QoS constraint  [M6][D2] ──
 # [D2] PID control replaces simple dual ascent  [Stooke ICLR 2020]
@@ -219,8 +222,8 @@ lagrangian_qos:
 # Gating: reject new joins if projected load > threshold or pviol > ceiling
 admission_control:
   enabled: true
-  load_threshold: 0.85          # Reject if load_ratio would exceed 85%
-  pviol_ceiling: 0.30           # Block all joins if pviol_E > 0.30
+  load_threshold: 0.92          # [V11-3] 0.85→0.92  [Samdanis CommMag 2016]
+  pviol_ceiling: 0.50           # [V11-3] 0.30→0.50  [Caballero JSAC 2019]
   per_user_load_estimate_E_gb: 1.5    # eMBB p50 daily traffic
   per_user_load_estimate_U_gb: 0.15   # URLLC p50 daily traffic
 

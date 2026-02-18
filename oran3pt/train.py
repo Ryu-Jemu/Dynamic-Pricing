@@ -500,6 +500,27 @@ def train_single_seed(cfg: Dict[str, Any],
 
         final_path = out / f"final_model_seed{seed}"
         model.save(str(final_path))
+
+        # [V11-4] Save Lagrangian PID state for eval restoration
+        # [Stooke ICLR 2020 §3.2; Tessler ICML 2019]
+        lagrangian_state_path = out / f"lagrangian_state_seed{seed}.json"
+        lag_state = {"lambda": 0.0, "integral": 0.0, "prev_error": 0.0,
+                     "threshold": 0.15}
+        for cb in callbacks:
+            if isinstance(cb, _LagrangianPIDCallback):
+                lag_state = {
+                    "lambda": cb.lambda_val,
+                    "integral": cb._error_integral,
+                    "prev_error": cb._prev_error,
+                    "threshold": cb._threshold,
+                }
+                break
+        import json
+        with open(lagrangian_state_path, "w") as f:
+            json.dump(lag_state, f, indent=2)
+        logger.info("[V11-4] Lagrangian state saved: λ=%.4f → %s",
+                    lag_state["lambda"], lagrangian_state_path)
+
         csvlog.close()
         logger.info("Seed %d done.  Best -> %s.zip  Final -> %s.zip  "
                      "best_reward=%.4f", seed, best_model_name, final_path,
@@ -620,6 +641,13 @@ def train(cfg: Dict[str, Any],
 
     if best_path.exists() and best_path.resolve() != canonical.resolve():
         shutil.copy2(best_path, canonical)
+
+    # [V11-4] Also copy Lagrangian state for best seed
+    best_lag = out / f"lagrangian_state_seed{best_seed}.json"
+    canonical_lag = out / "lagrangian_state.json"
+    if best_lag.exists() and best_lag.resolve() != canonical_lag.resolve():
+        shutil.copy2(best_lag, canonical_lag)
+        logger.info("[V11-4] Lagrangian state → %s", canonical_lag)
 
     logger.info("[OPT-H] Best model: seed %d (reward=%.4f) -> %s",
                best_seed, best_reward, canonical)

@@ -73,23 +73,29 @@ Bill_{u,s} = F_s + p_s^over × max(0, D_{u,s} − Q_s)
 
 ## Observation Space (§3.2)
 
-22-dimensional normalized vector (expanded from 20D in v6):
+23-dimensional normalized vector [ME-1]:
 
 | Index | Feature | Normalization |
 |-------|---------|--------------|
-| 0–1 | Active / inactive user fractions | /N_total |
-| 2–3 | Previous join / churn counts | /N_total×0.05 |
-| 4–5 | QoS violation probs (URLLC, eMBB) | [0, 1] |
-| 6–8 | Revenue / cost / profit (normalized) | /scale |
-| 9–13 | Previous action components | affine to [0, 1] |
-| 14 | Billing cycle phase | (t mod T) / T |
-| 15 | Episode progress | t / episode_len |
-| 16 | URLLC allowance utilization | cycle_usage / (Q_U×N_U) [E4] |
-| 17 | eMBB allowance utilization | cycle_usage / (Q_E×N_E) [E4] |
-| 18 | URLLC load factor | L_U / C_U [E4] |
-| 19 | eMBB load factor | L_E / C_E [E4] |
-| **20** | **eMBB overage revenue rate** | over_rev_E / (p_over_E × N_E) [R5] |
-| **21** | **Days remaining in cycle** | (T − cycle_step) / T [R5] |
+| 0 | Active user fraction | N_active / N_total |
+| 1 | Normalized joins | n_join / (N_total × 0.05) |
+| 2 | Normalized churns | n_churn / (N_total × 0.05) |
+| 3 | URLLC QoS violation | pviol_U ∈ [0, 1] |
+| 4 | eMBB QoS violation | pviol_E ∈ [0, 1] |
+| 5 | Normalized revenue | revenue / scale |
+| 6 | Normalized cost | cost / scale |
+| 7 | Normalized profit | profit / scale |
+| 8–12 | Previous action (5D) | affine to [0, 1] |
+| 13 | Billing cycle phase | (t mod T) / T |
+| 14 | Churn rate EMA [EP1] | churn_rate_ema |
+| 15 | URLLC allowance utilization | cycle_usage_U / (Q_U × N_U) |
+| 16 | eMBB allowance utilization | cycle_usage_E / (Q_E × N_E) |
+| 17 | URLLC load factor | L_U / C_U |
+| 18 | eMBB load factor | L_E / C_E |
+| 19 | eMBB overage revenue rate | over_rev_E / (p_over_E × N_E) |
+| 20 | Days remaining in cycle | (T − cycle_step) / T |
+| 21 | pviol_E EMA [D6] | EMA(α=0.3) ∈ [0, 1] |
+| 22 | eMBB load headroom [D5] | max(0, 1 − L_E / C_E) |
 
 ## Reward (§15)
 
