@@ -130,19 +130,25 @@ def run_evaluation(cfg: Dict[str, Any],
         except Exception as e:
             logger.warning("Could not load model (%s) — using random.", e)
 
-    # [V11-5] Restore Lagrangian state from training
-    # [Stooke ICLR 2020; Paternain CDC 2019]
+    # [V11-5][FIX-C3] Restore Lagrangian state with eval lambda floor
+    # Training lambda may be low after convergence; eval distribution shift
+    # requires a higher baseline for constraint satisfaction.
+    # [Stooke ICLR 2020; Tessler ICML 2019 §5; Tobin IROS 2017]
+    lag_cfg = cfg.get("lagrangian_qos", {})
+    eval_lambda_floor = lag_cfg.get("eval_lambda_floor", 1.0)
     lag_path = Path(output_dir) / "lagrangian_state.json"
     if lag_path.exists():
         import json
         with open(lag_path) as f:
             lag_state = json.load(f)
-        lambda_val = lag_state.get("lambda", 0.0)
+        lambda_val = max(lag_state.get("lambda", 0.0), eval_lambda_floor)
         env.set_lagrangian_lambda(lambda_val)
-        logger.info("[V11-5] Lagrangian λ=%.4f restored from %s",
-                    lambda_val, lag_path)
+        logger.info("[FIX-C3] Lagrangian λ=%.4f restored (floor=%.1f) from %s",
+                    lambda_val, eval_lambda_floor, lag_path)
     else:
-        logger.info("[V11-5] No lagrangian_state.json found; λ=0.0 (default)")
+        env.set_lagrangian_lambda(eval_lambda_floor)
+        logger.info("[FIX-C3] No lagrangian_state.json; using floor=%.1f",
+                    eval_lambda_floor)
 
     # [EP1] In continuous mode (episode_cycles=1), chain 24 episodes
     # per repeat to produce 720 rows matching v9 rollout format.

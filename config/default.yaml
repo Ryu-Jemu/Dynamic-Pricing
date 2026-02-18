@@ -46,10 +46,10 @@ action:
   p_over_U_max: 5000.0
   p_over_E_min: 500.0             # [PR-BOUNDS] 200→500 [Tirole 1988: marginal cost floor]
   p_over_E_max: 3000.0
-  rho_U_min: 0.05
-  rho_U_max: 0.20              # [V11-1] 0.45→0.20  [Huang IoT-J 2020; Sciancalepore TNSM 2019]
-                                # URLLC load ~11GB vs C_total 400GB (2.7%)
-                                # rho_U=0.20 → C_U=96GB (8.8× headroom)
+  rho_U_min: 0.03              # [FIX-M1] 0.05→0.03; C_U=14.4GB (1.2× URLLC load)
+  rho_U_max: 0.12              # [FIX-M1] 0.20→0.12; C_E≥352GB guaranteed
+                                # URLLC load ~12GB, C_U at rho=0.12 = 57.6GB (4.8× headroom)
+                                # [Dulac-Arnold JMLR 2021 Challenge #6; Sciancalepore TNSM 2019]
 
 # ── §5  3-Part tariff allowances ──
 # Q_U=5GB: Korean URLLC average  [MSIT 2023; ITU DDI 2023]
@@ -223,8 +223,9 @@ lagrangian_qos:
   Ki: 0.02                      # [F4] 0.005→0.02; 4× increase for timely constraint enforcement  [Stooke 2020; Mao 2025]
   Kd: 0.01                      # [D2] Derivative gain
   lambda_max: 10.0               # [D2] 5.0→10.0  [Boyd 2004]
-  lambda_min: 0.1                # [I-1b] Minimum λ ensures QoS incentive  [Paternain CDC 2019; TAC 2022]
+  lambda_min: 0.5                # [FIX-M3] 0.1→0.5; penalty at pviol=0.2: 0.5×0.1=0.05 (2.8% of reward range)  [Paternain CDC 2019; TAC 2022]
   update_freq: 200               # [D2] 1000→200  [Stooke 2020]
+  eval_lambda_floor: 1.0         # [FIX-C3] Minimum λ during eval  [Tessler 2019 §5; Tobin IROS 2017]
 
 # ── §16  [D1] Admission control (NSACF) ──
 # [3GPP TS 23.501 §5.2.3; Caballero et al. IEEE JSAC 2019]
@@ -247,8 +248,8 @@ hierarchical_actions:
 # [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016; Huang IoT-J 2020]
 capacity_guard:
   enabled: true
-  embb_load_ratio_max: 0.95      # Soft ceiling for L_E/C_E
-  penalty_scale: 0.02            # Quadratic penalty coefficient
+  embb_load_ratio_max: 0.85      # [FIX-M2] 0.95→0.85; activates near operating point  [3GPP TS 23.501 §5.15.7]
+  penalty_scale: 0.10            # [FIX-M2] 0.02→0.10; 5× for meaningful gradient  [Samdanis CommMag 2016]
 
 # ── §19  [I-5a] SLA Awareness Penalty ──
 # Additional reward shaping when SLA penalty exceeds revenue threshold

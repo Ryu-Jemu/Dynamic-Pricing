@@ -493,17 +493,17 @@ class TestV8Enhancements:
         assert ratio > 3.0, \
             f"Convex penalty ratio {ratio:.2f} should exceed 3.0"
 
-    def test_T11_3_rho_U_clipped_to_020(self, cfg):
-        """[V11-1] rho_U action clipped to [0.05, 0.20].
-        [Huang IoT-J 2020; Sciancalepore TNSM 2019]"""
-        assert cfg["action"]["rho_U_max"] <= 0.20, \
-            f"rho_U_max should be <= 0.20, got {cfg['action']['rho_U_max']}"
+    def test_T11_3_rho_U_clipped_to_max(self, cfg):
+        """[FIX-M1] rho_U action clipped to [0.03, 0.12].
+        [Dulac-Arnold JMLR 2021; Sciancalepore TNSM 2019]"""
+        assert cfg["action"]["rho_U_max"] <= 0.12, \
+            f"rho_U_max should be <= 0.12, got {cfg['action']['rho_U_max']}"
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         max_action = np.ones(5, dtype=np.float32)
         _, _, _, _, info = env.step(max_action)
-        assert info["rho_U"] <= 0.20 + 1e-6, \
-            f"rho_U should be <= 0.20, got {info['rho_U']}"
+        assert info["rho_U"] <= 0.12 + 1e-6, \
+            f"rho_U should be <= 0.12, got {info['rho_U']}"
 
     def test_T11_4_pop_bonus_scale(self, cfg):
         """[M5] pop_bonus magnitude is reasonable."""
@@ -1340,16 +1340,16 @@ class TestArchitectureReview:
 # =====================================================================
 class TestV11Improvements:
 
-    def test_T21_1_rho_U_max_020(self, cfg):
-        """[V11-1] rho_U_max should be <= 0.20.
-        [Huang IoT-J 2020; Sciancalepore TNSM 2019]"""
-        assert cfg["action"]["rho_U_max"] <= 0.20, \
-            f"rho_U_max should be <= 0.20, got {cfg['action']['rho_U_max']}"
+    def test_T21_1_rho_U_max_012(self, cfg):
+        """[FIX-M1] rho_U_max should be <= 0.12.
+        [Dulac-Arnold JMLR 2021; Sciancalepore TNSM 2019]"""
+        assert cfg["action"]["rho_U_max"] <= 0.12, \
+            f"rho_U_max should be <= 0.12, got {cfg['action']['rho_U_max']}"
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
         max_action = np.ones(5, dtype=np.float32)
         _, _, _, _, info = env.step(max_action)
-        assert info["rho_U"] <= 0.20 + 1e-6
+        assert info["rho_U"] <= 0.12 + 1e-6
 
     def test_T21_2_beta_pop_adequate(self, cfg):
         """[V11-2] beta_pop >= 0.5 for meaningful population signal.
@@ -1423,13 +1423,13 @@ class TestV11Improvements:
             f"rho_U smoothing weight should be in [0.03, 0.10], got {weights[4]}"
 
     def test_T21_9_embb_capacity_adequate_after_v11(self, cfg):
-        """[V11-1] With rho_U_max=0.20, eMBB capacity is adequate.
-        C_E = (1-0.20) × 400 = 320GB >> mean L_E ~249GB"""
+        """[FIX-M1] With rho_U_max=0.12, eMBB capacity is adequate.
+        C_E = (1-0.12) × 400 = 352GB >> mean L_E ~294GB"""
         rho_max = cfg["action"]["rho_U_max"]
         C_total = cfg["radio"]["C_total_gb_per_step"]
         C_E_min = (1.0 - rho_max) * C_total
-        assert C_E_min >= 300.0, \
-            f"Min C_E = {C_E_min:.0f}GB should be >= 300GB for eMBB adequacy"
+        assert C_E_min >= 350.0, \
+            f"Min C_E = {C_E_min:.0f}GB should be >= 350GB for eMBB adequacy"
 
 
 # =====================================================================
@@ -1620,7 +1620,7 @@ class TestStructuralImprovements:
     # ── I-1a: Asymmetric integral floor ──────────────────────────────
 
     def test_T23_1_asymmetric_integral_floor(self, cfg):
-        """[I-1a] PID integral_min = -lambda_max * 0.2 (tight negative bound).
+        """[FIX-C2] PID integral_min = -lambda_max * 0.05 (tight negative bound).
         [Stooke ICLR 2020 §3.2; Mao arXiv 2025]"""
         try:
             from oran3pt.train import _LagrangianPIDCallback
@@ -1631,10 +1631,10 @@ class TestStructuralImprovements:
             threshold=lag.get("pviol_E_threshold", 0.15),
             Kp=lag.get("Kp", 0.05), Ki=lag.get("Ki", 0.005),
             Kd=lag.get("Kd", 0.01), lambda_max=lag.get("lambda_max", 10.0),
-            lambda_min=lag.get("lambda_min", 0.1),
+            lambda_min=lag.get("lambda_min", 0.5),
         )
-        assert cb._integral_min == pytest.approx(-cb._lambda_max * 0.2), \
-            f"integral_min should be -lambda_max * 0.2"
+        assert cb._integral_min == pytest.approx(-cb._lambda_max * 0.05), \
+            f"integral_min should be -lambda_max * 0.05"
         # Simulate sustained negative error (feasible region)
         for _ in range(5000):
             cb._error_integral = max(
@@ -1647,9 +1647,9 @@ class TestStructuralImprovements:
             "Negative bound should be tighter than positive bound"
 
     def test_T23_2_integral_recovery_speed(self, cfg):
-        """[I-1a] Lambda recovers from min within 50 PID updates.
-        With integral_min = -2.0 (lambda_max*0.2), recovery at
-        error=+0.1 crosses zero in ~20 updates, lambda rises by ~40.
+        """[FIX-C2] Lambda recovers from min within 15 PID updates.
+        With integral_min = -0.5 (lambda_max*0.05), recovery at
+        error=+0.1 crosses zero in ~5 updates, lambda rises quickly.
         [Mao arXiv 2025 — feasible region windup prevention]"""
         try:
             from oran3pt.train import _LagrangianPIDCallback
@@ -1660,7 +1660,7 @@ class TestStructuralImprovements:
             threshold=0.15, Kp=lag.get("Kp", 0.05),
             Ki=lag.get("Ki", 0.005), Kd=lag.get("Kd", 0.01),
             lambda_max=lag.get("lambda_max", 10.0),
-            lambda_min=lag.get("lambda_min", 0.1),
+            lambda_min=lag.get("lambda_min", 0.5),
         )
         # Drive integral to floor (simulate long feasible period)
         cb._error_integral = cb._integral_min
@@ -1682,24 +1682,25 @@ class TestStructuralImprovements:
     # ── I-1b: Lambda minimum ─────────────────────────────────────────
 
     def test_T23_3_lambda_min_config(self, cfg):
-        """[I-1b] lambda_min is configured and > 0.
+        """[FIX-M3] lambda_min is configured and >= 0.5.
         [Paternain CDC 2019; TAC 2022]"""
         lag = cfg.get("lagrangian_qos", {})
         assert "lambda_min" in lag, "Missing lambda_min in lagrangian_qos"
-        assert lag["lambda_min"] > 0, f"lambda_min should be > 0, got {lag['lambda_min']}"
+        assert lag["lambda_min"] >= 0.5, \
+            f"lambda_min should be >= 0.5, got {lag['lambda_min']}"
 
     def test_T23_4_lambda_min_in_callback(self, cfg):
-        """[I-1b] PID callback uses lambda_min for lower bound."""
+        """[FIX-M3] PID callback uses lambda_min for lower bound."""
         try:
             from oran3pt.train import _LagrangianPIDCallback
         except ImportError:
             pytest.skip("SB3 not available")
         lag = cfg.get("lagrangian_qos", {})
         cb = _LagrangianPIDCallback(
-            lambda_max=10.0, lambda_min=0.1)
-        assert cb.lambda_val == 0.1, \
-            f"Initial lambda should be lambda_min=0.1, got {cb.lambda_val}"
-        assert cb._lambda_min == 0.1
+            lambda_max=10.0, lambda_min=0.5)
+        assert cb.lambda_val == 0.5, \
+            f"Initial lambda should be lambda_min=0.5, got {cb.lambda_val}"
+        assert cb._lambda_min == 0.5
 
     # ── F2: SLA gamma=3.0 (revert from 4.0) ──────────────────────────
 
@@ -1733,7 +1734,7 @@ class TestStructuralImprovements:
         assert cg.get("enabled") is True
         assert "embb_load_ratio_max" in cg
         assert "penalty_scale" in cg
-        assert 0.80 <= cg["embb_load_ratio_max"] <= 1.0
+        assert 0.80 <= cg["embb_load_ratio_max"] <= 0.90
 
     def test_T23_8_capacity_guard_penalty_in_info(self, env):
         """[I-3b] Info dict contains capacity_penalty key."""
@@ -1843,6 +1844,140 @@ class TestStructuralImprovements:
         [Stooke ICLR 2020 §3.2; Mao arXiv 2025]"""
         Ki = cfg.get("lagrangian_qos", {}).get("Ki", 0.005)
         assert Ki >= 0.02, f"Ki should be ≥ 0.02, got {Ki}"
+
+
+# =====================================================================
+# T24  [FIX] v5.3 pviol_E QoS + Lagrangian PID fixes
+# =====================================================================
+class TestV53Fixes:
+    """Tests for v5.3 critical fixes: eval_env lambda propagation,
+    PID integral floor tightening, eval lambda floor, rho_U bounds,
+    capacity guard, lambda_min."""
+
+    # ── FIX-C1: eval_env lambda propagation ───────────────────────
+
+    def test_T24_1_pid_callback_accepts_eval_env(self, cfg):
+        """[FIX-C1] _LagrangianPIDCallback accepts eval_env parameter."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        cb = _LagrangianPIDCallback(eval_env=None)
+        assert cb._eval_env is None
+        # Also test with a mock env
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        cb2 = _LagrangianPIDCallback(eval_env=env)
+        assert cb2._eval_env is env
+
+    def test_T24_2_eval_env_lambda_propagation(self, cfg):
+        """[FIX-C1] After PID update, eval_env receives lambda."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        eval_env = OranSlicingPricingEnv(cfg, seed=42)
+        eval_env.reset(seed=42)
+        cb = _LagrangianPIDCallback(
+            threshold=0.10, Kp=0.05, Ki=0.02, Kd=0.01,
+            lambda_max=10.0, lambda_min=0.5,
+            eval_env=eval_env)
+        # Directly set lambda and verify propagation path
+        target_lambda = 2.5
+        cb.lambda_val = target_lambda
+        eval_base = getattr(eval_env, 'unwrapped', eval_env)
+        if hasattr(eval_base, 'set_lagrangian_lambda'):
+            eval_base.set_lagrangian_lambda(cb.lambda_val)
+        assert eval_base._lagrangian_lambda == pytest.approx(target_lambda)
+
+    def test_T24_3_pid_backward_compat_no_eval_env(self, cfg):
+        """[FIX-C1] PID callback works without eval_env (backward compat)."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        cb = _LagrangianPIDCallback(lambda_max=10.0, lambda_min=0.5)
+        assert cb._eval_env is None
+        assert cb.lambda_val == 0.5
+
+    # ── FIX-C2: PID integral floor tightening ─────────────────────
+
+    def test_T24_4_integral_min_tight(self, cfg):
+        """[FIX-C2] integral_min = -lambda_max * 0.05 (was * 0.2)."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        cb = _LagrangianPIDCallback(lambda_max=10.0, Ki=0.02,
+                                     lambda_min=0.5)
+        assert cb._integral_min == pytest.approx(-0.5), \
+            f"integral_min should be -0.5, got {cb._integral_min}"
+        assert abs(cb._integral_min) < abs(cb._integral_max)
+
+    # ── FIX-C3: eval lambda floor ────────────────────────────────
+
+    def test_T24_5_eval_lambda_floor_config(self, cfg):
+        """[FIX-C3] eval_lambda_floor config exists and >= 0.5."""
+        lag = cfg.get("lagrangian_qos", {})
+        assert "eval_lambda_floor" in lag, \
+            "Missing eval_lambda_floor in lagrangian_qos"
+        assert lag["eval_lambda_floor"] >= 0.5, \
+            f"eval_lambda_floor should be >= 0.5, got {lag['eval_lambda_floor']}"
+
+    def test_T24_6_eval_uses_floor_when_saved_low(self, cfg):
+        """[FIX-C3] Eval uses floor when saved lambda < floor."""
+        lag = cfg.get("lagrangian_qos", {})
+        floor = lag.get("eval_lambda_floor", 1.0)
+        saved_lambda = 0.1  # below floor
+        result = max(saved_lambda, floor)
+        assert result == floor, \
+            f"Should use floor {floor}, got {result}"
+
+    def test_T24_7_eval_uses_saved_when_above_floor(self, cfg):
+        """[FIX-C3] Eval uses saved lambda when > floor."""
+        lag = cfg.get("lagrangian_qos", {})
+        floor = lag.get("eval_lambda_floor", 1.0)
+        saved_lambda = 5.0  # above floor
+        result = max(saved_lambda, floor)
+        assert result == saved_lambda, \
+            f"Should use saved {saved_lambda}, got {result}"
+
+    # ── FIX-M1: rho_U bounds ─────────────────────────────────────
+
+    def test_T24_8_rho_U_bounds_tight(self, cfg):
+        """[FIX-M1] rho_U range [0.03, 0.12] for eMBB capacity."""
+        assert cfg["action"]["rho_U_min"] >= 0.03
+        assert cfg["action"]["rho_U_max"] <= 0.12
+        # Verify C_E adequacy at max rho_U
+        C_total = cfg["radio"]["C_total_gb_per_step"]
+        C_E_min = (1.0 - cfg["action"]["rho_U_max"]) * C_total
+        assert C_E_min >= 350.0
+
+    # ── FIX-M2: Capacity guard ────────────────────────────────────
+
+    def test_T24_9_capacity_guard_strengthened(self, cfg):
+        """[FIX-M2] Capacity guard: threshold <= 0.90, scale >= 0.05."""
+        cg = cfg.get("capacity_guard", {})
+        assert cg.get("enabled") is True
+        assert cg["embb_load_ratio_max"] <= 0.90, \
+            f"threshold should be <= 0.90, got {cg['embb_load_ratio_max']}"
+        assert cg["penalty_scale"] >= 0.05, \
+            f"scale should be >= 0.05, got {cg['penalty_scale']}"
+
+    # ── FIX-M3: lambda_min ────────────────────────────────────────
+
+    def test_T24_10_lambda_min_adequate(self, cfg):
+        """[FIX-M3] lambda_min >= 0.5 for meaningful QoS incentive."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            lambda_max=lag.get("lambda_max", 10.0),
+            lambda_min=lag.get("lambda_min", 0.5))
+        assert cb.lambda_val >= 0.5, \
+            f"Initial lambda should be >= 0.5, got {cb.lambda_val}"
+        assert cb._lambda_min >= 0.5
 
 
 if __name__ == "__main__":

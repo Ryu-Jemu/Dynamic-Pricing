@@ -197,9 +197,12 @@ if _SB3_AVAILABLE:
 
         [CR-2] Anti-windup: integral term clamped asymmetrically.
         Positive bound = lambda_max / Ki (prevents overshoot).
-        [I-1a] Negative bound = -lambda_max / Ki * 0.1 (prevents
+        [FIX-C2] Negative bound = -lambda_max * 0.05 (prevents
         integral from sinking deep into negative territory in the
         feasible region, which causes sluggish lambda recovery).
+
+        [FIX-C1] eval_env parameter propagates lambda to EvalCallback's
+        evaluation environment for constraint-aware model selection.
 
         [I-1b] lambda_min > 0 ensures policy always has a minimum
         QoS incentive, preventing pviol_E drift in eval.
@@ -218,6 +221,7 @@ if _SB3_AVAILABLE:
                      update_freq: int = 200,
                      lambda_max: float = 10.0,
                      lambda_min: float = 0.0,
+                     eval_env=None,
                      verbose: int = 0) -> None:
             super().__init__(verbose)
             self._threshold = threshold
@@ -231,13 +235,14 @@ if _SB3_AVAILABLE:
             self._error_integral: float = 0.0
             self._prev_error: float = 0.0
             self._pviol_buffer: List[float] = []
+            self._eval_env = eval_env  # [FIX-C1] propagate λ to eval_env
             # [CR-2] Anti-windup: positive integral bound = lambda_max / Ki
-            # [I-1a] Asymmetric: negative bound = -lambda_max * 0.2
-            # Recovery from integral_min at typical error +0.1 takes ~20
-            # PID updates (vs thousands with symmetric ±integral_max)
+            # [FIX-C2] Asymmetric: negative bound = -lambda_max * 0.05
+            # Recovery from integral_min at typical error +0.1 takes ~5
+            # PID updates (was ~20 with * 0.2; ~thousands with symmetric)
             # [Stooke ICLR 2020 §3.2; Mao arXiv 2025]
             self._integral_max: float = lambda_max / max(Ki, 1e-8)
-            self._integral_min: float = -lambda_max * 0.2
+            self._integral_min: float = -lambda_max * 0.05
 
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [])
@@ -272,6 +277,13 @@ if _SB3_AVAILABLE:
                 env = getattr(raw_env, 'unwrapped', raw_env)
                 if hasattr(env, 'set_lagrangian_lambda'):
                     env.set_lagrangian_lambda(self.lambda_val)
+                    # [FIX-C1] Propagate λ to eval_env for constraint-aware
+                    # model selection [Tessler ICML 2019 §3; Stooke 2020 §3.2]
+                    if self._eval_env is not None:
+                        eval_base = getattr(
+                            self._eval_env, 'unwrapped', self._eval_env)
+                        if hasattr(eval_base, 'set_lagrangian_lambda'):
+                            eval_base.set_lagrangian_lambda(self.lambda_val)
                     if self.verbose > 0:
                         logger.info(
                             "[D2] PID Lagrangian: λ=%.4f  "
@@ -506,6 +518,7 @@ def train_single_seed(cfg: Dict[str, Any],
                 update_freq=lag_cfg.get("update_freq", 200),
                 lambda_max=lag_cfg.get("lambda_max", 10.0),
                 lambda_min=lag_cfg.get("lambda_min", 0.0),
+                eval_env=eval_env,  # [FIX-C1] constraint-aware model selection
             )
             callbacks.append(lag_cb)
             logger.info("[D2] PID Lagrangian enabled: "
