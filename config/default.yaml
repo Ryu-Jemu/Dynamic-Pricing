@@ -93,7 +93,8 @@ qos:
   alpha_congestion: 10.0
   lambda_U: 500000.0
   lambda_E: 500000.0            # [D3] 200K→500K  [Tessler 2019; KCC 2023]
-  gamma_sla_E: 3.0              # [D3] 2.0→3.0   [Paternain 2019; Berry 1994]
+  gamma_sla_E: 3.0              # [F2] 4.0→3.0 revert; γ=4 weakens penalty at pviol_E=0.2 by 5× vs γ=3
+                                 # [Bertsekas 1996 §6.3; Paternain TAC 2022 §IV]
 
 # ── §9  Cost (Capex excluded) ──
 cost:
@@ -163,6 +164,7 @@ training:
   tau: 0.005
   ent_coef: "auto"
   ent_coef_init: 0.5
+  target_entropy: -3.0           # [I-6a] -5(default) → -3.0  [Haarnoja ICML 2018 §5; Zhou ICLR 2022]
   train_freq: 4                 # [M7]  [Fedus 2020]
   gradient_steps: 2             # [OPT-D] 4→2; 총 gradient 계산량 유지 (2×512=4×256)  [Fedus 2020]
   eval_freq: 20000              # [OPT-E] 10K→20K; 평가 간격 2배
@@ -203,7 +205,7 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.01]   # [V11-7] rho_U: 0.03→0.01  [Dalal NeurIPS 2018 §4.1]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.05]   # [I-3a] rho_U: 0.01→0.05  [Dalal NeurIPS 2018 §4.1; downstream C_E impact]
 
 # ── §15c  Population-aware reward ──
 population_reward:
@@ -216,11 +218,12 @@ population_reward:
 # [D2] PID control replaces simple dual ascent  [Stooke ICLR 2020]
 lagrangian_qos:
   enabled: true
-  pviol_E_threshold: 0.15       # [ETSI QoS 003; KCC 2022]
+  pviol_E_threshold: 0.10       # [F3] 0.15→0.10; train-eval robustness margin  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
   Kp: 0.05                      # [D2] Proportional gain  [Stooke 2020]
-  Ki: 0.005                     # [D2] Integral gain
+  Ki: 0.02                      # [F4] 0.005→0.02; 4× increase for timely constraint enforcement  [Stooke 2020; Mao 2025]
   Kd: 0.01                      # [D2] Derivative gain
   lambda_max: 10.0               # [D2] 5.0→10.0  [Boyd 2004]
+  lambda_min: 0.1                # [I-1b] Minimum λ ensures QoS incentive  [Paternain CDC 2019; TAC 2022]
   update_freq: 200               # [D2] 1000→200  [Stooke 2020]
 
 # ── §16  [D1] Admission control (NSACF) ──
@@ -238,6 +241,22 @@ admission_control:
 # Pricing locked at cycle start; rho_U updates every step
 hierarchical_actions:
   enabled: true
+
+# ── §18  [I-3b] eMBB Capacity Guard ──
+# Soft penalty when L_E/C_E exceeds threshold
+# [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016; Huang IoT-J 2020]
+capacity_guard:
+  enabled: true
+  embb_load_ratio_max: 0.95      # Soft ceiling for L_E/C_E
+  penalty_scale: 0.02            # Quadratic penalty coefficient
+
+# ── §19  [I-5a] SLA Awareness Penalty ──
+# Additional reward shaping when SLA penalty exceeds revenue threshold
+# [Wiewiora ICML 2003; Ng ICML 1999]
+sla_awareness:
+  enabled: true
+  revenue_ratio_threshold: 0.05  # Trigger when sla_penalty/revenue > 5%
+  penalty_scale: 0.1             # Penalty coefficient
 
 # ── Calibration targets ──
 calibration:

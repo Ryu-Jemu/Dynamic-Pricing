@@ -195,17 +195,21 @@ if _SB3_AVAILABLE:
         Replaces simple dual ascent with PID control for faster,
         more stable convergence to the feasible region.
 
-        [CR-2] Anti-windup: integral term clamped to
-        [-lambda_max/Ki, lambda_max/Ki] to prevent windup when lambda
-        is saturated at lambda_max. Without this, the integral accumulates
-        indefinitely during sustained violations, causing sluggish lambda
-        reduction when pviol_E drops below threshold.
+        [CR-2] Anti-windup: integral term clamped asymmetrically.
+        Positive bound = lambda_max / Ki (prevents overshoot).
+        [I-1a] Negative bound = -lambda_max / Ki * 0.1 (prevents
+        integral from sinking deep into negative territory in the
+        feasible region, which causes sluggish lambda recovery).
+
+        [I-1b] lambda_min > 0 ensures policy always has a minimum
+        QoS incentive, preventing pviol_E drift in eval.
 
         References:
           [Stooke et al., ICLR 2020 §3.2] — PID Lagrangian + integral windup
           [Tessler et al., ICML 2019]  — RCPO baseline
           [Boyd & Vandenberghe, 2004]  — Dual convergence theory
           [Mao et al., arXiv 2025]     — PID not plug-and-play; windup key issue
+          [Paternain et al., CDC 2019; TAC 2022] — Positive dual lower bound
         """
 
         def __init__(self, threshold: float = 0.15,
@@ -213,6 +217,7 @@ if _SB3_AVAILABLE:
                      Kd: float = 0.01,
                      update_freq: int = 200,
                      lambda_max: float = 10.0,
+                     lambda_min: float = 0.0,
                      verbose: int = 0) -> None:
             super().__init__(verbose)
             self._threshold = threshold
@@ -221,13 +226,18 @@ if _SB3_AVAILABLE:
             self._Kd = Kd
             self._update_freq = update_freq
             self._lambda_max = lambda_max
-            self.lambda_val: float = 0.0
+            self._lambda_min = lambda_min  # [I-1b] [Paternain CDC 2019]
+            self.lambda_val: float = lambda_min
             self._error_integral: float = 0.0
             self._prev_error: float = 0.0
             self._pviol_buffer: List[float] = []
-            # [CR-2] Anti-windup: integral bound = lambda_max / Ki
+            # [CR-2] Anti-windup: positive integral bound = lambda_max / Ki
+            # [I-1a] Asymmetric: negative bound = -lambda_max * 0.2
+            # Recovery from integral_min at typical error +0.1 takes ~20
+            # PID updates (vs thousands with symmetric ±integral_max)
             # [Stooke ICLR 2020 §3.2; Mao arXiv 2025]
             self._integral_max: float = lambda_max / max(Ki, 1e-8)
+            self._integral_min: float = -lambda_max * 0.2
 
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [])
@@ -238,17 +248,21 @@ if _SB3_AVAILABLE:
                 mean_pviol = float(np.mean(self._pviol_buffer))
                 error = mean_pviol - self._threshold
 
-                # [CR-2] PID update with anti-windup integral clamping
-                # [Stooke ICLR 2020 §3.2]
+                # [CR-2][I-1a] PID update with asymmetric integral clamping
+                # Positive windup: ±integral_max (standard)
+                # Negative windup: integral_min = -10% of integral_max
+                # [Stooke ICLR 2020 §3.2; Mao arXiv 2025]
                 self._error_integral = max(
-                    -self._integral_max,
+                    self._integral_min,
                     min(self._integral_max,
                         self._error_integral + error))
                 error_derivative = error - self._prev_error
                 delta = (self._Kp * error
                          + self._Ki * self._error_integral
                          + self._Kd * error_derivative)
-                self.lambda_val = max(0.0, min(
+                # [I-1b] lambda_min ensures minimum QoS incentive
+                # [Paternain CDC 2019; TAC 2022]
+                self.lambda_val = max(self._lambda_min, min(
                     self._lambda_max, self.lambda_val + delta))
                 self._prev_error = error
                 self._pviol_buffer.clear()
@@ -413,8 +427,10 @@ def train_single_seed(cfg: Dict[str, Any],
         effective_ent_coef = ent_coef
 
     try:
-        model = SAC(
-            "MlpPolicy", env,
+        # [I-6a] target_entropy controls final exploration level
+        # Default -dim(A)=-5 is conservative; -3.0 for smoother convergence
+        # [Haarnoja ICML 2018 §5; Zhou ICLR 2022]
+        sac_kwargs: Dict[str, Any] = dict(
             learning_rate=learning_rate,
             batch_size=tc.get("batch_size", 256),
             buffer_size=tc.get("buffer_size", 200_000),
@@ -427,6 +443,11 @@ def train_single_seed(cfg: Dict[str, Any],
             seed=seed,
             verbose=0,
         )
+        target_entropy = tc.get("target_entropy", None)
+        if target_entropy is not None:
+            sac_kwargs["target_entropy"] = target_entropy
+            logger.info("  [I-6a] target_entropy: %.1f", target_entropy)
+        model = SAC("MlpPolicy", env, **sac_kwargs)
 
         eval_env = OranSlicingPricingEnv(cfg, users_csv=users_csv,
                                          seed=seed + 10000)
@@ -484,6 +505,7 @@ def train_single_seed(cfg: Dict[str, Any],
                 Kd=lag_cfg.get("Kd", 0.01),
                 update_freq=lag_cfg.get("update_freq", 200),
                 lambda_max=lag_cfg.get("lambda_max", 10.0),
+                lambda_min=lag_cfg.get("lambda_min", 0.0),
             )
             callbacks.append(lag_cb)
             logger.info("[D2] PID Lagrangian enabled: "

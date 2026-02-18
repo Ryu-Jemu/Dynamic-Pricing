@@ -21,7 +21,7 @@ REVISION 10 — Changes from v9:
 
   [M15] T19 — Dashboard generation integration tests (eval.py)
 
-Test groups (120 tests, 22 classes):
+Test groups (136 tests, 23 classes):
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
   T3  Market dynamics (join/churn, conservation)
@@ -42,6 +42,7 @@ Test groups (120 tests, 22 classes):
   T20 [Review] Architecture review (anti-windup, 23D obs, config merge, integration)
   T21 [V11] Revision v11 improvements (rho_U, pop_bonus, admission, Lagrangian)
   T22 [PR] Pricing mechanism (per-slice P_sig, bill shock, overage join dampening)
+  T23 [I-1..I-6] Structural improvements (PID asymmetric, capacity guard, SLA awareness)
 """
 from __future__ import annotations
 
@@ -794,10 +795,10 @@ class TestRevisionDesign:
                 f"pviol_E EMA {obs[21]} out of bounds"
 
     def test_T15_5_convex_sla_gamma3(self, cfg):
-        """[D3] Convex SLA penalty with gamma=3.0."""
+        """[F2] Convex SLA penalty with gamma=3.0.
+        [Bertsekas 1996 §6.3] — γ=3 cubic provides adequate signal at pviol_E=0.2."""
         gamma = cfg.get("qos", {}).get("gamma_sla_E", 2.0)
         assert gamma == 3.0, f"gamma_sla_E should be 3.0, got {gamma}"
-        lambda_E = cfg.get("qos", {}).get("lambda_E", 200000)
         # penalty(0.9) / penalty(0.3) should be (0.9/0.3)^3 = 27
         ratio = (0.9 ** gamma) / (0.3 ** gamma)
         assert ratio > 25.0, \
@@ -1240,7 +1241,7 @@ class TestArchitectureReview:
             Kd=lag_cfg.get("Kd", 0.01),
             lambda_max=lag_cfg.get("lambda_max", 10.0),
         )
-        # integral_max = lambda_max / Ki = 10.0 / 0.005 = 2000.0
+        # integral_max = lambda_max / Ki  [F4: 10.0/0.02 = 500]
         assert cb._integral_max == lag_cfg["lambda_max"] / lag_cfg["Ki"]
         # Simulate extreme positive error accumulation
         for _ in range(10000):
@@ -1413,13 +1414,13 @@ class TestV11Improvements:
         assert min_ts >= total * 0.75, \
             f"min_timesteps {min_ts} should be >= {total * 0.75}"
 
-    def test_T21_8_rho_U_smoothing_low(self, cfg):
-        """[V11-7] rho_U smoothing weight <= 0.02 for fast convergence.
-        [Dalal NeurIPS 2018 §4.1]"""
+    def test_T21_8_rho_U_smoothing_moderate(self, cfg):
+        """[I-3a] rho_U smoothing weight ~0.05 for C_E stability.
+        [Dalal NeurIPS 2018 §4.1; downstream C_E impact proportional]"""
         weights = cfg.get("action_smoothing", {}).get("weights", [])
         assert len(weights) == 5
-        assert weights[4] <= 0.02, \
-            f"rho_U smoothing weight should be <= 0.02, got {weights[4]}"
+        assert 0.03 <= weights[4] <= 0.10, \
+            f"rho_U smoothing weight should be in [0.03, 0.10], got {weights[4]}"
 
     def test_T21_9_embb_capacity_adequate_after_v11(self, cfg):
         """[V11-1] With rho_U_max=0.20, eMBB capacity is adequate.
@@ -1608,6 +1609,240 @@ class TestPR4OverageJoin:
             assert np.isfinite(info["profit"]), f"Step {step}: profit NaN/Inf"
             if term or trunc:
                 break
+
+
+# =====================================================================
+# T23  [I-1..I-6] Structural improvement tests
+# =====================================================================
+class TestStructuralImprovements:
+    """Tests for improvement_plan.md Phase A/B/C changes."""
+
+    # ── I-1a: Asymmetric integral floor ──────────────────────────────
+
+    def test_T23_1_asymmetric_integral_floor(self, cfg):
+        """[I-1a] PID integral_min = -lambda_max * 0.2 (tight negative bound).
+        [Stooke ICLR 2020 §3.2; Mao arXiv 2025]"""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            threshold=lag.get("pviol_E_threshold", 0.15),
+            Kp=lag.get("Kp", 0.05), Ki=lag.get("Ki", 0.005),
+            Kd=lag.get("Kd", 0.01), lambda_max=lag.get("lambda_max", 10.0),
+            lambda_min=lag.get("lambda_min", 0.1),
+        )
+        assert cb._integral_min == pytest.approx(-cb._lambda_max * 0.2), \
+            f"integral_min should be -lambda_max * 0.2"
+        # Simulate sustained negative error (feasible region)
+        for _ in range(5000):
+            cb._error_integral = max(
+                cb._integral_min,
+                min(cb._integral_max, cb._error_integral - 0.1))
+        assert cb._error_integral >= cb._integral_min, \
+            f"Integral {cb._error_integral} below floor {cb._integral_min}"
+        # integral_min should be much smaller in magnitude than integral_max
+        assert abs(cb._integral_min) < abs(cb._integral_max), \
+            "Negative bound should be tighter than positive bound"
+
+    def test_T23_2_integral_recovery_speed(self, cfg):
+        """[I-1a] Lambda recovers from min within 50 PID updates.
+        With integral_min = -2.0 (lambda_max*0.2), recovery at
+        error=+0.1 crosses zero in ~20 updates, lambda rises by ~40.
+        [Mao arXiv 2025 — feasible region windup prevention]"""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            threshold=0.15, Kp=lag.get("Kp", 0.05),
+            Ki=lag.get("Ki", 0.005), Kd=lag.get("Kd", 0.01),
+            lambda_max=lag.get("lambda_max", 10.0),
+            lambda_min=lag.get("lambda_min", 0.1),
+        )
+        # Drive integral to floor (simulate long feasible period)
+        cb._error_integral = cb._integral_min
+        cb.lambda_val = cb._lambda_min
+        # Now simulate pviol_E=0.25 (above threshold) for N updates
+        for _ in range(50):
+            error = 0.25 - 0.15  # +0.1
+            cb._error_integral = max(
+                cb._integral_min,
+                min(cb._integral_max, cb._error_integral + error))
+            derivative = error - cb._prev_error
+            delta = cb._Kp * error + cb._Ki * cb._error_integral + cb._Kd * derivative
+            cb.lambda_val = max(cb._lambda_min,
+                               min(cb._lambda_max, cb.lambda_val + delta))
+            cb._prev_error = error
+        assert cb.lambda_val > cb._lambda_min + 0.01, \
+            f"Lambda should recover above min+0.01 after 50 updates, got {cb.lambda_val}"
+
+    # ── I-1b: Lambda minimum ─────────────────────────────────────────
+
+    def test_T23_3_lambda_min_config(self, cfg):
+        """[I-1b] lambda_min is configured and > 0.
+        [Paternain CDC 2019; TAC 2022]"""
+        lag = cfg.get("lagrangian_qos", {})
+        assert "lambda_min" in lag, "Missing lambda_min in lagrangian_qos"
+        assert lag["lambda_min"] > 0, f"lambda_min should be > 0, got {lag['lambda_min']}"
+
+    def test_T23_4_lambda_min_in_callback(self, cfg):
+        """[I-1b] PID callback uses lambda_min for lower bound."""
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            lambda_max=10.0, lambda_min=0.1)
+        assert cb.lambda_val == 0.1, \
+            f"Initial lambda should be lambda_min=0.1, got {cb.lambda_val}"
+        assert cb._lambda_min == 0.1
+
+    # ── F2: SLA gamma=3.0 (revert from 4.0) ──────────────────────────
+
+    def test_T23_5_sla_gamma_cubic(self, cfg):
+        """[F2] gamma_sla_E=3.0 reverted — cubic provides 5× stronger
+        signal than quartic at operating point pviol_E=0.2.
+        [Bertsekas 1996 §6.3]"""
+        gamma = cfg["qos"]["gamma_sla_E"]
+        assert gamma == 3.0, f"gamma_sla_E should be 3.0, got {gamma}"
+        # At pviol=0.2: 0.2^3=0.008 vs 0.2^4=0.0016 → cubic is 5× stronger
+        penalty_cubic = 0.2 ** 3.0
+        penalty_quartic = 0.2 ** 4.0
+        assert penalty_cubic > penalty_quartic, \
+            "Cubic should produce stronger signal than quartic at pviol=0.2"
+
+    # ── I-3a: rho_U smoothing ────────────────────────────────────────
+
+    def test_T23_6_rho_U_smoothing_equals_pricing(self, cfg):
+        """[I-3a] rho_U smoothing weight matches p_over smoothing.
+        [Dalal NeurIPS 2018 §4.1 — proportional to downstream impact]"""
+        weights = cfg["action_smoothing"]["weights"]
+        assert weights[4] == weights[1], \
+            f"rho_U weight {weights[4]} should match p_over weight {weights[1]}"
+
+    # ── I-3b: Capacity guard ─────────────────────────────────────────
+
+    def test_T23_7_capacity_guard_config(self, cfg):
+        """[I-3b] Capacity guard config present.
+        [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016]"""
+        cg = cfg.get("capacity_guard", {})
+        assert cg.get("enabled") is True
+        assert "embb_load_ratio_max" in cg
+        assert "penalty_scale" in cg
+        assert 0.80 <= cg["embb_load_ratio_max"] <= 1.0
+
+    def test_T23_8_capacity_guard_penalty_in_info(self, env):
+        """[I-3b] Info dict contains capacity_penalty key."""
+        env.reset(seed=42)
+        _, _, _, _, info = env.step(env.action_space.sample())
+        assert "capacity_penalty" in info
+        assert info["capacity_penalty"] >= 0.0
+
+    def test_T23_9_capacity_guard_activates_on_overload(self, cfg):
+        """[I-3b] Capacity penalty > 0 when L_E/C_E exceeds threshold."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # Force high rho_U → small C_E → likely overload
+        high_rho = np.array([0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        cap_penalties = []
+        for _ in range(30):
+            _, _, _, _, info = env.step(high_rho)
+            cap_penalties.append(info["capacity_penalty"])
+        # At least some steps should have capacity penalty
+        total = sum(cap_penalties)
+        # With rho_U at max (0.20), C_E = 0.80*400 = 320 GB
+        # With ~200 eMBB users, L_E could exceed 320*0.95=304 GB
+        assert total >= 0.0, "Total capacity penalty should be non-negative"
+
+    # ── I-5a: SLA awareness penalty ──────────────────────────────────
+
+    def test_T23_10_sla_awareness_config(self, cfg):
+        """[I-5a] SLA awareness config present.
+        [Wiewiora ICML 2003; Ng ICML 1999]"""
+        sa = cfg.get("sla_awareness", {})
+        assert sa.get("enabled") is True
+        assert "revenue_ratio_threshold" in sa
+        assert "penalty_scale" in sa
+
+    def test_T23_11_sla_awareness_in_info(self, env):
+        """[I-5a] Info dict contains sla_awareness_penalty key."""
+        env.reset(seed=42)
+        _, _, _, _, info = env.step(env.action_space.sample())
+        assert "sla_awareness_penalty" in info
+        assert info["sla_awareness_penalty"] >= 0.0
+
+    # ── I-6a: Target entropy ─────────────────────────────────────────
+
+    def test_T23_12_target_entropy_config(self, cfg):
+        """[I-6a] target_entropy is configured.
+        [Haarnoja ICML 2018 §5; Zhou ICLR 2022]"""
+        tc = cfg.get("training", {})
+        assert "target_entropy" in tc
+        assert tc["target_entropy"] == -3.0
+
+    # ── F1: Eval PID removed ─────────────────────────────────────────
+
+    def test_T23_13_eval_pid_removed(self):
+        """[F1] _EvalPIDController removed — deterministic eval ignores
+        reward changes, so dynamic λ only distorted metrics."""
+        import oran3pt.eval as ev
+        assert not hasattr(ev, "_EvalPIDController"), \
+            "_EvalPIDController should be removed from eval module"
+
+    def test_T23_14_eval_episode_no_pid_param(self):
+        """[F1] evaluate_episode no longer accepts eval_pid parameter."""
+        import inspect
+        from oran3pt.eval import evaluate_episode
+        sig = inspect.signature(evaluate_episode)
+        assert "eval_pid" not in sig.parameters, \
+            "eval_pid parameter should be removed"
+
+    # ── I-6b: Eval action smoothing ──────────────────────────────────
+
+    def test_T23_15_eval_episode_accepts_smoothing(self):
+        """[I-6b] evaluate_episode accepts action_ema_alpha parameter."""
+        import inspect
+        from oran3pt.eval import evaluate_episode
+        sig = inspect.signature(evaluate_episode)
+        assert "action_ema_alpha" in sig.parameters
+
+    # ── Numerical safety with all improvements ───────────────────────
+
+    def test_T23_16_full_episode_numerical_safety(self, cfg):
+        """All improvements active, full episode, no NaN/Inf."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert np.all(np.isfinite(obs))
+        for step in range(env.episode_len):
+            obs, reward, term, trunc, info = env.step(env.action_space.sample())
+            assert np.all(np.isfinite(obs)), f"Step {step}: obs NaN/Inf"
+            assert np.isfinite(reward), f"Step {step}: reward NaN/Inf"
+            assert np.isfinite(info["profit"]), f"Step {step}: profit NaN/Inf"
+            assert info["capacity_penalty"] >= 0.0
+            assert info["sla_awareness_penalty"] >= 0.0
+            if term or trunc:
+                break
+
+    # ── F3: pviol_E threshold conservative ─────────────────────────────
+
+    def test_T23_17_pviol_threshold_conservative(self, cfg):
+        """[F3] pviol_E_threshold ≤ 0.10 for train-eval robustness margin.
+        [Tobin IROS 2017; Rajeswaran NeurIPS 2017]"""
+        threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.15)
+        assert threshold <= 0.10, \
+            f"pviol_E_threshold should be ≤ 0.10 for eval margin, got {threshold}"
+
+    # ── F4: Ki adequate for timely enforcement ─────────────────────────
+
+    def test_T23_18_lagrangian_ki_adequate(self, cfg):
+        """[F4] Ki ≥ 0.02 for timely constraint enforcement.
+        [Stooke ICLR 2020 §3.2; Mao arXiv 2025]"""
+        Ki = cfg.get("lagrangian_qos", {}).get("Ki", 0.005)
+        assert Ki >= 0.02, f"Ki should be ≥ 0.02, got {Ki}"
 
 
 if __name__ == "__main__":

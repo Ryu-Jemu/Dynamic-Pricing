@@ -52,6 +52,7 @@ logger = logging.getLogger("oran3pt.eval")
 def evaluate_episode(env: OranSlicingPricingEnv,
                      model, repeat_id: int,
                      n_chains: int = 1,
+                     action_ema_alpha: float = 0.0,
                      ) -> List[Dict[str, Any]]:
     """Run evaluation episodes, returning records.
 
@@ -59,10 +60,18 @@ def evaluate_episode(env: OranSlicingPricingEnv,
     into one repeat. Population persists across episodes via env's
     continuous reset. Step numbers are renumbered globally (1..n_chains*T)
     so rollout_log.csv has the same 720-row format as v9.
+
+    [I-6b] action_ema_alpha: if > 0, apply EMA smoothing to actions.
+           [Dulac-Arnold JMLR 2021 §4.2]
+
+    [F1] Eval-Time PID removed — deterministic model.predict() does not
+         respond to reward changes, so dynamic λ adjustment only distorted
+         reward metrics without affecting pviol_E.
     """
     obs, _ = env.reset()
     records: List[Dict[str, Any]] = []
     global_step = 0
+    prev_action = None
 
     for chain_idx in range(n_chains):
         if chain_idx > 0:
@@ -75,6 +84,13 @@ def evaluate_episode(env: OranSlicingPricingEnv,
                 action, _ = model.predict(obs, deterministic=True)
             else:
                 action = env.action_space.sample()
+
+            # [I-6b] Eval-time action smoothing  [Dulac-Arnold JMLR 2021 §4.2]
+            if action_ema_alpha > 0 and prev_action is not None:
+                action = (action_ema_alpha * action
+                          + (1.0 - action_ema_alpha) * prev_action)
+            prev_action = action.copy() if hasattr(action, 'copy') else action
+
             obs, reward, terminated, truncated, info = env.step(action)
 
             # [EP1] Renumber step globally across chained episodes
@@ -139,6 +155,9 @@ def run_evaluation(cfg: Dict[str, Any],
     else:
         n_chains = 1
 
+    # [I-6b] Eval-time action smoothing  [Dulac-Arnold JMLR 2021 §4.2]
+    action_ema = cfg.get("eval", {}).get("action_ema_alpha", 0.3)
+
     # [ME-3] Per-repeat seed ensures statistically independent evaluations
     # Each repeat uses seed = base_seed + repeat_id for reproducibility
     # [Henderson AAAI 2018] — independent evaluation runs
@@ -147,7 +166,8 @@ def run_evaluation(cfg: Dict[str, Any],
     for rep in tqdm(range(n_repeats), desc="Eval repeats"):
         env.reset(seed=base_seed + rep)
         records = evaluate_episode(
-            env, model, repeat_id=rep, n_chains=n_chains)
+            env, model, repeat_id=rep, n_chains=n_chains,
+            action_ema_alpha=action_ema)
         all_records.extend(records)
 
     rollout_path = out / "rollout_log.csv"

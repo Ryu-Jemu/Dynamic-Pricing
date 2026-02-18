@@ -250,6 +250,24 @@ class OranSlicingPricingEnv(gym.Env):
         ha_cfg = cfg.get("hierarchical_actions", {})
         self._hier_enabled: bool = ha_cfg.get("enabled", False)
 
+        # ── [I-3b] eMBB Capacity Guard ────────────────────────────
+        # Soft penalty when L_E/C_E exceeds threshold
+        # [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016; Huang IoT-J 2020]
+        cg_cfg = cfg.get("capacity_guard", {})
+        self._cap_guard_enabled: bool = cg_cfg.get("enabled", False)
+        self._cap_guard_threshold: float = cg_cfg.get(
+            "embb_load_ratio_max", 0.95)
+        self._cap_guard_scale: float = cg_cfg.get("penalty_scale", 0.02)
+
+        # ── [I-5a] SLA Awareness Penalty ──────────────────────────
+        # Additional reward shaping when SLA penalty is high relative to revenue
+        # [Wiewiora ICML 2003; Ng ICML 1999]
+        sla_aw_cfg = cfg.get("sla_awareness", {})
+        self._sla_aw_enabled: bool = sla_aw_cfg.get("enabled", False)
+        self._sla_aw_threshold: float = sla_aw_cfg.get(
+            "revenue_ratio_threshold", 0.05)
+        self._sla_aw_scale: float = sla_aw_cfg.get("penalty_scale", 0.1)
+
         # Load users
         self._users_csv_path = users_csv
         self._load_users(users_csv)
@@ -586,6 +604,25 @@ class OranSlicingPricingEnv(gym.Env):
             else:
                 pop_bonus = self._pop_beta * ratio_diff
 
+        # [I-3b] eMBB Capacity Guard penalty
+        # [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016]
+        capacity_penalty = 0.0
+        if self._cap_guard_enabled:
+            embb_ratio = L_E / max(C_E, 1e-6)
+            if embb_ratio > self._cap_guard_threshold:
+                capacity_penalty = self._cap_guard_scale * (
+                    embb_ratio - self._cap_guard_threshold) ** 2
+
+        # [I-5a] SLA Awareness penalty
+        # Amplifies SLA cost signal when log-transform attenuates it
+        # [Wiewiora ICML 2003; Ng ICML 1999]
+        sla_awareness_penalty = 0.0
+        if self._sla_aw_enabled and revenue > 0:
+            sla_ratio = sla_penalty / max(revenue, 1e-6)
+            if sla_ratio > self._sla_aw_threshold:
+                sla_awareness_penalty = self._sla_aw_scale * (
+                    sla_ratio - self._sla_aw_threshold)
+
         lagrangian_penalty = 0.0
         if self._lagrangian_enabled and self._lagrangian_lambda > 0.0:
             lagrangian_penalty = self._lagrangian_lambda * max(
@@ -594,7 +631,8 @@ class OranSlicingPricingEnv(gym.Env):
 
         reward = self._compute_reward(
             profit, smooth_penalty, retention_penalty,
-            pop_bonus, lagrangian_penalty)
+            pop_bonus, lagrangian_penalty,
+            capacity_penalty, sla_awareness_penalty)
 
         # Store state for next step
         self._prev_action = np.array(
@@ -638,6 +676,8 @@ class OranSlicingPricingEnv(gym.Env):
             "retention_penalty": retention_penalty,
             "pop_bonus": pop_bonus,
             "lagrangian_penalty": lagrangian_penalty,
+            "capacity_penalty": capacity_penalty,
+            "sla_awareness_penalty": sla_awareness_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
         }
@@ -844,7 +884,9 @@ class OranSlicingPricingEnv(gym.Env):
                         smooth_penalty: float = 0.0,
                         retention_penalty: float = 0.0,
                         pop_bonus: float = 0.0,
-                        lagrangian_penalty: float = 0.0) -> float:
+                        lagrangian_penalty: float = 0.0,
+                        capacity_penalty: float = 0.0,
+                        sla_awareness_penalty: float = 0.0) -> float:
         if not np.isfinite(profit):
             profit = 0.0
         r = float(np.sign(profit) * np.log1p(
@@ -852,6 +894,8 @@ class OranSlicingPricingEnv(gym.Env):
         r -= smooth_penalty
         r -= retention_penalty
         r += pop_bonus
+        r -= capacity_penalty           # [I-3b]
+        r -= sla_awareness_penalty      # [I-5a]
         # [D2] Lagrangian penalty applied OUTSIDE base reward clip
         # to preserve constraint gradient  [Paternain CDC 2019]
         r_base = float(np.clip(r, -2.0, 2.0))
