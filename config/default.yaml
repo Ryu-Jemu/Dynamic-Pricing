@@ -142,33 +142,26 @@ population:
     price_sensitivity:   { price_sensitive: 1.5, balanced: 1.0, qos_sensitive: 0.6 }
     qos_sensitivity:     { price_sensitive: 0.5, balanced: 1.0, qos_sensitive: 1.8 }
     switching_cost:      { price_sensitive: 0.3, balanced: 0.5, qos_sensitive: 0.8 }
-  # [M13a] Spatial distribution — segment-aware radial bands
-  # [3GPP TR 38.913 Table 6.1-1; Devroye 1986]
-  spatial:
-    cell_radius: 20.0
-    segment_radii:
-      qos_sensitive: [2.0, 10.0]
-      balanced: [3.0, 18.0]
-      price_sensitive: [8.0, 20.0]
 
 # ── §12  Training ──
 training:
-  total_timesteps: 1000000
+  total_timesteps: 100000            # [OPT] 1M→100K (개발용 축소)
   learning_rate: 0.0003
   learning_rate_end: 0.00001
   lr_schedule: "linear"
-  batch_size: 256
-  buffer_size: 200000
+  batch_size: 512                   # [OPT-D] 256→512 GPU 활용도 향상  [Fedus 2020]
+  buffer_size: 50000                # [OPT] 200K→50K (개발용 축소)
   gamma: 0.995
   tau: 0.005
   ent_coef: "auto"
   ent_coef_init: 0.5
-  ent_coef_warmup_steps: 200000
   train_freq: 4                 # [M7]  [Fedus 2020]
-  gradient_steps: 4             # [M7]
-  eval_freq: 10000
-  n_eval_episodes: 20            # [EP1] 5→20; compensate shorter 30-step episodes
-  n_seeds: 5
+  gradient_steps: 2             # [OPT-D] 4→2; 총 gradient 계산량 유지 (2×512=4×256)  [Fedus 2020]
+  eval_freq: 20000              # [OPT-E] 10K→20K; 평가 간격 2배
+  n_eval_episodes: 10            # [OPT-E] 20→10; 에피소드 수 절반
+  n_seeds: 1                        # [OPT] 5→1 (개발용 축소)
+  parallel_seeds: false          # [OPT-A] 다중 seed 병렬 실행  [Henderson 2018]
+  max_parallel: 5                # [OPT-A] 최대 동시 프로세스 수
   curriculum:
     enabled: true
     # [D5] 3-phase curriculum  [Narvekar 2020; Bengio 2009; Achiam 2017]
@@ -182,10 +175,19 @@ training:
       - fraction: 0.60          # Phase 3: full optimization
         churn_join: true
         lagrangian_boost: 1.0
+  # [OPT-C] Early stopping  [Prechelt 2002; Henderson 2018]
+  # [ME-5] min_timesteps = 60% × total_timesteps = Phase 3 시작(40%) + 20% 추가 학습 보장
+  early_stopping:
+    enabled: true
+    patience: 10               # 10 evals × eval_freq(20K) = 200K steps 무개선 시 중지
+    min_timesteps: 60000       # [ME-5] 50K→60K; 0.60 × 100K — Phase 3 충분 학습 보장
+    min_improvement: 0.01      # 1% 상대 개선 임계값
 
-# ── §3.2  Observation  [D5] 24-D ──
+# ── §3.2  Observation  [ME-1] 23-D ──
+# [ME-1] 24D→23D: removed obs[1] (inactive fraction = 1 - obs[0], linearly dependent)
+# [Dulac-Arnold JMLR 2021] — minimize observation dimensionality for sample efficiency
 observation:
-  dim: 24                       # [D5][D6] 24-D (pviol_E EMA + load headroom)
+  dim: 23                       # [ME-1] 24→23; [D5][D6] pviol_E EMA + load headroom
   clip_min: -10.0
   clip_max: 10.0
 

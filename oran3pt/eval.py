@@ -8,21 +8,28 @@ REVISION 10 — Changes from v9:
         Population state persists across chained episodes.
         [Pardo ICML 2018; Gupta JSR 2006 — 24-month CLV horizon]
   Prior revisions:
-  [M13d] Per-user event logging (user_events_log.csv) for 3D dashboard
-         [Dulac-Arnold 2021 — per-user observability]
   [M8] Derived diagnostic columns (utilisation, margins, pop delta)
        [Dulac-Arnold 2021 — observability for real-world RL]
   [E9] Multi-seed model selection (evaluates best model across seeds)
   [F3] Fixed pandas FutureWarning in CLV groupby.apply
 
+  [M15] Automatic dashboard generation after evaluation
+        Calls html_dashboard, png_dashboard, business_dashboard
+        with graceful fallback on import/runtime errors.
+        --no-dashboard flag to suppress.
+        [Dulac-Arnold JMLR 2021 — post-training observability]
+
 Outputs:
   outputs/rollout_log.csv       — per-step metrics across repeats
   outputs/eval_summary.csv      — aggregate statistics
   outputs/clv_report.csv        — CLV analysis
-  outputs/user_events_log.csv   — [M13d] per-user join/churn events
+  outputs/training_convergence_dashboard.html  — [M15] HTML convergence
+  outputs/01..07_*.png          — [M15] PNG dashboard sheets (7)
+  outputs/business_dashboard.html — [M15] business KPI dashboard
 
 Usage:
   python -m oran3pt.eval --config config/default.yaml --model outputs/best_model.zip
+  python -m oran3pt.eval --no-dashboard   # skip dashboard generation
 """
 from __future__ import annotations
 
@@ -45,28 +52,17 @@ logger = logging.getLogger("oran3pt.eval")
 def evaluate_episode(env: OranSlicingPricingEnv,
                      model, repeat_id: int,
                      n_chains: int = 1,
-                     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Run evaluation episodes, returning (records, user_events).
+                     ) -> List[Dict[str, Any]]:
+    """Run evaluation episodes, returning records.
 
     [EP1] In continuous mode, chains `n_chains` consecutive episodes
     into one repeat. Population persists across episodes via env's
     continuous reset. Step numbers are renumbered globally (1..n_chains*T)
     so rollout_log.csv has the same 720-row format as v9.
-
-    [M13d] user_events contains per-user join/churn events for the
-    3D dashboard visualization.
     """
     obs, _ = env.reset()
     records: List[Dict[str, Any]] = []
-    user_events: List[Dict[str, Any]] = []
     global_step = 0
-
-    # [M13d] Record initial active users
-    for uid in range(env.N_total):
-        if env._active_mask[uid]:
-            user_events.append({
-                "step": 0, "event_type": "initial_active", "user_id": int(uid),
-            })
 
     for chain_idx in range(n_chains):
         if chain_idx > 0:
@@ -81,38 +77,25 @@ def evaluate_episode(env: OranSlicingPricingEnv,
                 action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
 
-            # [M13d] Extract user events before DataFrame conversion
-            churned = info.pop("churned_user_ids", [])
-            joined = info.pop("joined_user_ids", [])
-
             # [EP1] Renumber step globally across chained episodes
             global_step += 1
             info["step"] = global_step
             info["cycle"] = (global_step - 1) // env.T + 1
 
-            for uid in churned:
-                user_events.append({
-                    "step": global_step, "event_type": "churn",
-                    "user_id": int(uid),
-                })
-            for uid in joined:
-                user_events.append({
-                    "step": global_step, "event_type": "join",
-                    "user_id": int(uid),
-                })
-
             info["repeat"] = repeat_id
             records.append(info)
             done = terminated or truncated
 
-    return records, user_events
+    return records
 
 
 def run_evaluation(cfg: Dict[str, Any],
                    model_path: Optional[str] = None,
                    users_csv: Optional[str] = None,
                    n_repeats: int = 5,
-                   output_dir: str = "outputs") -> Path:
+                   output_dir: str = "outputs",
+                   config_path: Optional[str] = None,
+                   generate_dashboard: bool = True) -> Path:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -142,13 +125,16 @@ def run_evaluation(cfg: Dict[str, Any],
     else:
         n_chains = 1
 
+    # [ME-3] Per-repeat seed ensures statistically independent evaluations
+    # Each repeat uses seed = base_seed + repeat_id for reproducibility
+    # [Henderson AAAI 2018] — independent evaluation runs
+    base_seed = cfg.get("training", {}).get("eval_base_seed", 10000)
     all_records: List[Dict[str, Any]] = []
-    all_user_events: dict[int, List[Dict[str, Any]]] = {}  # [M13d] per-repeat
     for rep in tqdm(range(n_repeats), desc="Eval repeats"):
-        records, user_events = evaluate_episode(
+        env.reset(seed=base_seed + rep)
+        records = evaluate_episode(
             env, model, repeat_id=rep, n_chains=n_chains)
         all_records.extend(records)
-        all_user_events[rep] = user_events
 
     rollout_path = out / "rollout_log.csv"
     if all_records:
@@ -164,16 +150,6 @@ def run_evaluation(cfg: Dict[str, Any],
         df.to_csv(rollout_path, index=False)
         logger.info("Rollout log: %d rows -> %s", len(df), rollout_path)
 
-        # [M13d] Write user events for best repeat (highest cumulative profit)
-        profits_per_rep = df.groupby("repeat")["profit"].sum()
-        best_rep = int(profits_per_rep.idxmax())
-        best_events = all_user_events.get(best_rep, [])
-        if best_events:
-            events_path = out / "user_events_log.csv"
-            pd.DataFrame(best_events).to_csv(events_path, index=False)
-            logger.info("User events log: %d events (repeat %d) -> %s",
-                        len(best_events), best_rep, events_path)
-
         summary_path = out / "eval_summary.csv"
         num_cols = df.select_dtypes(include="number").columns
         mean_vals = df[num_cols].mean()
@@ -184,6 +160,11 @@ def run_evaluation(cfg: Dict[str, Any],
 
         if cfg.get("clv", {}).get("enabled", True):
             _compute_clv_report(cfg, df, out)
+
+    # [M15] Generate dashboards after all CSV outputs are written
+    if generate_dashboard:
+        generate_dashboards(cfg, output_dir=output_dir,
+                            config_path=config_path)
 
     return rollout_path
 
@@ -227,6 +208,75 @@ def _compute_clv_report(cfg: Dict[str, Any], df: pd.DataFrame,
     logger.info("CLV report -> %s  (CLV=%.0f KRW)", clv_path, clv)
 
 
+def generate_dashboards(cfg: Dict[str, Any],
+                        output_dir: str = "outputs",
+                        config_path: Optional[str] = None,
+                        ) -> List[Path]:
+    """[M15] Generate all post-evaluation dashboards.
+
+    Produces (when input CSVs exist):
+      1. HTML convergence dashboard  (from train_log_seed0.csv)
+      2. PNG dashboard sheets × 7    (from train/eval CSVs)  [M11]
+      3. Business KPI dashboard      (from rollout_log.csv)  [M14]
+
+    Each generator is wrapped in try/except so one failure does not
+    block the others.  Imports are deferred to avoid hard dependencies.
+
+    [Dulac-Arnold JMLR 2021] — post-training observability
+    [Henderson AAAI 2018]    — multi-seed convergence analysis
+    """
+    out = Path(output_dir)
+    generated: List[Path] = []
+
+    # ── 1. HTML Convergence Dashboard ──
+    train_csv = out / "train_log_seed0.csv"
+    fallback_csv = out / "rollout_log.csv"
+    src_csv = str(train_csv) if train_csv.exists() else (
+        str(fallback_csv) if fallback_csv.exists() else None)
+    if src_csv is not None:
+        try:
+            from .html_dashboard import generate_html_dashboard
+            p = generate_html_dashboard(
+                csv_path=src_csv,
+                output_path=str(out / "training_convergence_dashboard.html"),
+                seed=0, revision="10")
+            generated.append(Path(p))
+            logger.info("[M15] HTML convergence dashboard -> %s", p)
+        except Exception as e:
+            logger.warning("[M15] HTML dashboard failed: %s", e)
+
+    # ── 2. PNG Dashboard Sheets [M11] ──
+    try:
+        from .png_dashboard import generate_all_pngs
+        cp = config_path or "config/default.yaml"
+        pngs = generate_all_pngs(
+            output_dir=output_dir, config_path=cp,
+            mode="auto", dpi=180)
+        generated.extend(pngs)
+        logger.info("[M15] PNG sheets: %d files", len(pngs))
+    except Exception as e:
+        logger.warning("[M15] PNG dashboard failed: %s", e)
+
+    # ── 3. Business KPI Dashboard [M14] ──
+    rollout_csv = out / "rollout_log.csv"
+    if rollout_csv.exists():
+        try:
+            from .business_dashboard import generate_business_dashboard
+            clv_csv = out / "clv_report.csv"
+            p = generate_business_dashboard(
+                csv_path=str(rollout_csv),
+                output_path=str(out / "business_dashboard.html"),
+                clv_path=str(clv_csv) if clv_csv.exists() else None,
+                config_path=config_path)
+            generated.append(Path(p))
+            logger.info("[M15] Business dashboard -> %s", p)
+        except Exception as e:
+            logger.warning("[M15] Business dashboard failed: %s", e)
+
+    logger.info("[M15] Dashboard generation complete: %d files", len(generated))
+    return generated
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate trained agent")
     parser.add_argument("--config", default="config/default.yaml")
@@ -234,6 +284,8 @@ def main() -> None:
     parser.add_argument("--users", default="data/users_init.csv")
     parser.add_argument("--output", default="outputs")
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--no-dashboard", action="store_true", default=False,
+                        help="Skip dashboard generation after evaluation")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -241,7 +293,9 @@ def main() -> None:
     cfg = load_config(args.config)
     users_csv = args.users if Path(args.users).exists() else None
     run_evaluation(cfg, model_path=args.model, users_csv=users_csv,
-                   n_repeats=args.repeats, output_dir=args.output)
+                   n_repeats=args.repeats, output_dir=args.output,
+                   config_path=args.config,
+                   generate_dashboard=not args.no_dashboard)
 
 
 if __name__ == "__main__":

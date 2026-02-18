@@ -28,9 +28,11 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import multiprocessing as mp
+import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -65,6 +67,8 @@ class CSVLogger:
     """Append step-level info dicts to a CSV file.
 
     [F5] Uses extrasaction='ignore' so SB3-injected keys are skipped.
+    [HI-4] Supports context manager protocol (__enter__/__exit__)
+    to ensure file handle is closed even on exceptions.
     """
 
     def __init__(self, path: str) -> None:
@@ -73,6 +77,12 @@ class CSVLogger:
         self._f = None
         self._writer = None
         self._fields: Optional[List[str]] = None
+
+    def __enter__(self) -> "CSVLogger":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def log(self, record: Dict[str, Any]) -> None:
         if self._writer is None:
@@ -185,11 +195,17 @@ if _SB3_AVAILABLE:
         Replaces simple dual ascent with PID control for faster,
         more stable convergence to the feasible region.
 
+        [CR-2] Anti-windup: integral term clamped to
+        [-lambda_max/Ki, lambda_max/Ki] to prevent windup when lambda
+        is saturated at lambda_max. Without this, the integral accumulates
+        indefinitely during sustained violations, causing sluggish lambda
+        reduction when pviol_E drops below threshold.
+
         References:
-          [Stooke et al., ICLR 2020]   — PID Lagrangian for responsive safety
+          [Stooke et al., ICLR 2020 §3.2] — PID Lagrangian + integral windup
           [Tessler et al., ICML 2019]  — RCPO baseline
           [Boyd & Vandenberghe, 2004]  — Dual convergence theory
-          [Paternain et al., CDC 2019] — Safe RL via primal-dual
+          [Mao et al., arXiv 2025]     — PID not plug-and-play; windup key issue
         """
 
         def __init__(self, threshold: float = 0.15,
@@ -209,6 +225,9 @@ if _SB3_AVAILABLE:
             self._error_integral: float = 0.0
             self._prev_error: float = 0.0
             self._pviol_buffer: List[float] = []
+            # [CR-2] Anti-windup: integral bound = lambda_max / Ki
+            # [Stooke ICLR 2020 §3.2; Mao arXiv 2025]
+            self._integral_max: float = lambda_max / max(Ki, 1e-8)
 
         def _on_step(self) -> bool:
             infos = self.locals.get("infos", [])
@@ -219,8 +238,12 @@ if _SB3_AVAILABLE:
                 mean_pviol = float(np.mean(self._pviol_buffer))
                 error = mean_pviol - self._threshold
 
-                # PID update
-                self._error_integral += error
+                # [CR-2] PID update with anti-windup integral clamping
+                # [Stooke ICLR 2020 §3.2]
+                self._error_integral = max(
+                    -self._integral_max,
+                    min(self._integral_max,
+                        self._error_integral + error))
                 error_derivative = error - self._prev_error
                 delta = (self._Kp * error
                          + self._Ki * self._error_integral
@@ -242,12 +265,66 @@ if _SB3_AVAILABLE:
                             self.lambda_val, mean_pviol, error)
             return True
 
+    class _EarlyStoppingCallback(BaseCallback):
+        """[OPT-C] Eval reward plateau detection → early stopping.
+
+        Monitors EvalCallback.best_mean_reward. If no improvement exceeds
+        min_improvement for patience consecutive evaluations after
+        min_timesteps, stops training.
+
+        References:
+          [Prechelt 2002] Early stopping methodology
+          [Henderson AAAI 2018] Training budget allocation
+        """
+
+        def __init__(self, eval_callback: EvalCallback,
+                     patience: int = 10,
+                     min_timesteps: int = 500000,
+                     min_improvement: float = 0.01,
+                     verbose: int = 0):
+            super().__init__(verbose)
+            self._eval_cb = eval_callback
+            self._patience = patience
+            self._min_ts = min_timesteps
+            self._min_imp = min_improvement
+            self._best_reward = -np.inf
+            self._stale_count = 0
+            self._last_eval_calls = 0
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps < self._min_ts:
+                return True
+            # Only check when a new evaluation has occurred
+            if self._eval_cb.n_calls == self._last_eval_calls:
+                return True
+            self._last_eval_calls = self._eval_cb.n_calls
+
+            current = self._eval_cb.best_mean_reward
+            if self._best_reward < 0:
+                threshold = self._best_reward * (1.0 - self._min_imp)
+            else:
+                threshold = self._best_reward * (1.0 + self._min_imp)
+
+            if current > threshold:
+                self._best_reward = current
+                self._stale_count = 0
+            else:
+                self._stale_count += 1
+
+            if self._stale_count >= self._patience:
+                logger.info("[OPT-C] Early stopping at step %d "
+                           "(no improvement for %d evals, best=%.4f)",
+                           self.num_timesteps, self._patience,
+                           self._best_reward)
+                return False  # stops model.learn()
+            return True
+
 
 def train_single_seed(cfg: Dict[str, Any],
                       users_csv: Optional[str] = None,
                       output_dir: str = "outputs",
-                      seed: int = 0) -> Path:
-    """Train a single SAC seed; return path to best model."""
+                      seed: int = 0) -> Tuple[Path, float]:
+    """[OPT-H] Train a single SAC seed; return (path, best_eval_reward)."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -287,7 +364,7 @@ def train_single_seed(cfg: Dict[str, Any],
         stats = _run_random_baseline(cfg, total_timesteps, csv_path,
                                      users_csv=users_csv, seed=seed)
         logger.info("Random baseline stats: %s", stats)
-        return out / f"train_log_seed{seed}.csv"
+        return out / f"train_log_seed{seed}.csv", stats["mean_reward"]
 
     logger.info("SB3 available — training SAC for %d timesteps (seed %d)",
                 total_timesteps, seed)
@@ -322,10 +399,16 @@ def train_single_seed(cfg: Dict[str, Any],
         learning_rate = lr_start
         logger.info("  LR: constant %g", lr_start)
 
-    if ent_coef_init is not None:
+    # [OPT-B] SB3 "auto_X" format: auto-tuning enabled + init value X
+    # float 전달 시 auto-tuning이 영구 비활성화됨 (SB3 sac.py:180-195)
+    # [Haarnoja ICML 2018 §5.1; Wang & Ni, ICML AutoML 2020]
+    if ent_coef_init is not None and ent_coef == "auto":
+        effective_ent_coef = f"auto_{ent_coef_init}"
+        logger.info("  [OPT-B] ent_coef: '%s' (auto-tune, init=%.2f, "
+                    "target_entropy=-5)", effective_ent_coef, ent_coef_init)
+    elif ent_coef_init is not None:
         effective_ent_coef = ent_coef_init
-        logger.info("  [R8] ent_coef_init: %g (will transition to '%s')",
-                    ent_coef_init, ent_coef)
+        logger.info("  ent_coef: %g (fixed, no auto-tune)", ent_coef_init)
     else:
         effective_ent_coef = ent_coef
 
@@ -373,6 +456,20 @@ def train_single_seed(cfg: Dict[str, Any],
 
         callbacks = [_LogCallback(csvlog), eval_cb]
 
+        # [OPT-C] Early stopping callback
+        es_cfg = tc.get("early_stopping", {})
+        if es_cfg.get("enabled", False):
+            es_cb = _EarlyStoppingCallback(
+                eval_callback=eval_cb,
+                patience=es_cfg.get("patience", 10),
+                min_timesteps=es_cfg.get("min_timesteps", 500000),
+                min_improvement=es_cfg.get("min_improvement", 0.01),
+            )
+            callbacks.append(es_cb)
+            logger.info("[OPT-C] Early stopping: patience=%d, "
+                       "min_timesteps=%d, min_improvement=%.3f",
+                       es_cb._patience, es_cb._min_ts, es_cb._min_imp)
+
         if curriculum_enabled:
             callbacks.append(_CurriculumCallback(
                 curriculum_phases, total_timesteps))
@@ -398,18 +495,22 @@ def train_single_seed(cfg: Dict[str, Any],
                     callback=callbacks,
                     progress_bar=True)
 
+        # [OPT-H] Retrieve best eval reward for cross-seed comparison
+        best_reward = float(eval_cb.best_mean_reward)
+
         final_path = out / f"final_model_seed{seed}"
         model.save(str(final_path))
         csvlog.close()
-        logger.info("Seed %d done.  Best -> %s.zip  Final -> %s.zip",
-                     seed, best_model_name, final_path)
+        logger.info("Seed %d done.  Best -> %s.zip  Final -> %s.zip  "
+                     "best_reward=%.4f", seed, best_model_name, final_path,
+                     best_reward)
 
         best_zip = out / f"{best_model_name}.zip"
         if not best_zip.exists():
             best_zip = out / f"seed{seed}" / "best_model.zip"
         if best_zip.exists():
-            return best_zip
-        return Path(str(final_path) + ".zip")
+            return best_zip, best_reward
+        return Path(str(final_path) + ".zip"), best_reward
 
     except Exception as e:
         csvlog.close()
@@ -419,39 +520,117 @@ def train_single_seed(cfg: Dict[str, Any],
         stats = _run_random_baseline(cfg, total_timesteps, csv_path,
                                      users_csv=users_csv, seed=seed)
         logger.info("Random baseline stats: %s", stats)
-        return out / f"train_log_seed{seed}.csv"
+        return out / f"train_log_seed{seed}.csv", stats["mean_reward"]
+
+
+def _seed_worker(seed: int, cfg: Dict[str, Any],
+                 users_csv: Optional[str],
+                 output_dir: str,
+                 result_queue: mp.Queue) -> None:
+    """[OPT-A] Parallel seed training worker.
+
+    Each seed is fully independent: separate env, model, buffer, CSV.
+    macOS spawn mode ensures MPS safety.
+    [Henderson AAAI 2018] multi-seed reproducibility.
+    """
+    try:
+        path, reward = train_single_seed(cfg, users_csv, output_dir, seed)
+        result_queue.put((seed, str(path), reward))
+    except Exception as e:
+        logger.error("Seed %d failed: %s", seed, e)
+        result_queue.put((seed, None, float('-inf')))
+
+
+def _train_sequential(cfg: Dict[str, Any],
+                      users_csv: Optional[str],
+                      output_dir: str,
+                      n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float]]]:
+    """Sequential multi-seed training (fallback or n_seeds=1)."""
+    results: List[Tuple[int, str, float]] = []
+    for seed_idx in range(n_seeds):
+        logger.info("======== Training seed %d / %d ========",
+                     seed_idx + 1, n_seeds)
+        p, reward = train_single_seed(cfg, users_csv=users_csv,
+                                      output_dir=output_dir, seed=seed_idx)
+        results.append((seed_idx, str(p), reward))
+    return Path(output_dir), results
+
+
+def _train_parallel(cfg: Dict[str, Any],
+                    users_csv: Optional[str],
+                    output_dir: str,
+                    n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float]]]:
+    """[OPT-A] Parallel multi-seed training via multiprocessing.
+
+    Each seed runs in a separate process. macOS spawn mode ensures
+    MPS safety. Memory: ~150MB/process × n_seeds.
+    [Henderson AAAI 2018] multi-seed reproducibility.
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    max_parallel = cfg.get("training", {}).get("max_parallel", n_seeds)
+    result_queue = mp.Queue()
+
+    processes = []
+    for seed_idx in range(min(n_seeds, max_parallel)):
+        p = mp.Process(
+            target=_seed_worker,
+            args=(seed_idx, cfg, users_csv, output_dir, result_queue))
+        p.start()
+        processes.append(p)
+
+    results: List[Tuple[int, str, float]] = []
+    for _ in range(n_seeds):
+        results.append(result_queue.get())
+    for p in processes:
+        p.join()
+
+    return out, results
 
 
 def train(cfg: Dict[str, Any],
           users_csv: Optional[str] = None,
           output_dir: str = "outputs") -> Path:
-    """[E9] Multi-seed training loop.  Returns path to overall best model."""
+    """[E9][OPT-A][OPT-H] Multi-seed training with parallel support.
+
+    Returns path to canonical best_model.zip (selected by highest eval reward).
+    """
     tc = cfg.get("training", {})
     n_seeds = tc.get("n_seeds", 1)
+    parallel = tc.get("parallel_seeds", False)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    best_paths: List[Path] = []
-    for seed_idx in range(n_seeds):
-        logger.info("======== Training seed %d / %d ========",
-                     seed_idx + 1, n_seeds)
-        p = train_single_seed(cfg, users_csv=users_csv,
-                              output_dir=output_dir, seed=seed_idx)
-        best_paths.append(p)
+    if n_seeds > 1 and parallel and _SB3_AVAILABLE:
+        _, results = _train_parallel(cfg, users_csv, output_dir, n_seeds)
+    else:
+        _, results = _train_sequential(cfg, users_csv, output_dir, n_seeds)
 
+    # [OPT-H] Select best model across all seeds by eval reward
+    valid_results = [(s, p, r) for s, p, r in results if p is not None]
+    if not valid_results:
+        logger.warning("No valid seed results. No best_model.zip created.")
+        return out / "best_model.zip"
+
+    best_seed, best_path_str, best_reward = max(
+        valid_results, key=lambda x: x[2])
     canonical = out / "best_model.zip"
-    if best_paths and best_paths[0].exists():
-        if best_paths[0].resolve() != canonical.resolve():
-            import shutil
-            shutil.copy2(best_paths[0], canonical)
-        logger.info("Canonical best model -> %s", canonical)
+    best_path = Path(best_path_str)
 
+    if best_path.exists() and best_path.resolve() != canonical.resolve():
+        shutil.copy2(best_path, canonical)
+
+    logger.info("[OPT-H] Best model: seed %d (reward=%.4f) -> %s",
+               best_seed, best_reward, canonical)
     return canonical
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train SAC (3-part tariff)")
     parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--override", default=None,
+                        help="[CR-3] Override config (e.g. config/production.yaml)")
     parser.add_argument("--users", default="data/users_init.csv")
     parser.add_argument("--output", default="outputs")
     parser.add_argument("--seeds", type=int, default=None,
@@ -467,7 +646,7 @@ def main() -> None:
     else:
         logger.warning("SB3 NOT available: %s", _SB3_IMPORT_ERROR)
 
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, override_path=args.override)
     if args.seeds is not None:
         cfg.setdefault("training", {})["n_seeds"] = args.seeds
     users_csv = args.users if Path(args.users).exists() else None

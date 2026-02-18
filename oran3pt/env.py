@@ -261,11 +261,15 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_over_rev_E: float = 0.0
         self._prev_n_rejected: int = 0       # [D1]
         self._cycle_pricing = np.zeros(4, dtype=np.float64)  # [D2]
-        self._last_churned_ids: list = []   # [M13c]
-        self._last_joined_ids: list = []    # [M13c]
         self._pviol_E_ema: float = 0.0     # [D6] EMA for obs trend
         self._lagrangian_boost: float = 1.0  # [D5] curriculum phase boost
         self._churn_rate_ema: float = 0.0  # [EP1] churn rate EMA for obs[15]
+
+        # [OPT-F] Pre-computed static arrays and caches
+        self._a_range = np.maximum(self._a_hi - self._a_lo, 1e-8)
+        self._cached_N_act: int = 0
+        self._cached_N_U: int = 0
+        self._cached_N_E: int = 0
 
     def _load_users(self, csv_path: Optional[str]) -> None:
         if csv_path is not None and Path(csv_path).exists():
@@ -323,9 +327,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._cycle_usage_E = 0.0
         self._prev_over_U = 0.0
         self._prev_over_E = 0.0
-        self._last_churned_ids = []   # [M13c]
-        self._last_joined_ids = []    # [M13c]
-
         if not is_continuous:
             # Full reset — first call or episodic mode
             self._active_mask = self._init_active.copy()
@@ -349,6 +350,11 @@ class OranSlicingPricingEnv(gym.Env):
             self._churn_rate_ema = 0.0     # [EP1]
         # else: continuous mode — population, prev_action, pviol_E_ema,
         #       financial state, churn_rate_ema all persist
+
+        # [OPT-F] Initialize population cache for first _build_obs call
+        self._cached_N_act = int(self._active_mask.sum())
+        self._cached_N_U = int((self._active_mask * self._slice_is_U).sum())
+        self._cached_N_E = self._cached_N_act - self._cached_N_U
 
         self._first_reset_done = True
         return self._build_obs(), {}
@@ -465,10 +471,6 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_over_U = 0.0
             self._prev_over_E = 0.0
 
-        # [M13c] Reset per-step user event lists
-        self._last_churned_ids = []
-        self._last_joined_ids = []
-
         # Market dynamics
         if self._curriculum_phase == 1:
             n_join, n_churn, n_rejected = 0, 0, 0
@@ -476,9 +478,13 @@ class OranSlicingPricingEnv(gym.Env):
             n_join, n_churn, n_rejected = self._market_step(
                 F_U, p_over_U, F_E, p_over_E, rho_U)
 
+        # [OPT-F] Cache population counts — computed once, reused in _build_obs
         N_act = int(self._active_mask.sum())
         N_U = int((self._active_mask * self._slice_is_U).sum())
         N_E = N_act - N_U
+        self._cached_N_act = N_act
+        self._cached_N_U = N_U
+        self._cached_N_E = N_E
 
         # Traffic generation
         L_U, L_E = self._generate_traffic(p_over_U, p_over_E)
@@ -532,9 +538,9 @@ class OranSlicingPricingEnv(gym.Env):
         smooth_penalty = 0.0
         if self._smooth_enabled and self.t > 1:
             a_full = np.array([F_U, p_over_U, F_E, p_over_E, rho_U])
-            a_range = np.maximum(self._a_hi - self._a_lo, 1e-8)
-            a_norm = (a_full - self._a_lo) / a_range
-            prev_norm = (self._prev_action - self._a_lo) / a_range
+            # [OPT-F] Use pre-computed _a_range
+            a_norm = (a_full - self._a_lo) / self._a_range
+            prev_norm = (self._prev_action - self._a_lo) / self._a_range
             smooth_penalty = float(np.sum(
                 self._smooth_weights * (a_norm - prev_norm) ** 2))
 
@@ -606,8 +612,6 @@ class OranSlicingPricingEnv(gym.Env):
             "lagrangian_penalty": lagrangian_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
-            "churned_user_ids": self._last_churned_ids,   # [M13c]
-            "joined_user_ids": self._last_joined_ids,     # [M13c]
         }
 
     # ── Traffic ───────────────────────────────────────────────────────
@@ -615,16 +619,20 @@ class OranSlicingPricingEnv(gym.Env):
     def _generate_traffic(self, p_over_U: float = 0.0,
                           p_over_E: float = 0.0
                           ) -> Tuple[float, float]:
-        act = self._active_mask
-        if int(act.sum()) == 0:
+        # [OPT-F] Only sample active users to avoid wasted RNG calls
+        active_idx = np.where(self._active_mask)[0]
+        if len(active_idx) == 0:
             return 0.0, 0.0
 
         traf_u = self.cfg["traffic"]["URLLC"]
         traf_e = self.cfg["traffic"]["eMBB"]
 
-        raw_u = self._rng.lognormal(self._mu_u, self._sig_u)
+        # Sample only active users (saves ~60% RNG when 200/500 active)
+        raw_u = self._rng.lognormal(
+            self._mu_u[active_idx], self._sig_u[active_idx])
         raw_u = np.clip(raw_u, traf_u["D_min_gb"], traf_u["D_max_gb"])
-        raw_e = self._rng.lognormal(self._mu_e, self._sig_e)
+        raw_e = self._rng.lognormal(
+            self._mu_e[active_idx], self._sig_e[active_idx])
         raw_e = np.clip(raw_e, traf_e["D_min_gb"], traf_e["D_max_gb"])
 
         if self._demand_elast_enabled:
@@ -637,8 +645,10 @@ class OranSlicingPricingEnv(gym.Env):
             raw_u *= mult_u
             raw_e *= mult_e
 
-        raw_u *= act * self._slice_is_U
-        raw_e *= act * self._slice_is_E
+        slice_u_active = self._slice_is_U[active_idx]
+        slice_e_active = self._slice_is_E[active_idx]
+        raw_u *= slice_u_active
+        raw_e *= slice_e_active
         return float(raw_u.sum()), float(raw_e.sum())
 
     # ── Market dynamics ───────────────────────────────────────────────
@@ -694,7 +704,6 @@ class OranSlicingPricingEnv(gym.Env):
                 scores[~self._active_mask] = -1.0
                 idx = np.argsort(scores)[-n_churn:]
                 self._active_mask[idx] = False
-                self._last_churned_ids = idx.tolist()  # [M13c]
 
             # [D1] Admission gate
             if n_join_cand > 0:
@@ -706,7 +715,6 @@ class OranSlicingPricingEnv(gym.Env):
                     C_E, self._prev_L_E, C_U, self._prev_L_U)
                 if n_join > 0:
                     self._active_mask[cand_idx[:n_join]] = True
-                    self._last_joined_ids = cand_idx[:n_join].tolist()  # [M13c]
             else:
                 n_join = 0
         else:
@@ -725,7 +733,6 @@ class OranSlicingPricingEnv(gym.Env):
                     size=min(n_churn, len(active_idx)),
                     replace=False, p=probs)
                 self._active_mask[chosen] = False
-                self._last_churned_ids = chosen.tolist()  # [M13c]
 
             if n_join_cand > 0:
                 inact_idx = np.where(~self._active_mask)[0]
@@ -740,7 +747,6 @@ class OranSlicingPricingEnv(gym.Env):
                     C_E, self._prev_L_E, C_U, self._prev_L_U)
                 if n_join > 0:
                     self._active_mask[cand_idx[:n_join]] = True
-                    self._last_joined_ids = cand_idx[:n_join].tolist()  # [M13c]
             else:
                 n_join = 0
 
@@ -769,50 +775,52 @@ class OranSlicingPricingEnv(gym.Env):
     # ── Observation ───────────────────────────────────────────────────
 
     def _build_obs(self) -> np.ndarray:
-        N_act = int(self._active_mask.sum())
-        N_inact = self.N_total - N_act
-        N_U = int((self._active_mask * self._slice_is_U).sum())
-        N_E = N_act - N_U
+        # [OPT-F] Use cached population counts from _run_step
+        N_act = self._cached_N_act
+        N_U = self._cached_N_U
+        N_E = self._cached_N_E
 
         obs = np.zeros(self._obs_dim, dtype=np.float32)
 
+        # [ME-1] obs[1] (inactive fraction) removed — linearly dependent
+        # on obs[0] (active fraction). 24D → 23D.
+        # [Dulac-Arnold JMLR 2021 — minimize observation dimensionality]
         obs[0] = N_act / max(self.N_total, 1)
-        obs[1] = N_inact / max(self.N_total, 1)
-        obs[2] = self._prev_n_join / max(self.N_total * 0.05, 1)
-        obs[3] = self._prev_n_churn / max(self.N_total * 0.05, 1)
-        obs[4] = self._prev_pviol_U
-        obs[5] = self._prev_pviol_E
-        obs[6] = self._prev_revenue / max(self._reward_scale, 1)
-        obs[7] = self._prev_cost / max(self._reward_scale, 1)
-        obs[8] = self._prev_profit / max(self._reward_scale, 1)
+        obs[1] = self._prev_n_join / max(self.N_total * 0.05, 1)
+        obs[2] = self._prev_n_churn / max(self.N_total * 0.05, 1)
+        obs[3] = self._prev_pviol_U
+        obs[4] = self._prev_pviol_E
+        obs[5] = self._prev_revenue / max(self._reward_scale, 1)
+        obs[6] = self._prev_cost / max(self._reward_scale, 1)
+        obs[7] = self._prev_profit / max(self._reward_scale, 1)
 
-        a_range = np.maximum(self._a_hi - self._a_lo, 1e-8)
-        obs[9:14] = ((self._prev_action - self._a_lo) / a_range
+        # [OPT-F] Use pre-computed _a_range
+        obs[8:13] = ((self._prev_action - self._a_lo) / self._a_range
                       ).astype(np.float32)
 
-        obs[14] = ((self.t - 1) % self.T) / max(self.T, 1)
-        # [EP1] obs[15]: churn_rate_ema (continuous) or episode_progress (episodic)
+        obs[13] = ((self.t - 1) % self.T) / max(self.T, 1)
+        # [EP1] obs[14]: churn_rate_ema (continuous) or episode_progress (episodic)
         # In continuous mode, episode_progress is spurious (no seasonality).
         # churn_rate_ema provides actionable market signal.
         # [Pardo ICML 2018; Dulac-Arnold JMLR 2021]
         if self._episode_mode == "continuous":
-            obs[15] = self._churn_rate_ema
+            obs[14] = self._churn_rate_ema
         else:
-            obs[15] = self.t / max(self.episode_len, 1)
-        obs[16] = self._cycle_usage_U / max(
+            obs[14] = self.t / max(self.episode_len, 1)
+        obs[15] = self._cycle_usage_U / max(
             self.Q_U * max(N_U, 1), 1e-6)
-        obs[17] = self._cycle_usage_E / max(
+        obs[16] = self._cycle_usage_E / max(
             self.Q_E * max(N_E, 1), 1e-6)
-        obs[18] = self._prev_L_U / max(self._prev_C_U, 1e-6)
-        obs[19] = self._prev_L_E / max(self._prev_C_E, 1e-6)
-        obs[20] = self._prev_over_rev_E / max(
+        obs[17] = self._prev_L_U / max(self._prev_C_U, 1e-6)
+        obs[18] = self._prev_L_E / max(self._prev_C_E, 1e-6)
+        obs[19] = self._prev_over_rev_E / max(
             self._prev_action[3] * max(N_E, 1), 1e-6)
-        obs[21] = (self.T - self._cycle_step) / max(self.T, 1)
+        obs[20] = (self.T - self._cycle_step) / max(self.T, 1)
 
         # [D5][D6] v9 extended features
-        if self._obs_dim >= 24:
-            obs[22] = self._pviol_E_ema          # [D6] pviol_E trend (EMA)
-            obs[23] = max(0.0, 1.0 - self._prev_L_E / max(
+        if self._obs_dim >= 23:
+            obs[21] = self._pviol_E_ema          # [D6] pviol_E trend (EMA)
+            obs[22] = max(0.0, 1.0 - self._prev_L_E / max(
                 self._prev_C_E, 1e-6))            # load headroom
 
         return np.clip(obs, self._obs_lo, self._obs_hi)

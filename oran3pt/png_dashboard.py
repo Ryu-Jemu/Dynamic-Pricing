@@ -989,14 +989,26 @@ def _render_sheet_07_convergence(
         ax.fill_between(episodes, p25, p75, color=color, alpha=0.15,
                         label="P25–P75 envelope")
 
-        # Curriculum phase boundary
-        curriculum_frac = cfg.get("training", {}).get(
-            "curriculum", {}).get("phase1_fraction", 0.20)
-        phase1_ep = int(max_episodes * curriculum_frac)
-        if phase1_ep > 0 and phase1_ep < max_episodes:
-            ax.axvline(phase1_ep, color=GRAY, ls=":", alpha=0.6)
-            ax.text(phase1_ep + 1, ax.get_ylim()[1] * 0.95,
-                    "Phase 1→2", fontsize=7, color=GRAY)
+        # [ME-4] Curriculum phase boundaries — use phases list (v9+)
+        cur_cfg = cfg.get("training", {}).get("curriculum", {})
+        phases = cur_cfg.get("phases", [])
+        if phases:
+            cumul = 0.0
+            for pi, phase in enumerate(phases[:-1]):
+                cumul += phase.get("fraction", 0)
+                boundary_ep = int(max_episodes * cumul)
+                if 0 < boundary_ep < max_episodes:
+                    ax.axvline(boundary_ep, color=GRAY, ls=":", alpha=0.6)
+                    ax.text(boundary_ep + 1, ax.get_ylim()[1] * 0.95,
+                            f"Phase {pi+1}→{pi+2}", fontsize=7, color=GRAY)
+        else:
+            # Legacy fallback: single phase1_fraction boundary
+            curriculum_frac = cur_cfg.get("phase1_fraction", 0.20)
+            phase1_ep = int(max_episodes * curriculum_frac)
+            if 0 < phase1_ep < max_episodes:
+                ax.axvline(phase1_ep, color=GRAY, ls=":", alpha=0.6)
+                ax.text(phase1_ep + 1, ax.get_ylim()[1] * 0.95,
+                        "Phase 1→2", fontsize=7, color=GRAY)
 
         # Specific thresholds
         pviol_threshold = cfg.get("lagrangian_qos", {}).get(

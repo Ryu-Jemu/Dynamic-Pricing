@@ -20,12 +20,41 @@ logger = logging.getLogger("oran3pt.utils")
 
 # ── Config I/O ────────────────────────────────────────────────────────
 
-def load_config(path: str | Path) -> Dict[str, Any]:
+def load_config(path: str | Path,
+                override_path: str | Path | None = None) -> Dict[str, Any]:
+    """Load YAML config, optionally deep-merging an override file on top.
+
+    [CR-3] Override support enables production.yaml to selectively
+    override default.yaml values without duplicating the full config.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    if override_path is not None:
+        override_path = Path(override_path)
+        if override_path.exists():
+            with open(override_path) as f:
+                overrides = yaml.safe_load(f) or {}
+            cfg = _deep_merge(cfg, overrides)
+    return cfg
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge override dict into base dict.
+
+    [CR-3] Leaf values in override replace base values.
+    Nested dicts are merged recursively.
+    """
+    result = base.copy()
+    for k, v in override.items():
+        if (k in result and isinstance(result[k], dict)
+                and isinstance(v, dict)):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
 
 # ── Math ──────────────────────────────────────────────────────────────
 

@@ -1,0 +1,23 @@
+# ================================================================
+# Production Configuration Override
+# ================================================================
+# This file overrides default.yaml values for production training.
+# Usage: merge production.yaml over default.yaml before training.
+#
+# [CR-3] default.yaml is reduced for development (100K steps, 1 seed).
+# Production requires full training budget for convergence.
+#
+# References:
+#   [Henderson AAAI 2018] — 5+ seeds, 500K-1M steps for reliable results
+#   [Haarnoja ICML 2018]  — SAC convergence on continuous action spaces
+# ================================================================
+
+training:
+  total_timesteps: 1000000     # [M1] Full training budget  [Henderson 2018]
+  n_seeds: 5                   # [E9] Multi-seed for statistical significance
+  buffer_size: 200000          # Full replay buffer capacity
+  parallel_seeds: true         # [OPT-A] Enable parallel seed training
+  eval_freq: 10000             # More frequent evaluation with larger budget
+  n_eval_episodes: 20          # [EP1] Sufficient for short-episode variance
+  early_stopping:
+    min_timesteps: 600000      # [ME-5] 60% × 1M = Phase 3 start + 200K learning

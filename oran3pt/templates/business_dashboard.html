@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>O-RAN AI 가격 최적화 — 비즈니스 성과 보고서</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-body: #0c0e14;
+  --bg-card: #141722;
+  --bg-card-hover: #1a1e2e;
+  --border: #1e2336;
+  --border-accent: #2a3050;
+  --text-primary: #e8eaf0;
+  --text-secondary: #8890a4;
+  --text-dim: #555d74;
+  --accent-blue: #4a9eff;
+  --accent-blue-dim: rgba(74,158,255,0.12);
+  --accent-green: #34d399;
+  --accent-green-dim: rgba(52,211,153,0.12);
+  --accent-red: #f87171;
+  --accent-red-dim: rgba(248,113,113,0.12);
+  --accent-orange: #fb923c;
+  --accent-orange-dim: rgba(251,146,60,0.12);
+  --accent-purple: #a78bfa;
+  --accent-purple-dim: rgba(167,139,250,0.12);
+  --accent-cyan: #22d3ee;
+  --accent-yellow: #fbbf24;
+  --grid: rgba(255,255,255,0.04);
+  --grid-line: rgba(255,255,255,0.06);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg-body);
+  color: var(--text-primary);
+  font-family: 'DM Sans', sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 32px 40px;
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 36px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.header-left h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+.header-left .subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  font-weight: 400;
+}
+.header-right {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 400;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.tag .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.tag-blue .dot { background: var(--accent-blue); }
+.tag-green .dot { background: var(--accent-green); }
+.tag-orange .dot { background: var(--accent-orange); }
+.tag-purple .dot { background: var(--accent-purple); }
+.tag-cyan .dot { background: var(--accent-cyan); }
+
+/* KPI strip */
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+.kpi-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+}
+.kpi-card.blue::before { background: var(--accent-blue); }
+.kpi-card.green::before { background: var(--accent-green); }
+.kpi-card.orange::before { background: var(--accent-orange); }
+.kpi-card.red::before { background: var(--accent-red); }
+.kpi-card.purple::before { background: var(--accent-purple); }
+.kpi-card.cyan::before { background: var(--accent-cyan); }
+.kpi-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.kpi-value {
+  font-size: 22px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: -0.02em;
+}
+.kpi-sub {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 4px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* Section titles */
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  margin-top: 40px;
+}
+.section-title h2 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.section-title .line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.section-title .badge {
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+  border-radius: 4px;
+}
+
+/* Chart containers */
+.chart-row {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.chart-row.cols-1 { grid-template-columns: 1fr; }
+.chart-row.cols-2 { grid-template-columns: 1fr 1fr; }
+.chart-row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.chart-row.cols-2-1 { grid-template-columns: 2fr 1fr; }
+.chart-row.cols-1-2 { grid-template-columns: 1fr 2fr; }
+
+.chart-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px 16px;
+}
+.chart-card-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.chart-card-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+.chart-wrap {
+  position: relative;
+  width: 100%;
+}
+.chart-wrap.h250 { height: 250px; }
+.chart-wrap.h280 { height: 280px; }
+.chart-wrap.h200 { height: 200px; }
+
+/* Gauge */
+.gauge-container {
+  display: flex;
+  justify-content: center;
+  gap: 48px;
+  padding: 16px 0;
+}
+.gauge-item {
+  text-align: center;
+}
+.gauge-ring {
+  position: relative;
+  width: 140px;
+  height: 140px;
+}
+.gauge-ring svg {
+  transform: rotate(-90deg);
+}
+.gauge-ring .gauge-text {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+.gauge-ring .gauge-value {
+  font-size: 24px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+.gauge-ring .gauge-label-inner {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.gauge-label {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Capacity bars */
+.cap-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.cap-bar-label {
+  width: 60px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+.cap-bar-track {
+  flex: 1;
+  height: 24px;
+  background: var(--grid);
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+.cap-bar-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.cap-bar-text {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-secondary);
+}
+
+/* Econ table */
+.econ-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.econ-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10.5px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.econ-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-accent);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+.econ-table tr:last-child td { border-bottom: none; }
+.econ-table .label-cell {
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* Strategy box */
+.strategy-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 28px;
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+.strategy-box .highlight {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.strategy-box .mono {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-blue);
+  font-size: 12.5px;
+}
+.strategy-box .section-divider {
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+/* Projection table */
+.proj-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.proj-card {
+  background: rgba(74,158,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.proj-card .proj-label {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.proj-card .proj-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Additional capacity card */
+.cap-highlight {
+  text-align: center;
+  padding: 20px;
+}
+.cap-highlight .big-number {
+  font-size: 42px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-green);
+}
+.cap-highlight .big-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* Footer */
+.footer {
+  margin-top: 48px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+  .chart-row.cols-2, .chart-row.cols-2-1, .chart-row.cols-1-2 { grid-template-columns: 1fr; }
+  .gauge-container { flex-direction: column; align-items: center; }
+  .proj-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+  .page { padding: 16px 20px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ═══ Header ═══ -->
+<div class="header">
+  <div class="header-left">
+    <h1>O-RAN AI 가격 최적화 — 비즈니스 성과 보고서</h1>
+    <div class="subtitle">__SUBTITLE__</div>
+  </div>
+  <div class="header-right">
+    <span class="tag tag-blue"><span class="dot"></span>SAC Agent</span>
+    <span class="tag tag-green"><span class="dot"></span>3-Part Tariff</span>
+    <span class="tag tag-purple"><span class="dot"></span>URLLC + eMBB</span>
+    <span class="tag tag-cyan"><span class="dot"></span>Single Cell</span>
+  </div>
+</div>
+
+<!-- ═══ Section A: Executive KPI Strip ═══ -->
+<div class="kpi-strip" id="kpiStrip"></div>
+
+<!-- ═══ Section B: Profitability ═══ -->
+<div class="section-title">
+  <h2>B. 수익성 분석</h2>
+  <div class="line"></div>
+  <span class="badge">Profitability</span>
+</div>
+
+<div class="chart-row cols-2">
+  <div class="chart-card">
+    <div class="chart-card-title">B1. 월간 P&L Waterfall</div>
+    <div class="chart-card-desc">수익 항목별 누적 → 비용 차감 → 순이익 (월간 환산, KRW)</div>
+    <div class="chart-wrap h280"><canvas id="chartWaterfall"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-card-title">B2. 수익원 비중</div>
+    <div class="chart-card-desc">URLLC/eMBB × 기본료/초과요금 4분할</div>
+    <div class="chart-wrap h280"><canvas id="chartDonut"></canvas></div>
+  </div>
+</div>
+
+<div class="chart-row cols-1">
+  <div class="chart-card">
+    <div class="chart-card-title">B3. 슬라이스별 단위경제학</div>
+    <div class="chart-card-desc">URLLC vs eMBB 가입자 / 요금 / ARPU / 수익 기여도 비교</div>
+    <table class="econ-table" id="econTable">
+      <thead>
+        <tr>
+          <th>지표</th>
+          <th>URLLC</th>
+          <th>eMBB</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══ Section C: Customer Market ═══ -->
+<div class="section-title">
+  <h2>C. 고객 시장 분석</h2>
+  <div class="line"></div>
+  <span class="badge">Market</span>
+</div>
+
+<div class="chart-row cols-2">
+  <div class="chart-card">
+    <div class="chart-card-title">C1. 월별 가입자 추이</div>
+    <div class="chart-card-desc">활성 가입자 수 (라인) + 순증감 (바)</div>
+    <div class="chart-wrap h250"><canvas id="chartSubscribers"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-card-title">C2. 가격-이탈 상관 분석</div>
+    <div class="chart-card-desc">가격 변수별 이탈률 Pearson 상관계수</div>
+    <div class="chart-wrap h250"><canvas id="chartCorrelation"></canvas></div>
+  </div>
+</div>
+
+<!-- ═══ Section D: Service Quality ═══ -->
+<div class="section-title">
+  <h2>D. 서비스 품질 (SLA)</h2>
+  <div class="line"></div>
+  <span class="badge">QoS</span>
+</div>
+
+<div class="chart-row cols-3">
+  <div class="chart-card">
+    <div class="chart-card-title">D1. SLA 준수율</div>
+    <div class="chart-card-desc">슬라이스별 QoS 위반 없는 비율</div>
+    <div class="gauge-container" id="gaugeContainer"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-card-title">D2. 용량 여유 분석</div>
+    <div class="chart-card-desc">슬라이스별 트래픽 / 용량 사용률</div>
+    <div id="capacityBars" style="padding: 16px 0;"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-card-title">D3. 추가 수용 가입자</div>
+    <div class="chart-card-desc">70% 목표 사용률 기준 여유 용량</div>
+    <div class="cap-highlight" id="additionalCap"></div>
+  </div>
+</div>
+
+<!-- ═══ Section E: AI Performance ═══ -->
+<div class="section-title">
+  <h2>E. AI 성과 및 재무 프로젝션</h2>
+  <div class="line"></div>
+  <span class="badge">Projection</span>
+</div>
+
+<div class="chart-row cols-2">
+  <div class="chart-card">
+    <div class="chart-card-title">E1. 연간 재무 프로젝션</div>
+    <div class="chart-card-desc">단일 셀 및 100셀 확장 시 추정 수익</div>
+    <div class="proj-grid" id="projGrid"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-card-title">E2. 최적 가격 요약</div>
+    <div class="chart-card-desc">AI 에이전트의 수렴 가격 전략</div>
+    <div class="chart-wrap h250"><canvas id="chartPricing"></canvas></div>
+  </div>
+</div>
+
+<!-- ═══ Section F: Strategy Summary ═══ -->
+<div class="section-title">
+  <h2>F. 최적 가격 전략 요약</h2>
+  <div class="line"></div>
+  <span class="badge">Strategy</span>
+</div>
+
+<div class="strategy-box" id="strategyBox"></div>
+
+<!-- ═══ Footer ═══ -->
+<div class="footer">
+  <span>__FOOTER_LEFT__</span>
+  <span>__FOOTER_RIGHT__</span>
+</div>
+
+</div><!-- /page -->
+
+<script>
+// ── Data Injection ──
+const METRICS = __METRICS__;
+const MONTHLY  = __MONTHLY__;
+
+// ── Helpers ──
+const fmt = (v, d=1) => v.toFixed(d);
+const fmtK = v => (v/1e3).toFixed(0) + 'K';
+const fmtM = v => (v/1e6).toFixed(1) + 'M';
+const fmtPct = (v, d=1) => v.toFixed(d) + '%';
+const fmtComma = v => Math.round(v).toLocaleString();
+
+const BLUE = '#4a9eff', GREEN = '#34d399', RED = '#f87171',
+      ORANGE = '#fb923c', PURPLE = '#a78bfa', CYAN = '#22d3ee',
+      YELLOW = '#fbbf24';
+const BLUE_DIM = 'rgba(74,158,255,0.15)',
+      GREEN_DIM = 'rgba(52,211,153,0.15)',
+      PURPLE_DIM = 'rgba(167,139,250,0.15)',
+      ORANGE_DIM = 'rgba(251,146,60,0.15)';
+const GRID_CLR = 'rgba(255,255,255,0.06)';
+const TXT_DIM = '#555d74';
+
+const chartDefaults = {
+  animation: { duration: 0 },
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      backgroundColor: '#1a1e2e',
+      titleColor: '#e8eaf0',
+      bodyColor: '#8890a4',
+      borderColor: '#2a3050',
+      borderWidth: 1,
+      padding: 10,
+      displayColors: true,
+      bodyFont: { family: 'JetBrains Mono', size: 11 },
+    }
+  },
+  scales: {
+    x: { grid: { color: GRID_CLR }, ticks: { color: TXT_DIM, font: { size: 10 } } },
+    y: { grid: { color: GRID_CLR }, ticks: { color: TXT_DIM, font: { size: 10 } } },
+  }
+};
+
+// ── A: KPI Strip ──
+(function renderKPIs() {
+  const K = METRICS.kpis;
+  const cards = [
+    { label: '월간 순이익', value: fmtM(K.monthly_profit_M_KRW * 1e6) + ' KRW',
+      sub: '일평균 ' + fmtK(K.monthly_profit_M_KRW * 1e6 / 30) + ' KRW', cls: 'blue' },
+    { label: '영업이익률', value: fmtPct(K.profit_margin_pct),
+      sub: 'Revenue-based margin', cls: 'green' },
+    { label: '월 가입자 유지율', value: fmtPct(K.monthly_retention_pct),
+      sub: '30일 기준', cls: 'cyan' },
+    { label: 'ARPU', value: fmtK(K.arpu_K_KRW * 1e3) + ' KRW',
+      sub: '가입자당 월 수익', cls: 'purple' },
+    { label: 'SLA 준수율 (eMBB)', value: fmtPct(K.sla_compliance_pct, 2),
+      sub: '1 - mean(pviol_E)', cls: 'orange' },
+    { label: '고객 생애 가치 (CLV)', value: fmtK(K.clv_K_KRW * 1e3) + ' KRW',
+      sub: '24개월 할인현금흐름', cls: 'green' },
+  ];
+  const strip = document.getElementById('kpiStrip');
+  cards.forEach(c => {
+    strip.innerHTML += `
+      <div class="kpi-card ${c.cls}">
+        <div class="kpi-label">${c.label}</div>
+        <div class="kpi-value">${c.value}</div>
+        <div class="kpi-sub">${c.sub}</div>
+      </div>`;
+  });
+})();
+
+// ── B1: P&L Waterfall ──
+(function renderWaterfall() {
+  const W = METRICS.pl_waterfall;
+  const labels = [
+    'URLLC 기본료', 'eMBB 기본료', 'URLLC 초과', 'eMBB 초과',
+    '총 수익',
+    'OPEX', 'Energy', 'CAC', 'SLA 페널티',
+    '순이익'
+  ];
+  const values = [
+    W.base_rev_U, W.base_rev_E, W.over_rev_U, W.over_rev_E,
+    W.total_revenue,
+    -W.cost_opex, -W.cost_energy, -W.cost_cac, -W.sla_penalty,
+    W.net_profit
+  ];
+
+  // Compute running totals for waterfall
+  let running = 0;
+  const bases = [], tops = [];
+  for (let i = 0; i < values.length; i++) {
+    if (i === 4) {
+      // Total revenue bar: show from 0
+      bases.push(0);
+      tops.push(W.total_revenue);
+      running = W.total_revenue;
+    } else if (i === 9) {
+      // Net profit bar: show from 0
+      bases.push(0);
+      tops.push(W.net_profit);
+    } else {
+      if (values[i] >= 0) {
+        bases.push(running);
+        running += values[i];
+        tops.push(running);
+      } else {
+        running += values[i];
+        bases.push(running);
+        tops.push(running - values[i]);
+      }
+    }
+  }
+
+  const colors = labels.map((_, i) => {
+    if (i < 4) return BLUE;      // revenue items
+    if (i === 4) return CYAN;    // total revenue
+    if (i < 9) return RED;       // cost items
+    return GREEN;                // net profit
+  });
+
+  new Chart(document.getElementById('chartWaterfall'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Base', data: bases, backgroundColor: 'transparent', borderWidth: 0 },
+        {
+          label: 'Value',
+          data: tops.map((t, i) => t - bases[i]),
+          backgroundColor: colors.map(c => c + '99'),
+          borderColor: colors,
+          borderWidth: 1,
+        }
+      ]
+    },
+    options: {
+      ...chartDefaults,
+      indexAxis: 'x',
+      plugins: {
+        ...chartDefaults.plugins,
+        tooltip: {
+          ...chartDefaults.plugins.tooltip,
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 0) return null;
+              return fmtComma(values[ctx.dataIndex]) + ' KRW';
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ...chartDefaults.scales.x, stacked: true, ticks: { ...chartDefaults.scales.x.ticks, maxRotation: 45 } },
+        y: { ...chartDefaults.scales.y, stacked: true,
+          ticks: { ...chartDefaults.scales.y.ticks, callback: v => fmtK(v) }
+        },
+      }
+    }
+  });
+})();
+
+// ── B2: Revenue Donut ──
+(function renderDonut() {
+  const R = METRICS.revenue_breakdown;
+  new Chart(document.getElementById('chartDonut'), {
+    type: 'doughnut',
+    data: {
+      labels: ['URLLC 기본료', 'eMBB 기본료', 'URLLC 초과', 'eMBB 초과'],
+      datasets: [{
+        data: [R.base_U_pct, R.base_E_pct, R.over_U_pct, R.over_E_pct],
+        backgroundColor: [CYAN + '99', PURPLE + '99', CYAN + '44', PURPLE + '44'],
+        borderColor: [CYAN, PURPLE, CYAN, PURPLE],
+        borderWidth: 1.5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 0 },
+      cutout: '55%',
+      plugins: {
+        legend: {
+          display: true,
+          position: 'right',
+          labels: {
+            color: '#8890a4',
+            font: { family: 'DM Sans', size: 11 },
+            padding: 14,
+            usePointStyle: true,
+            pointStyle: 'circle',
+          }
+        },
+        tooltip: {
+          ...chartDefaults.plugins.tooltip,
+          callbacks: {
+            label: ctx => ctx.label + ': ' + fmtPct(ctx.parsed, 1)
+          }
+        }
+      },
+    }
+  });
+})();
+
+// ── B3: Slice Economics Table ──
+(function renderEconTable() {
+  const S = METRICS.slice_economics;
+  const U = S.urllc, E = S.embb;
+  const rows = [
+    ['가입자 수 (평균)', fmt(U.subscribers,0) + ' 명', fmt(E.subscribers,0) + ' 명'],
+    ['월 기본료', fmtComma(U.base_fee_KRW) + ' KRW', fmtComma(E.base_fee_KRW) + ' KRW'],
+    ['데이터 허용량', U.allowance_gb + ' GB', E.allowance_gb + ' GB'],
+    ['초과 단가', fmtComma(U.overage_price_KRW_GB) + ' KRW/GB', fmtComma(E.overage_price_KRW_GB) + ' KRW/GB'],
+    ['가입자당 ARPU', U.arpu_K_KRW + 'K KRW', E.arpu_K_KRW + 'K KRW'],
+    ['수익 기여도', fmtPct(U.revenue_share_pct), fmtPct(E.revenue_share_pct)],
+  ];
+  const tbody = document.querySelector('#econTable tbody');
+  rows.forEach(r => {
+    tbody.innerHTML += `<tr><td class="label-cell">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`;
+  });
+})();
+
+// ── C1: Monthly Subscribers ──
+(function renderSubscribers() {
+  if (!MONTHLY || MONTHLY.length === 0) return;
+  const labels = MONTHLY.map(m => m.month + '월');
+  new Chart(document.getElementById('chartSubscribers'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: '활성 가입자',
+          type: 'line',
+          data: MONTHLY.map(m => m.avg_active),
+          borderColor: BLUE,
+          backgroundColor: BLUE_DIM,
+          borderWidth: 2,
+          pointRadius: 3,
+          fill: true,
+          yAxisID: 'y',
+        },
+        {
+          label: '순증감',
+          data: MONTHLY.map(m => m.net_change),
+          backgroundColor: MONTHLY.map(m => m.net_change >= 0 ? GREEN + '88' : RED + '88'),
+          borderColor: MONTHLY.map(m => m.net_change >= 0 ? GREEN : RED),
+          borderWidth: 1,
+          yAxisID: 'y1',
+        },
+      ]
+    },
+    options: {
+      ...chartDefaults,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        ...chartDefaults.plugins,
+        legend: { display: true, labels: { color: '#8890a4', font: { size: 10 }, usePointStyle: true } }
+      },
+      scales: {
+        x: chartDefaults.scales.x,
+        y: {
+          ...chartDefaults.scales.y,
+          position: 'left',
+          title: { display: true, text: '가입자 수', color: TXT_DIM, font: { size: 10 } }
+        },
+        y1: {
+          ...chartDefaults.scales.y,
+          position: 'right',
+          title: { display: true, text: '순증감', color: TXT_DIM, font: { size: 10 } },
+          grid: { drawOnChartArea: false },
+        },
+      }
+    }
+  });
+})();
+
+// ── C2: Price-Churn Correlation ──
+(function renderCorrelation() {
+  const C = METRICS.price_churn_corr;
+  const labels = ['F_E', 'F_U', 'p_over_E', 'p_over_U'];
+  const values = [C.corr_FE_churn, C.corr_FU_churn, C.corr_poverE_churn, C.corr_poverU_churn];
+  const colors = values.map(v => v > 0 ? RED : GREEN);
+
+  new Chart(document.getElementById('chartCorrelation'), {
+    type: 'bar',
+    data: {
+      labels: labels.map(l => l + ' ↔ Churn'),
+      datasets: [{
+        data: values,
+        backgroundColor: colors.map(c => c + '88'),
+        borderColor: colors,
+        borderWidth: 1,
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      indexAxis: 'y',
+      scales: {
+        x: {
+          ...chartDefaults.scales.x,
+          min: -1, max: 1,
+          title: { display: true, text: 'Pearson r', color: TXT_DIM, font: { size: 10 } }
+        },
+        y: chartDefaults.scales.y,
+      },
+      plugins: {
+        ...chartDefaults.plugins,
+        tooltip: {
+          ...chartDefaults.plugins.tooltip,
+          callbacks: { label: ctx => 'r = ' + fmt(ctx.parsed.x, 3) }
+        }
+      }
+    }
+  });
+})();
+
+// ── D1: SLA Gauges ──
+(function renderGauges() {
+  const S = METRICS.sla_compliance;
+  const container = document.getElementById('gaugeContainer');
+  [
+    { label: 'URLLC', value: S.urllc_compliance_pct, color: GREEN },
+    { label: 'eMBB',  value: S.embb_compliance_pct,  color: S.embb_compliance_pct >= 95 ? GREEN : S.embb_compliance_pct >= 85 ? ORANGE : RED },
+  ].forEach(g => {
+    const pct = Math.min(g.value, 100);
+    const r = 58, c = 2 * Math.PI * r;
+    const offset = c * (1 - pct / 100);
+    container.innerHTML += `
+      <div class="gauge-item">
+        <div class="gauge-ring">
+          <svg width="140" height="140" viewBox="0 0 140 140">
+            <circle cx="70" cy="70" r="${r}" fill="none" stroke="${GRID_CLR}" stroke-width="10"/>
+            <circle cx="70" cy="70" r="${r}" fill="none" stroke="${g.color}" stroke-width="10"
+              stroke-dasharray="${c}" stroke-dashoffset="${offset}" stroke-linecap="round"/>
+          </svg>
+          <div class="gauge-text">
+            <div class="gauge-value" style="color:${g.color}">${fmtPct(pct,1)}</div>
+            <div class="gauge-label-inner">준수율</div>
+          </div>
+        </div>
+        <div class="gauge-label">${g.label}</div>
+      </div>`;
+  });
+})();
+
+// ── D2: Capacity Bars ──
+(function renderCapacity() {
+  const C = METRICS.capacity;
+  const container = document.getElementById('capacityBars');
+  [
+    { label: 'URLLC', util: C.urllc_util_pct, color: CYAN },
+    { label: 'eMBB',  util: C.embb_util_pct,  color: PURPLE },
+  ].forEach(b => {
+    const w = Math.min(b.util, 100);
+    const headroom = Math.max(100 - b.util, 0);
+    container.innerHTML += `
+      <div class="cap-bar-row">
+        <div class="cap-bar-label" style="color:${b.color}">${b.label}</div>
+        <div class="cap-bar-track">
+          <div class="cap-bar-fill" style="width:${w}%;background:${b.color}88"></div>
+          <div class="cap-bar-text">${fmtPct(b.util,1)} 사용 | ${fmtPct(headroom,1)} 여유</div>
+        </div>
+      </div>`;
+  });
+})();
+
+// ── D3: Additional Capacity ──
+(function renderAdditionalCap() {
+  const A = METRICS.additional_capacity;
+  const container = document.getElementById('additionalCap');
+  container.innerHTML = `
+    <div class="big-number">+${A.additional_embb_users}</div>
+    <div class="big-label">추가 eMBB 가입자 수용 가능</div>
+    <div style="margin-top:16px; font-size:12px; color:var(--text-dim)">
+      목표 사용률: ${fmtPct(A.target_utilization_pct, 0)}<br>
+      가입자당 트래픽: ${A.per_user_traffic_E_gb} GB/day<br>
+      <span style="margin-top:8px; display:inline-block; color:${CYAN}">
+        URLLC: +${A.additional_urllc_users} 명
+      </span>
+    </div>`;
+})();
+
+// ── E1: Annual Projection ──
+(function renderProjection() {
+  const P = METRICS.annual_projection;
+  const grid = document.getElementById('projGrid');
+  [
+    { label: '월간 순이익 (1셀)', value: fmtM(P.monthly_profit) + ' KRW' },
+    { label: '연간 순이익 (1셀)', value: fmtM(P.annual_profit_single_cell) + ' KRW' },
+    { label: '월간 매출 (1셀)', value: fmtM(P.monthly_revenue) + ' KRW' },
+    { label: `연간 순이익 (${P.n_cells}셀)`, value: fmtM(P.annual_profit_scaled) + ' KRW' },
+  ].forEach(p => {
+    grid.innerHTML += `
+      <div class="proj-card">
+        <div class="proj-label">${p.label}</div>
+        <div class="proj-value">${p.value}</div>
+      </div>`;
+  });
+})();
+
+// ── E2: Pricing Summary Chart ──
+(function renderPricingChart() {
+  const S = METRICS.strategy;
+  const labels = ['F_U', 'p_over_U', 'F_E', 'p_over_E'];
+  const means = [S.F_U_mean, S.p_over_U_mean, S.F_E_mean, S.p_over_E_mean];
+  const stds = [S.F_U_std, S.p_over_U_std, S.F_E_std, S.p_over_E_std];
+  const colors = [CYAN, CYAN, PURPLE, PURPLE];
+
+  new Chart(document.getElementById('chartPricing'), {
+    type: 'bar',
+    data: {
+      labels: labels.map((l, i) => {
+        const names = ['URLLC 기본료', 'URLLC 초과', 'eMBB 기본료', 'eMBB 초과'];
+        return names[i];
+      }),
+      datasets: [{
+        data: means,
+        backgroundColor: colors.map(c => c + '88'),
+        borderColor: colors,
+        borderWidth: 1,
+        errorBars: stds,
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      scales: {
+        x: chartDefaults.scales.x,
+        y: {
+          ...chartDefaults.scales.y,
+          ticks: { ...chartDefaults.scales.y.ticks, callback: v => fmtComma(v) },
+          title: { display: true, text: 'KRW', color: TXT_DIM, font: { size: 10 } }
+        },
+      },
+      plugins: {
+        ...chartDefaults.plugins,
+        tooltip: {
+          ...chartDefaults.plugins.tooltip,
+          callbacks: { label: ctx => fmtComma(ctx.parsed.y) + ' KRW (±' + fmtComma(stds[ctx.dataIndex]) + ')' }
+        }
+      }
+    }
+  });
+})();
+
+// ── F: Strategy Summary ──
+(function renderStrategy() {
+  const S = METRICS.strategy;
+  const K = METRICS.kpis;
+  document.getElementById('strategyBox').innerHTML = `
+    <p>AI 에이전트는 학습을 통해 다음과 같은 최적 가격 전략에 수렴했습니다:</p>
+    <div class="section-divider"></div>
+    <p>
+      <span class="highlight">URLLC 슬라이스</span> (${fmt(S.mean_N_U,0)}명)<br>
+      월 기본료 <span class="mono">${fmtComma(S.F_U_mean)} KRW</span>
+      (±${fmtComma(S.F_U_std)}),
+      초과 <span class="mono">${fmtComma(S.p_over_U_mean)} KRW/GB</span>
+      (±${fmtComma(S.p_over_U_std)})<br>
+      → 소수 가입자에 낮은 기본료 + 높은 초과단가 프리미엄 전략
+    </p>
+    <div class="section-divider"></div>
+    <p>
+      <span class="highlight">eMBB 슬라이스</span> (${fmt(S.mean_N_E,0)}명)<br>
+      월 기본료 <span class="mono">${fmtComma(S.F_E_mean)} KRW</span>
+      (±${fmtComma(S.F_E_std)}),
+      초과 <span class="mono">${fmtComma(S.p_over_E_mean)} KRW/GB</span>
+      (±${fmtComma(S.p_over_E_std)})<br>
+      → 다수 가입자에 높은 기본료 안정 수익 + 비탄력적 수요 활용
+    </p>
+    <div class="section-divider"></div>
+    <p>
+      <span class="highlight">자원 배분:</span>
+      URLLC <span class="mono">${fmtPct(S.rho_U_mean * 100, 1)}</span> 할당
+      → SLA 준수율: URLLC <span class="mono">${fmtPct(S.sla_U_pct, 1)}</span>,
+      eMBB <span class="mono">${fmtPct(S.sla_E_pct, 1)}</span>
+    </p>
+    <div class="section-divider"></div>
+    <p>
+      <span class="highlight">재무 성과:</span>
+      월간 순이익 <span class="mono">${fmtM(K.monthly_profit_M_KRW * 1e6)} KRW</span>,
+      영업이익률 <span class="mono">${fmtPct(K.profit_margin_pct)}</span>,
+      고객 유지율 <span class="mono">${fmtPct(K.monthly_retention_pct)}</span>
+    </p>
+  `;
+})();
+</script>
+</body>
+</html>

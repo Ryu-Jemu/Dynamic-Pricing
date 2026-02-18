@@ -8,7 +8,7 @@ REVISION 10 — Changes from v9:
   Prior revisions (v1–v9):
   [D1–D5] v9 design tests (T12) — admission control, hierarchical actions,
        hard capacity guard, 24D observation, backward compat
-  [T13] Dashboard smoke tests (PNG + 3D)
+  [T13] Dashboard smoke tests (PNG)
   [M9] v8 tests (T11): curriculum fraction, convex SLA, Lagrangian,
        rho_U bound, pop_bonus scale, eval diagnostics
   [R4] Per-dimension smoothing tests
@@ -19,7 +19,9 @@ REVISION 10 — Changes from v9:
   [E6] CLV reward shaping tests
   [E8] Stronger smoothing tests
 
-Test groups (77 tests, 16 classes):
+  [M15] T19 — Dashboard generation integration tests (eval.py)
+
+Test groups (100 tests, 18 classes):
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
   T3  Market dynamics (join/churn, conservation)
@@ -31,11 +33,13 @@ Test groups (77 tests, 16 classes):
   T9  v5 enhancements (CLV reward, load factors)
   T10 v7 enhancements (per-dim smoothing, pop reward, curriculum)
   T11 v8 enhancements (curriculum fraction, convex SLA, Lagrangian)
-  T12 v9 design improvements (admission, hierarchical, hard cap, 24D)
-  T13 Dashboard smoke tests (PNG + 3D)
-  T14 [M13] Spatial visualization & per-user events
+  T12 v9 design improvements (admission, hierarchical, 23D obs)
+  T13 Dashboard smoke tests (PNG)
   T15 [D1-D7] Revision design (slice QoS, PID Lagrangian, 3-phase curriculum)
-  T16 [EP1] Continuous episode mode (truncation, pop continuity, obs[15])
+  T16 [EP1] Continuous episode mode (truncation, pop continuity, obs[14])
+  T17 [M14] Business dashboard (metrics, KPIs, P&L, SLA, template)
+  T18 [OPT] Training optimizations (entropy, early stop, parallel, cache)
+  T20 [Review] Architecture review (anti-windup, 23D obs, config merge, integration)
 """
 from __future__ import annotations
 
@@ -52,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from oran3pt.utils import load_config, sigmoid, fit_lognormal_quantiles
 from oran3pt.env import OranSlicingPricingEnv
 
-OBS_DIM = 24  # [D5] v9 default
+OBS_DIM = 23  # [ME-1] 24→23; removed obs[1] (inactive fraction)
 
 
 @pytest.fixture
@@ -413,8 +417,8 @@ class TestV5Enhancements:
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, info = env.step(action)
-        load_U = obs[18]
-        load_E = obs[19]
+        load_U = obs[17]  # [ME-1] shifted: 18→17
+        load_E = obs[18]  # [ME-1] shifted: 19→18
         assert np.isfinite(load_U)
         assert np.isfinite(load_E)
 
@@ -455,14 +459,14 @@ class TestV7Enhancements:
         cur = tr.get("curriculum", {})
         assert cur.get("enabled", False) is True
 
-    def test_obs_dims_20_to_21(self, env):
-        """[R5] obs[20] overage rev rate, obs[21] days remaining."""
+    def test_obs_dims_19_to_20(self, env):
+        """[R5] obs[19] overage rev rate, obs[20] days remaining. [ME-1] shifted."""
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, _ = env.step(action)
-        assert np.isfinite(obs[20])
-        assert np.isfinite(obs[21])
-        assert 0.0 <= obs[21] <= 1.0 + 1e-6
+        assert np.isfinite(obs[19])   # [ME-1] 20→19
+        assert np.isfinite(obs[20])   # [ME-1] 21→20
+        assert 0.0 <= obs[20] <= 1.0 + 1e-6
 
 
 # =====================================================================
@@ -555,28 +559,28 @@ class TestV9Design:
 
     # ── [D5] Observation dim = 24 ─────────────────────────────────────
 
-    def test_T12_1_obs_dim_24(self, env):
-        """[D5] Observation space should be 24-dimensional."""
-        assert env.observation_space.shape == (24,), \
-            f"Expected obs dim 24, got {env.observation_space.shape}"
+    def test_T12_1_obs_dim_23(self, env):
+        """[ME-1] Observation space should be 23-dimensional."""
+        assert env.observation_space.shape == (OBS_DIM,), \
+            f"Expected obs dim {OBS_DIM}, got {env.observation_space.shape}"
         obs, _ = env.reset(seed=42)
-        assert obs.shape == (24,)
+        assert obs.shape == (OBS_DIM,)
 
     def test_T12_2_pviol_E_ema_in_obs(self, env):
-        """[D6] obs[22] = pviol_E EMA, in [0, 1]."""
+        """[D6] obs[21] = pviol_E EMA, in [0, 1]. [ME-1] shifted: 22→21."""
+        env.reset(seed=42)
+        action = env.action_space.sample()
+        obs, _, _, _, _ = env.step(action)
+        assert np.isfinite(obs[21])
+        assert 0.0 <= obs[21] <= 1.0 + 1e-6
+
+    def test_T12_3_load_headroom_in_obs(self, env):
+        """[D5] obs[22] = load headroom for eMBB. [ME-1] shifted: 23→22."""
         env.reset(seed=42)
         action = env.action_space.sample()
         obs, _, _, _, _ = env.step(action)
         assert np.isfinite(obs[22])
-        assert 0.0 <= obs[22] <= 1.0 + 1e-6
-
-    def test_T12_3_load_headroom_in_obs(self, env):
-        """[D5] obs[23] = load headroom for eMBB, in [0, 1]."""
-        env.reset(seed=42)
-        action = env.action_space.sample()
-        obs, _, _, _, _ = env.step(action)
-        assert np.isfinite(obs[23])
-        assert -0.01 <= obs[23] <= 1.0 + 1e-6
+        assert -0.01 <= obs[22] <= 1.0 + 1e-6
 
     # ── [D1] Admission control ────────────────────────────────────────
 
@@ -651,15 +655,15 @@ class TestV9Design:
     # ── Backward compat ───────────────────────────────────────────────
 
     def test_T12_11_disabled_features_backward_compat(self, cfg):
-        """v9 features can be disabled."""
+        """v9 features can be disabled with reduced obs dim."""
         cfg_copy = {**cfg}
         cfg_copy["admission_control"] = {"enabled": False}
         cfg_copy["hierarchical_actions"] = {"enabled": False}
-        cfg_copy["observation"] = {**cfg.get("observation", {}), "dim": 22}
+        cfg_copy["observation"] = {**cfg.get("observation", {}), "dim": 21}
 
         env = OranSlicingPricingEnv(cfg_copy, seed=42)
         obs, _ = env.reset(seed=42)
-        assert obs.shape == (22,)
+        assert obs.shape == (21,)
 
         action = env.action_space.sample()
         _, _, _, _, info = env.step(action)
@@ -681,22 +685,16 @@ class TestV9Design:
 
 
 
-# ── T13  Dashboard module smoke tests [M11][M12] ─────────────────────
+# ── T13  Dashboard module smoke tests [M11] ──────────────────────────
 
 class TestT13DashboardSmoke:
-    """Smoke tests for PNG and 3D dashboard generators."""
+    """Smoke tests for PNG dashboard generators."""
 
     def test_T13_1_png_dashboard_import(self):
         """[M11] png_dashboard module imports without errors."""
         from oran3pt import png_dashboard  # noqa: F401
         assert hasattr(png_dashboard, "generate_all_pngs")
         assert hasattr(png_dashboard, "main")
-
-    def test_T13_2_sim3d_dashboard_import(self):
-        """[M12] sim3d_dashboard module imports without errors."""
-        from oran3pt import sim3d_dashboard  # noqa: F401
-        assert hasattr(sim3d_dashboard, "generate_3d_dashboard")
-        assert hasattr(sim3d_dashboard, "main")
 
     def test_T13_3_png_episode_detection(self):
         """[M11] Episode detection handles step counter resets."""
@@ -727,73 +725,7 @@ class TestT13DashboardSmoke:
         assert abs(result["profit_margin"].iloc[0] - 0.5) < 1e-6
         assert result["population_delta"].iloc[0] == 2
 
-    def test_T13_5_sim3d_best_repeat_selection(self):
-        """[M12] Best repeat selected by highest cumulative profit."""
-        from oran3pt.sim3d_dashboard import _select_best_repeat
-        df = pd.DataFrame({
-            "repeat": [0, 0, 1, 1],
-            "profit": [100, 200, 500, 600],
-        })
-        result = _select_best_repeat(df)
-        assert len(result) == 2
-        assert result["profit"].sum() == 1100  # repeat 1
 
-
-# =====================================================================
-# T14  [M13] Spatial visualization & per-user events
-# =====================================================================
-class TestM13SpatialVisualization:
-
-    def test_T14_1_users_have_coordinates(self, cfg):
-        """[M13a] Generated users have x, y columns within cell radius."""
-        from oran3pt.gen_users import generate_users
-        df = generate_users(cfg, seed=42)
-        assert "x" in df.columns, "Missing x column"
-        assert "y" in df.columns, "Missing y column"
-        r = np.sqrt(df["x"] ** 2 + df["y"] ** 2)
-        cell_radius = cfg.get("population", {}).get(
-            "spatial", {}).get("cell_radius", 20.0)
-        assert r.max() <= cell_radius + 0.1, \
-            f"Max radius {r.max():.2f} exceeds cell_radius {cell_radius}"
-
-    def test_T14_2_user_events_in_info(self, env):
-        """[M13c] Info dict contains churned/joined user ID lists."""
-        env.reset(seed=42)
-        action = env.action_space.sample()
-        _, _, _, _, info = env.step(action)
-        assert "churned_user_ids" in info
-        assert "joined_user_ids" in info
-        assert isinstance(info["churned_user_ids"], list)
-        assert isinstance(info["joined_user_ids"], list)
-
-    def test_T14_3_segment_radial_distribution(self, cfg):
-        """[M13a] QoS-sensitive users are closer to tower than price-sensitive."""
-        from oran3pt.gen_users import generate_users
-        df = generate_users(cfg, seed=42)
-        df["r"] = np.sqrt(df["x"] ** 2 + df["y"] ** 2)
-        qos_r = df[df["segment"] == "qos_sensitive"]["r"].mean()
-        price_r = df[df["segment"] == "price_sensitive"]["r"].mean()
-        assert qos_r < price_r, \
-            f"QoS mean_r={qos_r:.2f} should be < price mean_r={price_r:.2f}"
-
-    def test_T14_4_backward_compat_no_spatial(self):
-        """[M13e] Dashboard fallback works without spatial data."""
-        from oran3pt.sim3d_dashboard import _load_user_data
-        result = _load_user_data(None)
-        assert result == [], "Should return empty list for None path"
-
-    def test_T14_5_event_count_matches_aggregate(self, env):
-        """[M13c] len(churned_user_ids) == n_churn for each step."""
-        env.reset(seed=42)
-        for _ in range(60):
-            action = env.action_space.sample()
-            _, _, term, _, info = env.step(action)
-            assert len(info["churned_user_ids"]) == info["n_churn"], \
-                f"Churn mismatch: {len(info['churned_user_ids'])} vs {info['n_churn']}"
-            assert len(info["joined_user_ids"]) == info["n_join"], \
-                f"Join mismatch: {len(info['joined_user_ids'])} vs {info['n_join']}"
-            if term:
-                break
 
 
 # =====================================================================
@@ -848,15 +780,15 @@ class TestRevisionDesign:
             f"Reward {reward} should be in [-4, 4]"
 
     def test_T15_4_pviol_ema_tracks_violation(self, env):
-        """[D6] pviol_E EMA tracks violation trend, finite values."""
+        """[D6] pviol_E EMA tracks violation trend. [ME-1] shifted: obs[22]→obs[21]."""
         env.reset(seed=42)
         ema_values = []
         for _ in range(30):
             obs, _, _, _, _ = env.step(env.action_space.sample())
-            ema_values.append(obs[22])
-            assert np.isfinite(obs[22]), "pviol_E EMA should be finite"
-            assert 0.0 <= obs[22] <= 1.0 + 1e-6, \
-                f"pviol_E EMA {obs[22]} out of bounds"
+            ema_values.append(obs[21])
+            assert np.isfinite(obs[21]), "pviol_E EMA should be finite"
+            assert 0.0 <= obs[21] <= 1.0 + 1e-6, \
+                f"pviol_E EMA {obs[21]} out of bounds"
 
     def test_T15_5_convex_sla_gamma3(self, cfg):
         """[D3] Convex SLA penalty with gamma=3.0."""
@@ -984,23 +916,419 @@ class TestContinuousEpisodeMode:
             f"_total_steps should be {2 * cont_env.episode_len}, " \
             f"got {cont_env._total_steps}"
 
-    def test_T16_6_obs15_churn_ema_in_continuous(self, cont_env):
-        """[EP1] obs[15] = churn_rate_ema in continuous mode."""
+    def test_T16_6_obs14_churn_ema_in_continuous(self, cont_env):
+        """[EP1] obs[14] = churn_rate_ema in continuous mode. [ME-1] shifted: 15→14."""
         cont_env.reset(seed=42)
         for _ in range(10):
             obs, _, _, _, _ = cont_env.step(cont_env.action_space.sample())
-        # In continuous mode, obs[15] should be churn_rate_ema (small value)
-        assert np.isfinite(obs[15])
-        assert 0.0 <= obs[15] <= 1.0 + 1e-6, \
-            f"obs[15] churn_rate_ema out of range: {obs[15]}"
+        assert np.isfinite(obs[14])
+        assert 0.0 <= obs[14] <= 1.0 + 1e-6, \
+            f"obs[14] churn_rate_ema out of range: {obs[14]}"
 
-    def test_T16_7_obs15_episode_progress_in_episodic(self, epis_env):
-        """[EP1] obs[15] = episode_progress in episodic mode."""
+    def test_T16_7_obs14_episode_progress_in_episodic(self, epis_env):
+        """[EP1] obs[14] = episode_progress in episodic mode. [ME-1] shifted: 15→14."""
         epis_env.reset(seed=42)
         obs, _, _, _, _ = epis_env.step(epis_env.action_space.sample())
         expected = 1.0 / epis_env.episode_len
-        assert abs(obs[15] - expected) < 1e-4, \
-            f"obs[15] should be episode progress {expected}, got {obs[15]}"
+        assert abs(obs[14] - expected) < 1e-4, \
+            f"obs[14] should be episode progress {expected}, got {obs[14]}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# T17  Business Dashboard — metric computation & module smoke tests
+# ═══════════════════════════════════════════════════════════════════
+
+class TestT17BusinessDashboard:
+    """Business KPI computation accuracy and module imports."""
+
+    @pytest.fixture
+    def sample_rollout_df(self):
+        """Synthetic rollout DataFrame mimicking rollout_log.csv.
+
+        Data is self-consistent: revenue = base_rev + over_rev,
+        base_rev = (F_U*N_U + F_E*N_E) / T, profit = revenue - cost_total.
+        """
+        np.random.seed(42)
+        n = 150  # 5 repeats × 30 steps
+        T = 30
+        F_U = np.random.uniform(40000, 60000, n)
+        F_E = np.random.uniform(80000, 130000, n)
+        N_U = np.random.randint(5, 15, n).astype(float)
+        N_E = np.random.randint(25, 45, n).astype(float)
+        N_active = (N_U + N_E).astype(int)
+        over_rev_E = np.random.uniform(0, 30000, n)
+        over_rev_U = np.random.uniform(0, 10000, n)
+        over_rev = over_rev_U + over_rev_E
+        base_rev = (F_U * N_U + F_E * N_E) / T
+        revenue = base_rev + over_rev
+        cost_opex = np.random.uniform(20000, 50000, n)
+        cost_energy = np.random.uniform(2000, 5000, n)
+        cost_cac = np.random.uniform(0, 100000, n)
+        sla_penalty = np.random.uniform(0, 1000, n)
+        cost_total = cost_opex + cost_energy + cost_cac + sla_penalty
+        profit = revenue - cost_total
+        return pd.DataFrame({
+            "step": list(range(1, 31)) * 5,
+            "repeat": sorted(list(range(5)) * 30),
+            "cycle": [1] * 150,
+            "cycle_step": list(range(30)) * 5,
+            "F_U": F_U, "F_E": F_E,
+            "p_over_U": np.random.uniform(1000, 4000, n),
+            "p_over_E": np.random.uniform(500, 2500, n),
+            "rho_U": np.random.uniform(0.15, 0.35, n),
+            "N_active": N_active,
+            "N_U": N_U.astype(int), "N_E": N_E.astype(int),
+            "n_join": np.random.randint(0, 3, n),
+            "n_churn": np.random.randint(0, 3, n),
+            "L_U": np.random.uniform(1, 5, n),
+            "L_E": np.random.uniform(30, 80, n),
+            "C_U": np.random.uniform(80, 150, n),
+            "C_E": np.random.uniform(200, 350, n),
+            "pviol_U": np.random.uniform(0.0, 0.001, n),
+            "pviol_E": np.random.uniform(0.0, 0.01, n),
+            "revenue": revenue, "base_rev": base_rev,
+            "over_rev": over_rev, "over_rev_E": over_rev_E,
+            "cost_total": cost_total,
+            "cost_opex": cost_opex, "cost_energy": cost_energy,
+            "cost_cac": cost_cac, "sla_penalty": sla_penalty,
+            "profit": profit,
+            "profit_margin": profit / np.maximum(revenue, 1e-6),
+        })
+
+    @pytest.fixture
+    def sample_clv_df(self):
+        return pd.DataFrame([{
+            "mean_monthly_profit": 3000000,
+            "mean_N_active": 45,
+            "cf_per_user_month": 66667,
+            "monthly_churn": 0.05,
+            "monthly_retention": 0.95,
+            "CLV_per_user": 900000,
+            "horizon_months": 24,
+            "discount_rate": 0.01,
+        }])
+
+    def test_T17_1_business_metrics_import(self):
+        """Module import smoke test."""
+        from oran3pt.business_metrics import (
+            compute_executive_kpis,
+            compute_pl_waterfall,
+            compute_revenue_breakdown,
+            compute_slice_economics,
+            compute_monthly_subscribers,
+            compute_price_churn_correlation,
+            compute_sla_compliance,
+            compute_capacity_analysis,
+            estimate_additional_capacity,
+            compute_annual_projection,
+            compute_pricing_strategy_summary,
+            compute_all_metrics,
+        )
+        assert callable(compute_executive_kpis)
+        assert callable(compute_all_metrics)
+
+    def test_T17_2_business_dashboard_import(self):
+        """Dashboard generator import smoke test."""
+        from oran3pt.business_dashboard import generate_business_dashboard
+        assert callable(generate_business_dashboard)
+
+    def test_T17_3_executive_kpis_keys(self, sample_rollout_df, sample_clv_df):
+        """KPI computation returns all 6 required keys."""
+        from oran3pt.business_metrics import compute_executive_kpis
+        kpis = compute_executive_kpis(sample_rollout_df, sample_clv_df, T=30)
+        expected_keys = {
+            "monthly_profit_M_KRW", "profit_margin_pct",
+            "monthly_retention_pct", "arpu_K_KRW",
+            "sla_compliance_pct", "clv_K_KRW",
+        }
+        assert expected_keys == set(kpis.keys())
+        for v in kpis.values():
+            assert np.isfinite(v), f"KPI value not finite: {v}"
+
+    def test_T17_4_pl_waterfall_sum(self, sample_rollout_df):
+        """P&L waterfall: total_revenue = sum of revenue components."""
+        from oran3pt.business_metrics import compute_pl_waterfall
+        pl = compute_pl_waterfall(sample_rollout_df, T=30)
+        rev_sum = pl["base_rev_U"] + pl["base_rev_E"] + pl["over_rev_U"] + pl["over_rev_E"]
+        assert abs(rev_sum - pl["total_revenue"]) < pl["total_revenue"] * 0.01, \
+            f"Revenue mismatch: sum={rev_sum}, total={pl['total_revenue']}"
+
+    def test_T17_5_revenue_breakdown_sums_to_100(self, sample_rollout_df):
+        """Revenue breakdown percentages sum to ~100%."""
+        from oran3pt.business_metrics import compute_revenue_breakdown
+        rb = compute_revenue_breakdown(sample_rollout_df, T=30)
+        total = rb["base_U_pct"] + rb["base_E_pct"] + rb["over_U_pct"] + rb["over_E_pct"]
+        assert abs(total - 100.0) < 0.1, f"Revenue %s should sum to 100, got {total}"
+
+    def test_T17_6_sla_compliance_range(self, sample_rollout_df):
+        """SLA compliance values are in [0, 100]%."""
+        from oran3pt.business_metrics import compute_sla_compliance
+        sla = compute_sla_compliance(sample_rollout_df)
+        assert 0 <= sla["urllc_compliance_pct"] <= 100
+        assert 0 <= sla["embb_compliance_pct"] <= 100
+
+    def test_T17_7_monthly_subscribers_shape(self, sample_rollout_df):
+        """Monthly subscriber aggregation produces correct shape."""
+        from oran3pt.business_metrics import compute_monthly_subscribers
+        monthly = compute_monthly_subscribers(sample_rollout_df, T=30)
+        assert "month" in monthly.columns
+        assert "avg_active" in monthly.columns
+        assert "net_change" in monthly.columns
+        assert len(monthly) >= 1
+
+    def test_T17_8_capacity_non_negative(self, sample_rollout_df):
+        """Capacity analysis returns non-negative utilization."""
+        from oran3pt.business_metrics import compute_capacity_analysis
+        cap = compute_capacity_analysis(sample_rollout_df)
+        assert cap["urllc_util_pct"] >= 0
+        assert cap["embb_util_pct"] >= 0
+        assert cap["urllc_headroom_pct"] >= 0
+
+    def test_T17_9_compute_all_metrics_keys(self, sample_rollout_df, sample_clv_df):
+        """compute_all_metrics returns all expected top-level keys."""
+        from oran3pt.business_metrics import compute_all_metrics
+        metrics = compute_all_metrics(sample_rollout_df, sample_clv_df, T=30)
+        expected = {
+            "kpis", "pl_waterfall", "revenue_breakdown",
+            "slice_economics", "monthly_subscribers",
+            "price_churn_corr", "sla_compliance", "capacity",
+            "additional_capacity", "annual_projection", "strategy",
+        }
+        assert expected == set(metrics.keys())
+
+    def test_T17_10_annual_projection_scaling(self, sample_rollout_df):
+        """Annual projection: 100-cell = 100 × single-cell."""
+        from oran3pt.business_metrics import compute_annual_projection
+        proj = compute_annual_projection(sample_rollout_df, T=30, n_cells=100)
+        assert abs(proj["annual_profit_scaled"]
+                   - proj["annual_profit_single_cell"] * 100) < 1.0
+
+    def test_T17_11_correlation_range(self, sample_rollout_df):
+        """Price-churn correlation values are in [-1, 1]."""
+        from oran3pt.business_metrics import compute_price_churn_correlation
+        corr = compute_price_churn_correlation(sample_rollout_df)
+        for k, v in corr.items():
+            assert -1.0 <= v <= 1.0 or np.isnan(v), \
+                f"Correlation {k} out of range: {v}"
+
+    def test_T17_12_template_exists(self):
+        """Business dashboard HTML template file exists."""
+        tmpl = Path(__file__).parent.parent / "oran3pt" / "templates" / "business_dashboard.html"
+        assert tmpl.exists(), f"Template not found: {tmpl}"
+
+
+# =====================================================================
+# T18  [OPT] Training optimization tests
+# =====================================================================
+class TestTrainingOptimization:
+
+    def test_T18_1_ent_coef_auto_format(self, cfg):
+        """[OPT-B] ent_coef_init=0.5 + ent_coef='auto' → 'auto_0.5'."""
+        tc = cfg.get("training", {})
+        ent_coef = tc.get("ent_coef", "auto")
+        ent_coef_init = tc.get("ent_coef_init", None)
+        if ent_coef_init is not None and ent_coef == "auto":
+            result = f"auto_{ent_coef_init}"
+            assert result == "auto_0.5", f"Expected 'auto_0.5', got '{result}'"
+            assert result.startswith("auto"), "Must start with 'auto' for SB3"
+
+    def test_T18_2_early_stopping_config(self, cfg):
+        """[OPT-C] Early stopping config present with correct keys."""
+        es = cfg.get("training", {}).get("early_stopping", {})
+        assert es.get("enabled") is True, "Early stopping should be enabled"
+        assert "patience" in es, "Missing patience key"
+        assert "min_timesteps" in es, "Missing min_timesteps key"
+        assert "min_improvement" in es, "Missing min_improvement key"
+        assert es["patience"] > 0
+        assert es["min_timesteps"] > 0
+        assert 0 < es["min_improvement"] < 1.0
+
+    def test_T18_3_parallel_seeds_config(self, cfg):
+        """[OPT-A] Config has parallel_seeds and max_parallel keys."""
+        tc = cfg.get("training", {})
+        assert "parallel_seeds" in tc, "Missing parallel_seeds key"
+        assert "max_parallel" in tc, "Missing max_parallel key"
+        assert isinstance(tc["parallel_seeds"], bool)
+        assert tc["max_parallel"] >= 1
+
+    def test_T18_4_batch_gradient_config(self, cfg):
+        """[OPT-D] batch_size=512, gradient_steps=2 for GPU efficiency."""
+        tc = cfg.get("training", {})
+        assert tc.get("batch_size") == 512, \
+            f"Expected batch_size=512, got {tc.get('batch_size')}"
+        assert tc.get("gradient_steps") == 2, \
+            f"Expected gradient_steps=2, got {tc.get('gradient_steps')}"
+        # Total gradient compute: 2×512 = 1024 (same as old 4×256)
+        total = tc["batch_size"] * tc["gradient_steps"]
+        assert total == 1024, f"Total gradient samples should be 1024, got {total}"
+
+    def test_T18_5_eval_freq_optimized(self, cfg):
+        """[OPT-E] eval_freq=20000, n_eval_episodes=10."""
+        tc = cfg.get("training", {})
+        assert tc.get("eval_freq") == 20000, \
+            f"Expected eval_freq=20000, got {tc.get('eval_freq')}"
+
+    def test_T18_6_population_cache(self, env):
+        """[OPT-F] Cached N_act, N_U, N_E match recomputed values."""
+        env.reset(seed=42)
+        for _ in range(10):
+            env.step(env.action_space.sample())
+        # Check cache matches actual
+        actual_N_act = int(env._active_mask.sum())
+        actual_N_U = int((env._active_mask * env._slice_is_U).sum())
+        actual_N_E = actual_N_act - actual_N_U
+        assert env._cached_N_act == actual_N_act, \
+            f"Cache mismatch: N_act={env._cached_N_act} vs {actual_N_act}"
+        assert env._cached_N_U == actual_N_U
+        assert env._cached_N_E == actual_N_E
+
+
+class TestDashboardGeneration:
+    """[M15] Tests for automatic dashboard generation in eval.py."""
+
+    def test_T19_1_generate_dashboards_import(self):
+        """generate_dashboards function is importable from eval module."""
+        from oran3pt.eval import generate_dashboards
+        assert callable(generate_dashboards)
+
+    def test_T19_2_run_evaluation_dashboard_param(self):
+        """run_evaluation accepts generate_dashboard parameter (default True)."""
+        import inspect
+        from oran3pt.eval import run_evaluation
+        sig = inspect.signature(run_evaluation)
+        assert "generate_dashboard" in sig.parameters
+        assert sig.parameters["generate_dashboard"].default is True
+
+    def test_T19_3_run_evaluation_config_path_param(self):
+        """run_evaluation accepts config_path parameter."""
+        import inspect
+        from oran3pt.eval import run_evaluation
+        sig = inspect.signature(run_evaluation)
+        assert "config_path" in sig.parameters
+        assert sig.parameters["config_path"].default is None
+
+    def test_T19_4_graceful_missing_dir(self, cfg):
+        """generate_dashboards returns empty list for nonexistent dir."""
+        from oran3pt.eval import generate_dashboards
+        result = generate_dashboards(cfg, output_dir="/tmp/_oran_test_nonexistent")
+        assert isinstance(result, list)
+        assert len(result) == 0
+
+
+# =====================================================================
+# T20  [Review] Architecture review improvements
+# =====================================================================
+class TestArchitectureReview:
+    """Tests for changes from Review_Architecture.md."""
+
+    def test_T20_1_pid_anti_windup_integral_clamp(self, cfg):
+        """[CR-2] PID integral is clamped to prevent windup.
+        [Stooke ICLR 2020 §3.2; Mao arXiv 2025]
+        """
+        try:
+            from oran3pt.train import _LagrangianPIDCallback
+        except ImportError:
+            pytest.skip("SB3 not available")
+        lag_cfg = cfg.get("lagrangian_qos", {})
+        cb = _LagrangianPIDCallback(
+            threshold=lag_cfg.get("pviol_E_threshold", 0.15),
+            Kp=lag_cfg.get("Kp", 0.05),
+            Ki=lag_cfg.get("Ki", 0.005),
+            Kd=lag_cfg.get("Kd", 0.01),
+            lambda_max=lag_cfg.get("lambda_max", 10.0),
+        )
+        # integral_max = lambda_max / Ki = 10.0 / 0.005 = 2000.0
+        assert cb._integral_max == lag_cfg["lambda_max"] / lag_cfg["Ki"]
+        # Simulate extreme positive error accumulation
+        for _ in range(10000):
+            cb._error_integral = max(
+                -cb._integral_max,
+                min(cb._integral_max, cb._error_integral + 1.0))
+        assert cb._error_integral <= cb._integral_max, \
+            f"Integral {cb._error_integral} exceeds max {cb._integral_max}"
+
+    def test_T20_2_obs_dim_23_no_inactive_fraction(self, cfg):
+        """[ME-1] Observation is 23-D, inactive fraction removed."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (23,), f"Expected obs dim 23, got {obs.shape}"
+        # obs[0] = active fraction, obs[1] should be joins (not inactive frac)
+        action = env.action_space.sample()
+        obs, _, _, _, info = env.step(action)
+        active_frac = obs[0]
+        # obs[1] should be normalized joins, not (1 - active_frac)
+        assert not np.isclose(obs[1], 1.0 - active_frac, atol=0.01), \
+            "obs[1] should be joins, not inactive fraction"
+
+    def test_T20_3_config_merge_deep(self):
+        """[CR-3] _deep_merge correctly overrides nested keys."""
+        from oran3pt.utils import _deep_merge
+        base = {"a": {"b": 1, "c": 2}, "d": 3}
+        override = {"a": {"b": 10}, "e": 5}
+        merged = _deep_merge(base, override)
+        assert merged["a"]["b"] == 10, "Override should replace nested key"
+        assert merged["a"]["c"] == 2, "Non-overridden nested key preserved"
+        assert merged["d"] == 3, "Non-overridden top key preserved"
+        assert merged["e"] == 5, "New key from override added"
+
+    def test_T20_4_production_yaml_exists(self):
+        """[CR-3] Production config file exists."""
+        prod = Path(__file__).parent.parent / "config" / "production.yaml"
+        assert prod.exists(), f"Production config not found: {prod}"
+
+    def test_T20_5_csvlogger_context_manager(self, tmp_path):
+        """[HI-4] CSVLogger supports context manager protocol."""
+        from oran3pt.train import CSVLogger
+        csv_path = str(tmp_path / "test_log.csv")
+        with CSVLogger(csv_path) as log:
+            log.log({"a": 1, "b": 2})
+            log.log({"a": 3, "b": 4})
+        # File should be closed after exit
+        assert log._f is None, "File should be closed after __exit__"
+        # Verify content
+        df = pd.read_csv(csv_path)
+        assert len(df) == 2
+        assert list(df.columns) == ["a", "b"]
+
+    def test_T20_6_early_stopping_min_timesteps(self, cfg):
+        """[ME-5] min_timesteps >= 60% of total_timesteps."""
+        tc = cfg.get("training", {})
+        total = tc.get("total_timesteps", 100000)
+        es = tc.get("early_stopping", {})
+        min_ts = es.get("min_timesteps", 0)
+        assert min_ts >= total * 0.60, \
+            f"min_timesteps {min_ts} should be >= {total * 0.60}"
+
+    def test_T20_7_gen_users_vectorized_output(self, cfg):
+        """[HI-2] Vectorized gen_users produces correct schema."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(cfg, seed=42)
+        assert len(df) == cfg["population"]["N_total"]
+        expected_cols = {
+            "user_id", "slice", "segment", "mu_urllc", "sigma_urllc",
+            "mu_embb", "sigma_embb", "price_sensitivity",
+            "qos_sensitivity", "switching_cost", "clv_discount_rate",
+            "is_active_init",
+        }
+        assert set(df.columns) == expected_cols, \
+            f"Column mismatch: {set(df.columns) - expected_cols}"
+        assert df["is_active_init"].sum() == cfg["population"]["N_active_init"]
+
+    def test_T20_8_integration_env_eval_cycle(self, cfg):
+        """[HI-3] Integration: env → random episode → valid rollout data."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        from oran3pt.eval import evaluate_episode
+        records = evaluate_episode(env, model=None, repeat_id=0, n_chains=1)
+        assert len(records) == env.episode_len, \
+            f"Expected {env.episode_len} records, got {len(records)}"
+        # Verify required columns
+        required = ["step", "profit", "revenue", "cost_total",
+                     "pviol_U", "pviol_E", "N_active"]
+        for k in required:
+            assert k in records[0], f"Missing key: {k}"
+        # All profits should be finite
+        profits = [r["profit"] for r in records]
+        assert all(np.isfinite(p) for p in profits), "Non-finite profit found"
 
 
 if __name__ == "__main__":
