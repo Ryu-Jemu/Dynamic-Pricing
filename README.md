@@ -30,9 +30,9 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 |--------|-------------|-------|
 | `a[0]` | URLLC base fee F_U | [30K, 90K] KRW/cycle |
 | `a[1]` | URLLC overage price p^over_U | [500, 5000] KRW/GB |
-| `a[2]` | eMBB base fee F_E | [40K, 150K] KRW/cycle |
-| `a[3]` | eMBB overage price p^over_E | [200, 3000] KRW/GB |
-| `a[4]` | URLLC PRB share ρ_U | [0.05, 0.60] |
+| `a[2]` | eMBB base fee F_E | [35K, 110K] KRW/cycle |
+| `a[3]` | eMBB overage price p^over_E | [500, 3000] KRW/GB |
+| `a[4]` | URLLC PRB share ρ_U | [0.05, 0.20] |
 
 **Objective**: Maximize E[Σ γ^t Profit_t] where Profit = Revenue − Cost.
 
@@ -223,6 +223,10 @@ python -m pytest tests/ -v
 | [Wiewiora 2003] | Wiewiora et al., "Principled Methods for Advising RL Agents," ICML 2003 |
 | [Zheng 2022] | Zheng et al., "The AI Economist," Science Advances 2022 |
 | [Zhou 2022] | Zhou et al., "Revisiting Exploration in Deep RL," ICLR 2022 |
+| [Train 2009] | Train, "Discrete Choice Methods with Simulation," Cambridge 2009 |
+| [Grubb & Osborne 2015] | Grubb & Osborne, "Cellular Service Demand: Bill Shock," AER 2015 |
+| [Lambrecht & Skiera 2006] | Lambrecht & Skiera, "Paying Too Much and Being Happy About It," JMR 2006 |
+| [Tirole 1988] | Tirole, "The Theory of Industrial Organization," MIT Press 1988 |
 
 ## License
 

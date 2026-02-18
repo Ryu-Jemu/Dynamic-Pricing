@@ -180,6 +180,24 @@ class OranSlicingPricingEnv(gym.Env):
         self.market_mode: str = mc.get("mode", "stochastic")
         self._price_norm: float = mc.get("price_norm", 120000.0)
 
+        # [PR-1] Per-slice price normalization bounds [Train 2009; Anderson et al. 1992]
+        # Each user evaluates price relative to their own slice's maximum
+        acfg = cfg["action"]
+        self._F_U_max: float = acfg["F_U_max"]    # URLLC WTP ceiling
+        self._F_E_max: float = acfg["F_E_max"]    # eMBB WTP ceiling
+        self._p_over_U_max: float = acfg["p_over_U_max"]
+        self._p_over_E_max: float = acfg["p_over_E_max"]
+        # [PR-3] Per-slice normalization replaces scalar price_norm
+        self._use_per_slice_psig: bool = (self._F_U_max > 0 and self._F_E_max > 0)
+
+        # [PR-2] Bill shock mechanism [Grubb & Osborne AER 2015; Lambrecht & Skiera JMR 2006]
+        self._beta_bill_shock: float = mc.get("beta_bill_shock", 0.0)
+        self._bill_shock_threshold: float = mc.get("bill_shock_threshold", 1.5)
+        self._bill_shock_enabled: bool = self._beta_bill_shock > 0
+
+        # [PR-4] Overage price → join dampening [Nevo et al. Econometrica 2016]
+        self._beta_p_over_join: float = mc.get("beta_p_over_join", 0.0)
+
         # Demand-price elasticity (§6b)
         de = cfg.get("demand_elasticity", {})
         self._demand_elast_enabled: bool = de.get("enabled", False)
@@ -667,11 +685,57 @@ class OranSlicingPricingEnv(gym.Env):
                      F_E: float, p_over_E: float,
                      rho_U: float = 0.2
                      ) -> Tuple[int, int, int]:
-        """Market step with [D1] admission control. Returns (join, churn, rejected)."""
+        """Market step with per-slice pricing and bill shock.
+
+        [PR-1] Per-slice price signal — each user sees own slice price
+               [Train 2009; Anderson, de Palma & Thisse 1992]
+        [PR-2] Bill shock → churn for overage users
+               [Grubb & Osborne AER 2015]
+        [D1]   Admission control [3GPP TS 23.501 §5.2.3]
+        [D4]   Per-user QoS signal [Kim & Yoon 2004]
+
+        Returns (join, churn, rejected).
+        """
         N_act = int(self._active_mask.sum())
         N_inact = self.N_total - N_act
 
-        P_sig = (F_U + F_E) / (2.0 * self._price_norm)
+        # ── [PR-1] Slice-specific price signal ────────────────────────
+        # BEFORE: P_sig = (F_U + F_E) / (2 × price_norm)  → all users same
+        # AFTER:  P_sig_users[i] = F_s(i) / F_s_max       → per-slice
+        if self._use_per_slice_psig:
+            P_sig_users = np.where(
+                self._slice_is_U,
+                F_U / self._F_U_max,      # URLLC: only see F_U
+                F_E / self._F_E_max       # eMBB: only see F_E
+            )
+        else:
+            # Backward compatibility fallback
+            P_sig = (F_U + F_E) / (2.0 * self._price_norm)
+            P_sig_users = np.full(self.N_total, P_sig)
+
+        # ── [PR-2] Bill shock signal ──────────────────────────────────
+        # Computed from cumulative cycle overage; grows within billing cycle
+        # [Grubb & Osborne AER 2015]: overage experience → 2.7× churn
+        bill_shock_users = np.zeros(self.N_total, dtype=np.float64)
+        if self._bill_shock_enabled and self._cycle_step > 0:
+            N_U = self._cached_N_U
+            N_E = self._cached_N_E
+            per_user_over_U = (
+                max(0, self._cycle_usage_U - self.Q_U * max(N_U, 1))
+                * p_over_U / max(N_U, 1)
+            )
+            per_user_over_E = (
+                max(0, self._cycle_usage_E - self.Q_E * max(N_E, 1))
+                * p_over_E / max(N_E, 1)
+            )
+            bill_ratio_U = (F_U + per_user_over_U) / max(F_U, 1.0)
+            bill_ratio_E = (F_E + per_user_over_E) / max(F_E, 1.0)
+            shock_U = max(0.0, bill_ratio_U - self._bill_shock_threshold)
+            shock_E = max(0.0, bill_ratio_E - self._bill_shock_threshold)
+            bill_shock_users = np.where(
+                self._slice_is_U, shock_U, shock_E
+            )
+
         # [D4] Slice-specific QoS signal — each user sees own slice's QoS
         # [Kim & Yoon 2004; Ahn 2006]
         Q_sig_users = np.where(
@@ -680,21 +744,33 @@ class OranSlicingPricingEnv(gym.Env):
             1.0 - self._prev_pviol_E     # eMBB users: own slice QoS
         )
 
-        # Churn logit
+        # ── Churn logit ──────────────────────────────────────────────
         churn_logits = (
             self.b0_churn
-            + self.bp_churn * self._psens * P_sig
-            - self.bq_churn * self._qsens * Q_sig_users  # [D4] per-user
+            + self.bp_churn * self._psens * P_sig_users       # [PR-1] per-slice
+            + self._beta_bill_shock * self._psens * bill_shock_users  # [PR-2]
+            - self.bq_churn * self._qsens * Q_sig_users       # [D4] per-user
             - self.bsw_churn * self._swcost)
         p_churn_all = sigmoid(churn_logits)
         p_churn_active = p_churn_all * self._active_mask
         E_churn = float(p_churn_active.sum())
 
-        # Join logit
+        # ── Join logit ───────────────────────────────────────────────
+        # [PR-4] Overage price signal dampens potential joins
+        if self._beta_p_over_join > 0:
+            p_over_sig = np.where(
+                self._slice_is_U,
+                p_over_U / self._p_over_U_max,
+                p_over_E / self._p_over_E_max
+            )
+        else:
+            p_over_sig = np.zeros(self.N_total)
+
         join_logits = (
             self.b0_join
-            - self.bp_join * self._psens * P_sig
-            + self.bq_join * self._qsens * Q_sig_users)   # [D4] per-user
+            - self.bp_join * self._psens * P_sig_users         # [PR-1] per-slice
+            - self._beta_p_over_join * self._psens * p_over_sig  # [PR-4]
+            + self.bq_join * self._qsens * Q_sig_users)        # [D4] per-user
         p_join_all = sigmoid(join_logits)
         p_join_inactive = p_join_all * (
             ~self._active_mask).astype(np.float64)

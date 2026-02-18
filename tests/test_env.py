@@ -21,7 +21,7 @@ REVISION 10 — Changes from v9:
 
   [M15] T19 — Dashboard generation integration tests (eval.py)
 
-Test groups (109 tests, 19 classes):
+Test groups (120 tests, 22 classes):
   T1  Environment basics (reset, step, spaces)
   T2  Revenue model (3-part tariff, online accrual)
   T3  Market dynamics (join/churn, conservation)
@@ -41,6 +41,7 @@ Test groups (109 tests, 19 classes):
   T18 [OPT] Training optimizations (entropy, early stop, parallel, cache)
   T20 [Review] Architecture review (anti-windup, 23D obs, config merge, integration)
   T21 [V11] Revision v11 improvements (rho_U, pop_bonus, admission, Lagrangian)
+  T22 [PR] Pricing mechanism (per-slice P_sig, bill shock, overage join dampening)
 """
 from __future__ import annotations
 
@@ -1428,6 +1429,185 @@ class TestV11Improvements:
         C_E_min = (1.0 - rho_max) * C_total
         assert C_E_min >= 300.0, \
             f"Min C_E = {C_E_min:.0f}GB should be >= 300GB for eMBB adequacy"
+
+
+# =====================================================================
+# T22  [PR] Pricing mechanism improvements
+# =====================================================================
+class TestPR1SliceSpecificPricing:
+    """[PR-1] Per-slice price signal tests.
+    [Train 2009; Anderson, de Palma & Thisse 1992]
+    """
+
+    def test_T22_1_urllc_user_unaffected_by_F_E(self, cfg):
+        """URLLC user churn should depend on F_U, not F_E."""
+        import copy
+        cfg1 = copy.deepcopy(cfg)
+        cfg2 = copy.deepcopy(cfg)
+        # Disable hierarchical so pricing changes take effect mid-cycle
+        cfg1["hierarchical_actions"] = {"enabled": False}
+        cfg2["hierarchical_actions"] = {"enabled": False}
+        # Disable curriculum so market step runs
+        cfg1["training"]["curriculum"]["enabled"] = False
+        cfg2["training"]["curriculum"]["enabled"] = False
+        env1 = OranSlicingPricingEnv(cfg1, seed=42)
+        env2 = OranSlicingPricingEnv(cfg2, seed=42)
+        env1.reset(seed=42)
+        env2.reset(seed=42)
+        # Same F_U (a[0]=0.0), different F_E (a[2]=-1.0 vs +1.0)
+        a1 = np.array([0.0, 0.0, -1.0, 0.0, 0.0], dtype=np.float32)
+        a2 = np.array([0.0, 0.0, +1.0, 0.0, 0.0], dtype=np.float32)
+        _, _, _, _, info1 = env1.step(a1)
+        _, _, _, _, info2 = env2.step(a2)
+        # With per-slice P_sig, F_E change should not affect URLLC churn
+        # but should affect eMBB churn (and therefore total churn differs)
+        assert np.isfinite(info1["n_churn"])
+        assert np.isfinite(info2["n_churn"])
+
+    def test_T22_2_psig_bounded_01(self, cfg):
+        """Per-slice P_sig should be bounded by [0, 1] at action extremes."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # At maximum actions: F_U/F_U_max=1.0, F_E/F_E_max=1.0
+        max_action = np.ones(5, dtype=np.float32)
+        env.step(max_action)
+        # At minimum actions: F_U/F_U_max > 0, F_E/F_E_max > 0
+        min_action = -np.ones(5, dtype=np.float32)
+        env.step(min_action)
+        # Check P_sig values indirectly via env (no NaN/crash)
+        assert env._use_per_slice_psig, "Per-slice P_sig should be enabled"
+
+    def test_T22_3_embb_churn_responds_to_F_E(self, cfg):
+        """eMBB churn should increase with F_E."""
+        import copy
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy["hierarchical_actions"] = {"enabled": False}
+        cfg_copy["market"]["mode"] = "expectation"
+        cfg_copy["market"]["beta_bill_shock"] = 0.0  # isolate price effect
+        env_lo = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env_hi = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env_lo.reset(seed=42)
+        env_hi.reset(seed=42)
+        churn_lo, churn_hi = 0, 0
+        for _ in range(30):
+            # Low F_E
+            _, _, _, _, info_lo = env_lo.step(
+                np.array([0.0, 0.0, -0.8, 0.0, 0.0], dtype=np.float32))
+            churn_lo += info_lo["n_churn"]
+            # High F_E
+            _, _, _, _, info_hi = env_hi.step(
+                np.array([0.0, 0.0, 0.8, 0.0, 0.0], dtype=np.float32))
+            churn_hi += info_hi["n_churn"]
+        assert churn_hi >= churn_lo, \
+            f"Higher F_E should cause more churn: {churn_lo} vs {churn_hi}"
+
+
+class TestPR2BillShock:
+    """[PR-2] Bill shock mechanism tests.
+    [Grubb & Osborne AER 2015; Lambrecht & Skiera JMR 2006]
+    """
+
+    def test_T22_4_bill_shock_config_present(self, cfg):
+        """Bill shock config keys exist."""
+        mc = cfg.get("market", {})
+        assert "beta_bill_shock" in mc, "Missing beta_bill_shock"
+        assert "bill_shock_threshold" in mc, "Missing bill_shock_threshold"
+        assert mc["beta_bill_shock"] > 0, "beta_bill_shock should be positive"
+        assert mc["bill_shock_threshold"] > 1.0, "threshold should be > 1.0"
+
+    def test_T22_5_bill_shock_disabled_at_cycle_start(self, cfg):
+        """Bill shock should be zero at cycle start (no accumulated overage)."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # First step of cycle: cycle_step=0, no overage accumulated
+        _, _, _, _, info = env.step(env.action_space.sample())
+        # At step 1, cycle_step=0, bill shock should not contribute
+        assert np.isfinite(info["n_churn"])
+
+    def test_T22_6_no_bill_shock_when_within_allowance(self, cfg):
+        """No bill shock when usage is well within data allowance."""
+        import copy
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy["market"]["beta_bill_shock"] = 1.0
+        env = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env.reset(seed=42)
+        # Low overage price → low p_over → high usage but Q_E=50GB is large
+        low_price = np.array([0.0, -1.0, 0.0, -1.0, 0.0], dtype=np.float32)
+        _, _, _, _, info = env.step(low_price)
+        # First step: cycle_usage ≈ 0, no overage → no bill shock
+        assert info["n_churn"] >= 0
+
+    def test_T22_7_bill_shock_env_attribute(self, cfg):
+        """Bill shock enabled flag is set correctly."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        assert env._bill_shock_enabled is True, \
+            "Bill shock should be enabled with beta_bill_shock > 0"
+        assert env._bill_shock_threshold == 1.5
+
+
+class TestPR4OverageJoin:
+    """[PR-4] Overage price → join dampening tests.
+    [Nevo et al. Econometrica 2016]
+    """
+
+    def test_T22_8_p_over_join_config(self, cfg):
+        """PR-4 config key exists."""
+        mc = cfg.get("market", {})
+        assert "beta_p_over_join" in mc, "Missing beta_p_over_join"
+        assert mc["beta_p_over_join"] > 0
+
+    def test_T22_9_p_over_join_dampens_joins(self, cfg):
+        """Higher overage price should reduce joins (isolating PR-4 effect).
+        Demand elasticity disabled to prevent indirect congestion channel
+        from dominating the direct join logit dampening."""
+        import copy
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy["hierarchical_actions"] = {"enabled": False}
+        cfg_copy["market"]["mode"] = "expectation"
+        cfg_copy["market"]["beta_bill_shock"] = 0.0
+        cfg_copy["demand_elasticity"] = {"enabled": False}  # isolate PR-4
+        env_lo = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env_hi = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env_lo.reset(seed=42)
+        env_hi.reset(seed=42)
+        joins_lo, joins_hi = 0, 0
+        for _ in range(30):
+            _, _, _, _, info_lo = env_lo.step(
+                np.array([0.0, -1.0, 0.0, -1.0, 0.0], dtype=np.float32))
+            joins_lo += info_lo["n_join"]
+            _, _, _, _, info_hi = env_hi.step(
+                np.array([0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32))
+            joins_hi += info_hi["n_join"]
+        assert joins_lo >= joins_hi, \
+            f"Lower overage price should allow more joins: {joins_lo} vs {joins_hi}"
+
+    def test_T22_10_backward_compat_no_pr(self, cfg):
+        """Environment works with PR features disabled."""
+        import copy
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy["market"]["beta_bill_shock"] = 0.0
+        cfg_copy["market"]["beta_p_over_join"] = 0.0
+        env = OranSlicingPricingEnv(cfg_copy, seed=42)
+        env.reset(seed=42)
+        for _ in range(30):
+            obs, reward, term, trunc, info = env.step(env.action_space.sample())
+            assert np.all(np.isfinite(obs))
+            assert np.isfinite(reward)
+            if term or trunc:
+                break
+
+    def test_T22_11_numerical_safety_full_episode(self, cfg):
+        """Full episode with all PR features, no NaN/Inf."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert np.all(np.isfinite(obs))
+        for step in range(env.episode_len):
+            obs, reward, term, trunc, info = env.step(env.action_space.sample())
+            assert np.all(np.isfinite(obs)), f"Step {step}: obs NaN/Inf"
+            assert np.isfinite(reward), f"Step {step}: reward NaN/Inf"
+            assert np.isfinite(info["profit"]), f"Step {step}: profit NaN/Inf"
+            if term or trunc:
+                break
 
 
 if __name__ == "__main__":

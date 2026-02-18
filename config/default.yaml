@@ -36,14 +36,15 @@ time:
   episode_mode: "continuous"      # [EP1] "continuous" or "episodic" (legacy)
 
 # ── §4  Action bounds (5-D continuous) ──
+# [PR-BOUNDS] Korean 5G market calibration [SKT/KT 2024; ITU DDI 2023]
 action:
-  F_U_min: 30000.0
-  F_U_max: 90000.0
-  F_E_min: 40000.0
-  F_E_max: 150000.0
+  F_U_min: 30000.0                # KT 슬림 4GB 30K [KT 2024]
+  F_U_max: 90000.0                # SKT 프라임 89K [SKT 2024]
+  F_E_min: 35000.0                # [PR-BOUNDS] 40K→35K  [SKT 컴팩트 39K, 다이렉트 27K]
+  F_E_max: 110000.0               # [PR-BOUNDS] 150K→110K [SKT 프리미엄 109K; WTP P99]
   p_over_U_min: 500.0
   p_over_U_max: 5000.0
-  p_over_E_min: 200.0
+  p_over_E_min: 500.0             # [PR-BOUNDS] 200→500 [Tirole 1988: marginal cost floor]
   p_over_E_max: 3000.0
   rho_U_min: 0.05
   rho_U_max: 0.20              # [V11-1] 0.45→0.20  [Huang IoT-J 2020; Sciancalepore TNSM 2019]
@@ -101,16 +102,21 @@ cost:
   c_cac_per_join: 80000.0
 
 # ── §10  Market — join / churn ──
+# [PR-1] price_norm REMOVED; per-slice F_s/F_s_max normalization [Train 2009; Anderson et al. 1992]
+# [PR-2] Bill shock mechanism [Grubb & Osborne AER 2015]
 market:
   beta0_churn: -5.5
   beta_p_churn: 3.0
   beta_q_churn: 2.0
   beta_sw_churn: 1.5
+  beta_bill_shock: 1.0            # [PR-2] Bill shock → churn coefficient
+  bill_shock_threshold: 1.5       # [PR-2] Triggers when actual_bill/base_fee > 1.5
   beta0_join: -7.0
   beta_p_join: 1.0
   beta_q_join: 1.5
+  beta_p_over_join: 0.3           # [PR-4] Overage price dampens joins [Nevo et al. 2016]
   mode: "stochastic"
-  price_norm: 120000.0
+  # price_norm: 120000.0          # [PR-3] REMOVED → replaced by per-slice normalization
 
 # ── §11  CLV ──
 clv:
