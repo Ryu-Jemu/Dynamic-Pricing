@@ -1,6 +1,12 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Constrained MDP  (§§3–11)
 
+Implements an xApp on the O-RAN Near-RT RIC [O-RAN WG1 OAD 2023; O-RAN WG3
+RICARCH 2023] that jointly optimises network-slice pricing and PRB allocation
+using SAC [Haarnoja ICML 2018] via Stable-Baselines3 [Raffin JMLR 2021].
+See also [Polese IEEE CST 2023] for O-RAN architecture survey and
+[Bonati IEEE TMC 2023] for ML-based xApp design patterns.
+
 REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] 1-Cycle Continuous Episode Design      [Pardo ICML 2018; Wan arXiv 2025]
         - episode_cycles 24→1, episode_mode="continuous"
@@ -28,7 +34,7 @@ REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
 Gymnasium-compatible environment for SB3 SAC.
 
 Formal Problem Structure — Constrained MDP (CMDP) [Altman 1999]:
-  State:   s_t ∈ ℝ²⁴  (normalised observation vector)
+  State:   s_t ∈ ℝ²³  (normalised observation vector)
   Action:  a_t ∈ ℝ⁵   [F_U, p_U^over, F_E, p_E^over, ρ_U]
   Reward:  r(s,a) = sign(π)·log1p(|π|/s) − penalties + bonuses
   Constraint:  E[pviol_E] ≤ ε_QoS  (Lagrangian dual ascent [M6])
@@ -43,7 +49,7 @@ Action (5-D continuous, §4):
   [D2] Pricing dims (a[0:4]) update only at cycle boundaries when
        hierarchical_actions.enabled=true. ρ_U (a[4]) updates every step.
 
-Observation (24-D, §3.2):
+Observation (23-D, §3.2):
   Indices 0–21: see ``_build_obs`` for layout
   [D6] 22: pviol_E_ema (EMA α=0.3 trend signal)
   [D5] 23: load_headroom_E
@@ -198,6 +204,24 @@ class OranSlicingPricingEnv(gym.Env):
         # [PR-4] Overage price → join dampening [Nevo et al. Econometrica 2016]
         self._beta_p_over_join: float = mc.get("beta_p_over_join", 0.0)
 
+        # [WTP-REF] Reference-Dependent WTP (§20a)
+        # [Koszegi & Rabin QJE 2006; Kahneman & Tversky Econometrica 1979]
+        wtp_cfg = cfg.get("wtp_reference", {})
+        self._wtp_ref_enabled: bool = wtp_cfg.get("enabled", False)
+        self._wtp_alpha_ref: float = wtp_cfg.get("alpha_ref", 0.3)
+        self._wtp_lambda_loss: float = wtp_cfg.get("lambda_loss", 2.0)
+        self._wtp_beta_ref_churn: float = wtp_cfg.get("beta_ref_churn", 1.5)
+        self._wtp_beta_ref_join: float = wtp_cfg.get("beta_ref_join", 0.5)
+        self._wtp_base_elast_enabled: bool = wtp_cfg.get(
+            "base_fee_elasticity_enabled", False)
+        self._wtp_eps_F_U: float = wtp_cfg.get("epsilon_F_U", 0.10)
+        self._wtp_eps_F_E: float = wtp_cfg.get("epsilon_F_E", 0.20)
+        self._wtp_F_ref_base_U: float = (
+            acfg["F_U_min"] + acfg["F_U_max"]) / 2.0
+        self._wtp_F_ref_base_E: float = (
+            acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
+        self._wtp_floor_F: float = wtp_cfg.get("floor_F", 0.7)
+
         # Demand-price elasticity (§6b)
         de = cfg.get("demand_elasticity", {})
         self._demand_elast_enabled: bool = de.get("enabled", False)
@@ -315,6 +339,14 @@ class OranSlicingPricingEnv(gym.Env):
         self._lagrangian_boost: float = 1.0  # [D5] curriculum phase boost
         self._churn_rate_ema: float = 0.0  # [EP1] churn rate EMA for obs[15]
 
+        # [WP-3c] Bill shock diagnostic state for info dict
+        self._last_bill_shock_U: float = 0.0
+        self._last_bill_shock_E: float = 0.0
+
+        # [WTP-REF] Reference price state (per-slice EMA)
+        self._ref_F_U: float = self._wtp_F_ref_base_U
+        self._ref_F_E: float = self._wtp_F_ref_base_E
+
         # [OPT-F] Pre-computed static arrays and caches
         self._a_range = np.maximum(self._a_hi - self._a_lo, 1e-8)
         self._cached_N_act: int = 0
@@ -417,8 +449,10 @@ class OranSlicingPricingEnv(gym.Env):
             self._cycle_pricing = mid[:4].copy()
             self._pviol_E_ema = 0.0       # [D6]
             self._churn_rate_ema = 0.0     # [EP1]
+            self._ref_F_U = self._wtp_F_ref_base_U   # [WTP-REF]
+            self._ref_F_E = self._wtp_F_ref_base_E   # [WTP-REF]
         # else: continuous mode — population, prev_action, pviol_E_ema,
-        #       financial state, churn_rate_ema all persist
+        #       financial state, churn_rate_ema, ref prices all persist
 
         # [OPT-F] Initialize population cache for first _build_obs call
         self._cached_N_act = int(self._active_mask.sum())
@@ -539,6 +573,13 @@ class OranSlicingPricingEnv(gym.Env):
             self._cycle_usage_E = 0.0
             self._prev_over_U = 0.0
             self._prev_over_E = 0.0
+
+        # [WTP-REF] Reference price EMA update at cycle boundary
+        # [Koszegi & Rabin QJE 2006 §III.A — personal equilibrium adaptation]
+        if self._wtp_ref_enabled and self._is_cycle_start:
+            a_ref = self._wtp_alpha_ref
+            self._ref_F_U = a_ref * F_U + (1.0 - a_ref) * self._ref_F_U
+            self._ref_F_E = a_ref * F_E + (1.0 - a_ref) * self._ref_F_E
 
         # Market dynamics
         if self._curriculum_phase == 1:
@@ -712,6 +753,10 @@ class OranSlicingPricingEnv(gym.Env):
             "sla_awareness_penalty": sla_awareness_penalty,
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
+            "bill_shock_U": self._last_bill_shock_U,   # [WP-3c]
+            "bill_shock_E": self._last_bill_shock_E,   # [WP-3c]
+            "ref_F_U": self._ref_F_U,                  # [WTP-REF]
+            "ref_F_E": self._ref_F_E,                  # [WTP-REF]
         }
 
     # ── Traffic ───────────────────────────────────────────────────────
@@ -744,6 +789,23 @@ class OranSlicingPricingEnv(gym.Env):
                              p_over_E / self._pref_E - 1.0))
             raw_u *= mult_u
             raw_e *= mult_e
+
+        # [WTP-REF] Base fee demand elasticity
+        # High base fee → users economize data usage
+        # [Nevo et al. Econometrica 2016; Lambrecht & Skiera JMR 2006]
+        if self._wtp_ref_enabled and self._wtp_base_elast_enabled:
+            cur_F_U = self._prev_action[0]
+            cur_F_E = self._prev_action[2]
+            mult_F_u = max(self._wtp_floor_F,
+                           1.0 - self._wtp_eps_F_U * (
+                               cur_F_U / max(self._wtp_F_ref_base_U, 1e-6)
+                               - 1.0))
+            mult_F_e = max(self._wtp_floor_F,
+                           1.0 - self._wtp_eps_F_E * (
+                               cur_F_E / max(self._wtp_F_ref_base_E, 1e-6)
+                               - 1.0))
+            raw_u *= mult_F_u
+            raw_e *= mult_F_e
 
         # [FIX-B2] Per-step traffic demand perturbation for domain randomization
         # Multiplicative noise clipped to [0.5, 1.5]  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
@@ -816,6 +878,9 @@ class OranSlicingPricingEnv(gym.Env):
             bill_shock_users = np.where(
                 self._slice_is_U, shock_U, shock_E
             )
+            # [WP-3c] Store for info dict diagnostic
+            self._last_bill_shock_U = shock_U
+            self._last_bill_shock_E = shock_E
 
         # [D4] Slice-specific QoS signal — each user sees own slice's QoS
         # [Kim & Yoon 2004; Ahn 2006]
@@ -825,10 +890,31 @@ class OranSlicingPricingEnv(gym.Env):
             1.0 - self._prev_pviol_E     # eMBB users: own slice QoS
         )
 
+        # ── [WTP-REF] Reference-dependent price change signal ───────
+        # [Koszegi & Rabin QJE 2006; Kahneman & Tversky 1979]
+        # Asymmetric: price increases (loss) amplified by lambda_loss,
+        # price decreases (gain) weighted 1.0
+        ref_churn_term = np.zeros(self.N_total, dtype=np.float64)
+        ref_join_term = np.zeros(self.N_total, dtype=np.float64)
+        if self._wtp_ref_enabled:
+            delta_F_U = (F_U - self._ref_F_U) / max(self._F_U_max, 1e-6)
+            delta_F_E = (F_E - self._ref_F_E) / max(self._F_E_max, 1e-6)
+            lam = self._wtp_lambda_loss
+            ref_U = lam * delta_F_U if delta_F_U > 0 else delta_F_U
+            ref_E = lam * delta_F_E if delta_F_E > 0 else delta_F_E
+            ref_churn_term = np.where(
+                self._slice_is_U, ref_U, ref_E)
+            # Join: only loss side (price increase dampens joins)
+            ref_join_term = np.where(
+                self._slice_is_U,
+                max(0.0, delta_F_U),
+                max(0.0, delta_F_E))
+
         # ── Churn logit ──────────────────────────────────────────────
         churn_logits = (
             self.b0_churn
             + self.bp_churn * self._psens * P_sig_users       # [PR-1] per-slice
+            + self._wtp_beta_ref_churn * self._psens * ref_churn_term  # [WTP-REF]
             + self._beta_bill_shock * self._psens * bill_shock_users  # [PR-2]
             - self.bq_churn * self._qsens * Q_sig_users       # [D4] per-user
             - self.bsw_churn * self._swcost)
@@ -850,6 +936,7 @@ class OranSlicingPricingEnv(gym.Env):
         join_logits = (
             self.b0_join
             - self.bp_join * self._psens * P_sig_users         # [PR-1] per-slice
+            - self._wtp_beta_ref_join * self._psens * ref_join_term  # [WTP-REF]
             - self._beta_p_over_join * self._psens * p_over_sig  # [PR-4]
             + self.bq_join * self._qsens * Q_sig_users)        # [D4] per-user
         p_join_all = sigmoid(join_logits)
@@ -941,7 +1028,7 @@ class OranSlicingPricingEnv(gym.Env):
         # to preserve constraint gradient  [Paternain CDC 2019]
         r_base = float(np.clip(r, -2.0, 2.0))
         r_final = r_base - lagrangian_penalty
-        return float(np.clip(r_final, -5.0, 5.0))  # [FIX-C1] -4→-5 wider clip for recalibrated scale
+        return float(np.clip(r_final, -8.0, 8.0))  # [WP-1a] -5→-8 wider clip for λ_max=15 headroom  [Engstrom ICML 2020]
 
     # ── Observation ───────────────────────────────────────────────────
 

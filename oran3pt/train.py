@@ -150,22 +150,30 @@ if _SB3_AVAILABLE:
     class _CurriculumCallback(BaseCallback):
         """[R3][D5] Multi-phase curriculum learning callback.
 
-        Supports 2-phase (legacy) and 3-phase (D5) configurations.
+        Supports 3-phase configurations with per-phase PID gain scheduling.
         3-phase:
           Phase 1: no churn/join, no Lagrangian — pricing/capacity isolation
           Phase 2: full dynamics, boosted Lagrangian — QoS-focused
           Phase 3: full dynamics, normal Lagrangian — full optimization
 
+        [WP-2b] Phase-specific PID gains: each phase may specify
+        {Kp, Ki, Kd} to control Lagrangian response characteristics.
+        On phase transition, integral is dampened by 50% to reduce
+        path dependency. [Stooke ICLR 2020 §3.2; Narvekar JMLR 2020]
+
         References:
           [Narvekar et al., JMLR 2020]  — Task-specific curriculum
           [Bengio et al., ICML 2009]    — Difficulty ordering
           [Achiam et al., ICML 2017]    — CPO feasible region
+          [Stooke et al., ICLR 2020]    — PID gain scheduling
         """
 
         def __init__(self, phases: List[Dict], total_timesteps: int,
+                     lag_cb: Optional['_LagrangianPIDCallback'] = None,
                      verbose: int = 0):
             super().__init__(verbose)
             self._phases = phases
+            self._lag_cb = lag_cb  # [WP-2b] reference for PID gain updates
             # Compute cumulative step boundaries
             self._boundaries: List[int] = [0]
             cumulative = 0
@@ -206,6 +214,33 @@ if _SB3_AVAILABLE:
                     self._decay_steps = 0   # no decay for this phase
                     if hasattr(env, 'set_lagrangian_boost'):
                         env.set_lagrangian_boost(target_boost)
+
+                # [WP-2b] Phase-specific PID gain scheduling
+                # [Stooke 2020 §3.2]: higher Kp early, higher Ki late
+                pid_gains = phase_cfg.get("pid_gains", None)
+                if pid_gains is not None and self._lag_cb is not None:
+                    # Dampen integral by 50% on phase transition to
+                    # reduce path dependency  [Stooke 2020; Narvekar 2020]
+                    self._lag_cb._error_integral *= 0.5
+                    # Apply new gains
+                    if "Kp" in pid_gains:
+                        self._lag_cb._Kp = float(pid_gains["Kp"])
+                    if "Ki" in pid_gains:
+                        self._lag_cb._Ki = float(pid_gains["Ki"])
+                        # Recompute integral bounds for new Ki
+                        new_Ki = self._lag_cb._Ki
+                        self._lag_cb._integral_max = (
+                            self._lag_cb._lambda_max / max(new_Ki, 1e-8))
+                        self._lag_cb._integral_min = (
+                            -self._lag_cb._lambda_max * 0.05)
+                    if "Kd" in pid_gains:
+                        self._lag_cb._Kd = float(pid_gains["Kd"])
+                    logger.info(
+                        "[WP-2b] PID gains updated: Kp=%.4f Ki=%.4f Kd=%.4f "
+                        "(integral dampened to %.4f)",
+                        self._lag_cb._Kp, self._lag_cb._Ki,
+                        self._lag_cb._Kd, self._lag_cb._error_integral)
+
                 logger.info(
                     "[D5] Curriculum: → Phase %d at step %d "
                     "(churn_join=%s, lagrangian_boost=%.1f%s)",
@@ -359,15 +394,19 @@ if _SB3_AVAILABLE:
             self._min_imp = min_improvement
             self._best_reward = -np.inf
             self._stale_count = 0
-            self._last_eval_calls = 0
+            self._last_n_evals = 0
 
         def _on_step(self) -> bool:
             if self.num_timesteps < self._min_ts:
                 return True
-            # Only check when a new evaluation has occurred
-            if self._eval_cb.n_calls == self._last_eval_calls:
+            # Only check when a new evaluation has occurred.
+            # n_calls increments every step; divide by eval_freq to get
+            # the actual number of evaluations performed.
+            n_evals = self._eval_cb.n_calls // max(
+                self._eval_cb.eval_freq, 1)
+            if n_evals == self._last_n_evals:
                 return True
-            self._last_eval_calls = self._eval_cb.n_calls
+            self._last_n_evals = n_evals
 
             current = self._eval_cb.best_mean_reward
             if self._best_reward < 0:
@@ -390,11 +429,27 @@ if _SB3_AVAILABLE:
             return True
 
 
+def _constraint_aware_score(reward: float, mean_pviol_E: float,
+                            threshold: float = 0.08,
+                            alpha: float = 10.0) -> float:
+    """[WP-2a] Constraint-aware model selection score.
+
+    Penalizes models with mean pviol_E above threshold.
+    alpha=10.0: pviol_E 0.05 above threshold → penalty 0.5 on reward.
+    [Achiam ICML 2017, CPO; Tessler ICML 2019]
+    """
+    violation = max(0.0, mean_pviol_E - threshold)
+    return reward - alpha * violation
+
+
 def train_single_seed(cfg: Dict[str, Any],
                       users_csv: Optional[str] = None,
                       output_dir: str = "outputs",
-                      seed: int = 0) -> Tuple[Path, float]:
-    """[OPT-H] Train a single SAC seed; return (path, best_eval_reward)."""
+                      seed: int = 0) -> Tuple[Path, float, float]:
+    """[OPT-H][WP-2a] Train a single SAC seed.
+
+    Returns (path, best_eval_reward, mean_pviol_E).
+    """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -503,6 +558,7 @@ def train_single_seed(cfg: Dict[str, Any],
         if target_entropy is not None:
             sac_kwargs["target_entropy"] = target_entropy
             logger.info("  [I-6a] target_entropy: %.1f", target_entropy)
+        # [Raffin JMLR 2021] — Stable-Baselines3 SAC implementation
         model = SAC("MlpPolicy", env, **sac_kwargs)
 
         eval_env = Monitor(OranSlicingPricingEnv(cfg, users_csv=users_csv,
@@ -551,11 +607,9 @@ def train_single_seed(cfg: Dict[str, Any],
                        "min_timesteps=%d, min_improvement=%.3f",
                        es_cb._patience, es_cb._min_ts, es_cb._min_imp)
 
-        if curriculum_enabled:
-            callbacks.append(_CurriculumCallback(
-                curriculum_phases, total_timesteps))
-
         # [M6][D2] PID Lagrangian QoS constraint callback
+        # Created before curriculum callback so it can be passed as reference
+        lag_cb: Optional[_LagrangianPIDCallback] = None
         lag_cfg = cfg.get("lagrangian_qos", {})
         if lag_cfg.get("enabled", False):
             lag_cb = _LagrangianPIDCallback(
@@ -573,6 +627,11 @@ def train_single_seed(cfg: Dict[str, Any],
                         "Kp=%.4f  Ki=%.4f  Kd=%.4f  λ_max=%.1f  freq=%d",
                         lag_cb._Kp, lag_cb._Ki, lag_cb._Kd,
                         lag_cb._lambda_max, lag_cb._update_freq)
+
+        if curriculum_enabled:
+            # [WP-2b] Pass lag_cb for phase-specific PID gain scheduling
+            callbacks.append(_CurriculumCallback(
+                curriculum_phases, total_timesteps, lag_cb=lag_cb))
 
         model.learn(total_timesteps=total_timesteps,
                     callback=callbacks,
@@ -604,16 +663,29 @@ def train_single_seed(cfg: Dict[str, Any],
                     lag_state["lambda"], lagrangian_state_path)
 
         csvlog.close()
+
+        # [WP-2a] Extract mean_pviol_E from last 1000 training steps
+        mean_pviol_E = 0.0
+        try:
+            import pandas as _pd
+            _df = _pd.read_csv(csv_path)
+            if "pviol_E" in _df.columns and len(_df) > 0:
+                _tail = _df.tail(min(1000, len(_df)))
+                mean_pviol_E = float(_tail["pviol_E"].mean())
+        except Exception:
+            pass  # graceful fallback
+
         logger.info("Seed %d done.  Best -> %s.zip  Final -> %s.zip  "
-                     "best_reward=%.4f", seed, best_model_name, final_path,
-                     best_reward)
+                     "best_reward=%.4f  mean_pviol_E=%.4f",
+                     seed, best_model_name, final_path,
+                     best_reward, mean_pviol_E)
 
         best_zip = out / f"{best_model_name}.zip"
         if not best_zip.exists():
             best_zip = out / f"seed{seed}" / "best_model.zip"
         if best_zip.exists():
-            return best_zip, best_reward
-        return Path(str(final_path) + ".zip"), best_reward
+            return best_zip, best_reward, mean_pviol_E
+        return Path(str(final_path) + ".zip"), best_reward, mean_pviol_E
 
     except Exception as e:
         csvlog.close()
@@ -623,7 +695,7 @@ def train_single_seed(cfg: Dict[str, Any],
         stats = _run_random_baseline(cfg, total_timesteps, csv_path,
                                      users_csv=users_csv, seed=seed)
         logger.info("Random baseline stats: %s", stats)
-        return out / f"train_log_seed{seed}.csv", stats["mean_reward"]
+        return out / f"train_log_seed{seed}.csv", stats["mean_reward"], 1.0
 
 
 def _seed_worker(seed: int, cfg: Dict[str, Any],
@@ -637,32 +709,32 @@ def _seed_worker(seed: int, cfg: Dict[str, Any],
     [Henderson AAAI 2018] multi-seed reproducibility.
     """
     try:
-        path, reward = train_single_seed(cfg, users_csv, output_dir, seed)
-        result_queue.put((seed, str(path), reward))
+        path, reward, pviol = train_single_seed(cfg, users_csv, output_dir, seed)
+        result_queue.put((seed, str(path), reward, pviol))
     except Exception as e:
         logger.error("Seed %d failed: %s", seed, e)
-        result_queue.put((seed, None, float('-inf')))
+        result_queue.put((seed, None, float('-inf'), 1.0))
 
 
 def _train_sequential(cfg: Dict[str, Any],
                       users_csv: Optional[str],
                       output_dir: str,
-                      n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float]]]:
+                      n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float, float]]]:
     """Sequential multi-seed training (fallback or n_seeds=1)."""
-    results: List[Tuple[int, str, float]] = []
+    results: List[Tuple[int, str, float, float]] = []
     for seed_idx in range(n_seeds):
         logger.info("======== Training seed %d / %d ========",
                      seed_idx + 1, n_seeds)
-        p, reward = train_single_seed(cfg, users_csv=users_csv,
-                                      output_dir=output_dir, seed=seed_idx)
-        results.append((seed_idx, str(p), reward))
+        p, reward, pviol = train_single_seed(cfg, users_csv=users_csv,
+                                             output_dir=output_dir, seed=seed_idx)
+        results.append((seed_idx, str(p), reward, pviol))
     return Path(output_dir), results
 
 
 def _train_parallel(cfg: Dict[str, Any],
                     users_csv: Optional[str],
                     output_dir: str,
-                    n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float]]]:
+                    n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float, float]]]:
     """[OPT-A] Parallel multi-seed training via multiprocessing.
 
     Each seed runs in a separate process with batch scheduling when
@@ -678,9 +750,9 @@ def _train_parallel(cfg: Dict[str, Any],
 
     remaining = list(range(n_seeds))
     active: List[mp.Process] = []
-    results: List[Tuple[int, str, float]] = []
+    results: List[Tuple[int, str, float, float]] = []
 
-    while remaining or active:
+    while len(results) < n_seeds:
         # Launch new processes up to max_parallel
         while remaining and len(active) < max_parallel:
             seed_idx = remaining.pop(0)
@@ -690,14 +762,14 @@ def _train_parallel(cfg: Dict[str, Any],
             p.start()
             active.append(p)
         # Collect one result (blocks until any seed finishes)
-        if active:
-            result = result_queue.get()
+        if len(results) < n_seeds:
+            result = result_queue.get(timeout=600)  # 10 min safety timeout
             results.append(result)
             active = [p for p in active if p.is_alive()]
 
     # Ensure all processes are fully joined
     for p in active:
-        p.join()
+        p.join(timeout=30)
 
     return out, results
 
@@ -705,9 +777,11 @@ def _train_parallel(cfg: Dict[str, Any],
 def train(cfg: Dict[str, Any],
           users_csv: Optional[str] = None,
           output_dir: str = "outputs") -> Path:
-    """[E9][OPT-A][OPT-H] Multi-seed training with parallel support.
+    """[E9][OPT-A][OPT-H][WP-2a] Multi-seed training with parallel support.
 
-    Returns path to canonical best_model.zip (selected by highest eval reward).
+    Returns path to canonical best_model.zip (selected by constraint-aware score).
+    [WP-2a] Cross-seed selection uses _constraint_aware_score() to penalize
+    models with pviol_E above threshold. [Achiam ICML 2017; Tessler 2019]
     """
     tc = cfg.get("training", {})
     n_seeds = tc.get("n_seeds", 1)
@@ -720,14 +794,18 @@ def train(cfg: Dict[str, Any],
     else:
         _, results = _train_sequential(cfg, users_csv, output_dir, n_seeds)
 
-    # [OPT-H] Select best model across all seeds by eval reward
-    valid_results = [(s, p, r) for s, p, r in results if p is not None]
+    # [WP-2a] Constraint-aware cross-seed model selection
+    lag_cfg = cfg.get("lagrangian_qos", {})
+    pviol_threshold = lag_cfg.get("pviol_E_threshold", 0.08)
+    valid_results = [(s, p, r, pv) for s, p, r, pv in results if p is not None]
     if not valid_results:
         logger.warning("No valid seed results. No best_model.zip created.")
         return out / "best_model.zip"
 
-    best_seed, best_path_str, best_reward = max(
-        valid_results, key=lambda x: x[2])
+    best_seed, best_path_str, best_reward, best_pviol = max(
+        valid_results,
+        key=lambda x: _constraint_aware_score(x[2], x[3], pviol_threshold))
+    best_score = _constraint_aware_score(best_reward, best_pviol, pviol_threshold)
     canonical = out / "best_model.zip"
     best_path = Path(best_path_str)
 
@@ -741,8 +819,9 @@ def train(cfg: Dict[str, Any],
         shutil.copy2(best_lag, canonical_lag)
         logger.info("[V11-4] Lagrangian state → %s", canonical_lag)
 
-    logger.info("[OPT-H] Best model: seed %d (reward=%.4f) -> %s",
-               best_seed, best_reward, canonical)
+    logger.info("[WP-2a] Best model: seed %d (reward=%.4f, pviol_E=%.4f, "
+               "score=%.4f) -> %s",
+               best_seed, best_reward, best_pviol, best_score, canonical)
     return canonical
 
 

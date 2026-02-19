@@ -24,6 +24,10 @@
 #   [E1–E9] Feature engineering, CLV, multi-seed
 #   [C1–C5] Calibration fixes
 #   [R1–R8] Training / observation / reward improvements
+#
+# Architectural references:
+#   [REF-1] O-RAN xApp on Near-RT RIC  [O-RAN WG1 OAD 2023; O-RAN WG3 RICARCH 2023]
+#   [REF-2] SB3 SAC implementation     [Raffin JMLR 2021]
 # ================================================================
 
 # ── §3.1  Time axis ──
@@ -47,8 +51,8 @@ action:
   p_over_E_min: 500.0             # [PR-BOUNDS] 200→500 [Tirole 1988: marginal cost floor]
   p_over_E_max: 3000.0
   rho_U_min: 0.03              # [FIX-M1] 0.05→0.03; C_U=14.4GB (1.2× URLLC load)
-  rho_U_max: 0.12              # [FIX-M1] 0.20→0.12; C_E≥352GB guaranteed
-                                # URLLC load ~12GB, C_U at rho=0.12 = 57.6GB (4.8× headroom)
+  rho_U_max: 0.10              # [WP-3b] 0.12→0.10; C_E≥360GB guaranteed; 17% search space reduction
+                                # URLLC load ~12GB, C_U at rho=0.10 = 48GB (4.0× headroom)
                                 # [Dulac-Arnold JMLR 2021 Challenge #6; Sciancalepore TNSM 2019]
 
 # ── §5  3-Part tariff allowances ──
@@ -129,7 +133,7 @@ clv:
 # ── §11b  CLV-aware reward shaping ──
 clv_reward_shaping:
   enabled: true
-  alpha_retention: 2.0
+  alpha_retention: 15.0            # [WP-1b] 2.0→15.0; daily churn 0.125% → penalty 0.019 (~3% of base)  [Fader & Hardie 2010]
   warmup_steps: 0              # [EP1] 100→0; uses _total_steps internally
 
 # ── §13  Population ──
@@ -182,18 +186,22 @@ training:
   curriculum:
     enabled: true
     # [D5] 3-phase curriculum  [Narvekar 2020; Bengio 2009; Achiam 2017]
+    # [WP-2b] Phase-specific PID gains  [Stooke 2020 §3.2; Narvekar 2020]
     phases:
-      - fraction: 0.10          # [FIX-B3] Phase 1: shortened isolation (0.15→0.10)
+      - fraction: 0.10          # Phase 1: pricing isolation (no market)
         churn_join: false
         lagrangian_boost: 0.0
-      - fraction: 0.35          # [FIX-B3] Phase 2: extended QoS focus (0.25→0.35)
+        pid_gains: {Kp: 0.0, Ki: 0.0, Kd: 0.0}          # Lagrangian disabled
+      - fraction: 0.35          # Phase 2: QoS-focused learning
         churn_join: true
         lagrangian_boost: 2.0
-        boost_decay_steps: 10000  # [FIX-B3] Gradual 0→2.0 boost transition  [Narvekar 2020; Achiam 2017]
-      - fraction: 0.55          # [FIX-B3] Phase 3: full optimization (0.60→0.55)
+        boost_decay_steps: 10000
+        pid_gains: {Kp: 0.08, Ki: 0.005, Kd: 0.02}      # High Kp for fast constraint response
+      - fraction: 0.55          # Phase 3: full optimization
         churn_join: true
         lagrangian_boost: 1.0
-        boost_decay_steps: 5000   # [FIX-S3] 2.0→1.0 선형 감소  [Narvekar 2020; Achiam 2017]
+        boost_decay_steps: 5000
+        pid_gains: {Kp: 0.05, Ki: 0.015, Kd: 0.01}      # Higher Ki for steady-state error elimination
   # [OPT-C] Early stopping  [Prechelt 2002; Henderson 2018]
   early_stopping:
     enabled: true
@@ -213,12 +221,12 @@ observation:
 action_smoothing:
   enabled: true
   weight: 0.05
-  weights: [0.10, 0.05, 0.10, 0.05, 0.05]   # [I-3a] rho_U: 0.01→0.05  [Dalal NeurIPS 2018 §4.1; downstream C_E impact]
+  weights: [0.10, 0.05, 0.10, 0.05, 0.30]   # [WP-1b] rho_U: 0.05→0.30; C_E downstream impact proportional  [Dalal NeurIPS 2018 §4.1]
 
 # ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 1.0                 # [ERR-5] 0.6→1.0; stronger population signal  [Mguni 2019 §4.2; Zheng 2022]
+  beta_pop: 2.0                 # [WP-1b] 1.0→2.0; quadratic 3× at -5% → penalty 0.015 (~2% of base)  [Mguni 2019 §4.2]
   target_ratio: 0.37            # [ERR-5] 0.4→0.37; capacity-aligned (185 users ≈ 80% C_E)  [Boyd 2004]
   quadratic: true               # [V11-8] Asymmetric quadratic  [Zheng 2022; Mguni 2019]
 
@@ -230,7 +238,7 @@ lagrangian_qos:
   Kp: 0.05                      # [D2] Proportional gain  [Stooke 2020]
   Ki: 0.01                      # [ERR-3] 0.02→0.01; slower integral with tighter λ range [0.5, 5.0]  [Stooke 2020; Boyd 2004]
   Kd: 0.01                      # [D2] Derivative gain
-  lambda_max: 5.0                # [ERR-3] 20.0→5.0; calibrated for reward ~0.7; penalty 17% at moderate violation  [Boyd 2004; Stooke 2020]
+  lambda_max: 15.0               # [WP-1a] 5.0→15.0; dual headroom for λ* convergence  [Boyd 2004 §5.5.3; Stooke 2020]
   lambda_min: 0.5                # [FIX-M3] 0.1→0.5; penalty at pviol=0.2: 0.5×0.1=0.05 (2.8% of reward range)  [Paternain CDC 2019; TAC 2022]
   update_freq: 200               # [D2] 1000→200  [Stooke 2020]
   eval_lambda_floor: 2.0         # [FIX-S5] 1.0→2.0; eval 시 최소 QoS 인센티브 강화  [Tessler 2019 §5; Tobin IROS 2017]
@@ -257,7 +265,7 @@ hierarchical_actions:
 capacity_guard:
   enabled: true
   embb_load_ratio_max: 0.78      # [ADD-1] 0.85→0.78; activates before AC threshold  [3GPP TS 23.501 §5.15.7; Wiewiora ICML 2003]
-  penalty_scale: 2.0             # [ADD-1] 0.10→2.0; 20× for dominant constraint signal  [Samdanis CommMag 2016]
+  penalty_scale: 4.0             # [WP-1b] 2.0→4.0; anticipatory capacity penalty  [Huang IoT-J 2020; Samdanis CommMag 2016]
 
 # ── §19  [I-5a] SLA Awareness Penalty ──
 # Additional reward shaping when SLA penalty exceeds revenue threshold
@@ -265,9 +273,32 @@ capacity_guard:
 sla_awareness:
   enabled: true
   revenue_ratio_threshold: 0.05  # Trigger when sla_penalty/revenue > 5%
-  penalty_scale: 0.1             # Penalty coefficient
+  penalty_scale: 0.5             # [WP-1b] 0.1→0.5; amplify SLA cost signal attenuated by log-transform  [Wiewiora ICML 2003]
 
-# ── §20  Evaluation settings ──
+# ── §20a  [WTP-REF] Reference-Dependent WTP ──
+# 가격 상승 시 지불의도 감소: 참조가격 형성 + 비대칭 손실 회피
+# [Koszegi & Rabin QJE 2006; Kahneman & Tversky Econometrica 1979]
+wtp_reference:
+  enabled: true
+  # 참조가격 EMA 적응률 (빌링 사이클 경계에서 업데이트)
+  # [Koszegi & Rabin QJE 2006 §III.A — personal equilibrium adaptation]
+  alpha_ref: 0.3
+  # 손실 회피 계수: 가격 상승(loss) 가중 = lambda_loss × 가격 하락(gain)
+  # [Tversky & Kahneman J.Risk&Uncertainty 1992: λ ∈ [2.0, 2.5]; 보수적 하한]
+  lambda_loss: 2.0
+  # 참조의존 이탈 계수 (10% F 인상 → +0.15 추가 logit)
+  # [Bolton, Warlop & Alba JCR 2003: 가격 불공정 → 2-3× churn at 30% increase]
+  beta_ref_churn: 1.5
+  # 참조의존 가입 억제 (비가입자: 약한 참조 앵커)
+  # [Train 2009: 잠재 가입자는 경험 가격이 아닌 사전 신념 기반]
+  beta_ref_join: 0.5
+  # 기본료 수요 탄력성 [Nevo et al. Econometrica 2016]
+  base_fee_elasticity_enabled: true
+  epsilon_F_U: 0.10              # URLLC: 미션 크리티컬, 비탄력적
+  epsilon_F_E: 0.20              # eMBB: 중간 탄력성 [Nevo 2016: -0.4~-0.6]
+  floor_F: 0.7                   # 기본료 수요 하한 (초과요금 floor=0.5보다 높음)
+
+# ── §20b  Evaluation settings ──
 eval:
   action_ema_alpha: 0.7          # [FIX-B1] Eval-time action EMA smoothing  [Dulac-Arnold JMLR 2021 §4.2]
 
