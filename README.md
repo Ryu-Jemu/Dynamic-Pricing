@@ -4,8 +4,8 @@ Reference-grade simulation for joint network-slice pricing and PRB allocation
 using Soft Actor-Critic reinforcement learning, with a **3-part tariff**
 revenue model (base fee + allowance + overage pricing).
 
-**Revision 10.4** — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes,
-with 171 unit tests.
+**Revision 5.7** — Consolidated from v10.4 + v5.7 RESOLUTION_PLAN,
+with 183 unit tests.
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 | `a[1]` | URLLC overage price p^over_U | [500, 5000] KRW/GB |
 | `a[2]` | eMBB base fee F_E | [35K, 110K] KRW/cycle |
 | `a[3]` | eMBB overage price p^over_E | [500, 3000] KRW/GB |
-| `a[4]` | URLLC PRB share ρ_U | [0.03, 0.12] |
+| `a[4]` | URLLC PRB share ρ_U | [0.03, 0.10] |
 
 **Objective**: Maximize E[Σ γ^t Profit_t] where Profit = Revenue − Cost,
 subject to E[pviol_E] ≤ ε_QoS (Constrained MDP, Lagrangian dual ascent).
@@ -60,7 +60,7 @@ Dynamic-Pricing/
 │   ├── business_dashboard.py     # Business dashboard (Chart.js)
 │   └── templates/                # HTML templates
 ├── scripts/run.sh                # End-to-end pipeline (interactive)
-├── tests/test_env.py             # 171 unit tests across 27 groups
+├── tests/test_env.py             # 183 unit tests across 27 groups
 ├── data/                         # Generated users_init.csv
 ├── outputs/                      # Models, logs, plots, dashboards
 ├── docs/                         # Consolidated documentation
@@ -115,17 +115,17 @@ Bill_{u,s} = F_s + p_s^over × max(0, D_{u,s} − Q_s)
 ```
 r_base = clip(sign(profit) × log(1 + |profit| / 300K)
               − smooth_penalty − retention_penalty + pop_bonus, −2, 2)
-r_final = clip(r_base − lagrangian_penalty × boost, −5, 5)
+r_final = clip(r_base − lagrangian_penalty × boost, −8, 8)
 ```
 
 | Component | Formula | Reference |
 |-----------|---------|-----------|
 | Log-profit | sign(p)·log1p(\|p\|/300K) | [SB3 Tips] |
 | Smoothing [R4] | Σ_i w_i × (a_t[i] − a_{t−1}[i])² | [Dalal 2018] |
-| Retention [R2] | 2.0 × (n_churn / N_active) | [Wiewiora 2003, Gupta 2006] |
-| Population [R6] | 1.0 × quadratic(N_active/N_total − 0.37) | [Mguni 2019, Zheng 2022] |
+| Retention [R2] | 15.0 × (n_churn / N_active) | [Wiewiora 2003, Fader 2010] |
+| Population [R6] | 2.0 × quadratic(N_active/N_total − 0.37) | [Mguni 2019, Zheng 2022] |
 | Lagrangian [D2] | λ × pviol_E × boost | [Tessler 2019, Stooke 2020] |
-| Capacity Guard | 2.0 × max(0, L_E/C_E − 0.78)² | [Samdanis 2016] |
+| Capacity Guard | 4.0 × max(0, L_E/C_E − 0.78)² | [Samdanis 2016] |
 
 ## Training
 
@@ -142,7 +142,7 @@ SAC with automatic entropy tuning [Haarnoja et al., ICML 2018]:
 | n_seeds | 5 (parallel) [E9] |
 | Curriculum | 3-phase: P1 (10%, no churn) → P2 (35%, QoS focus) → P3 (55%, full) |
 | Early stopping | patience=15, min_timesteps=auto (75%) [OPT-C] |
-| PID Lagrangian | Kp=0.05, Ki=0.01, Kd=0.01, λ_max=5 [D2] |
+| PID Lagrangian | Kp=0.05, Ki=0.015, Kd=0.01, λ_max=15 [D2] |
 
 ## Tests
 
@@ -150,7 +150,7 @@ SAC with automatic entropy tuning [Haarnoja et al., ICML 2018]:
 python -m pytest tests/ -v
 ```
 
-171 tests across 27 groups (T1–T26, no T14):
+183 tests across 27 groups (T1–T27, no T14/T19):
 
 | Group | Tests | Focus |
 |-------|-------|-------|
@@ -179,6 +179,7 @@ python -m pytest tests/ -v
 | T24 v5.3 fixes | 10 | Eval λ propagation, PID integral, rho_U bounds |
 | T25 v5.5 improvements | 8 | Lambda_max, threshold, boost decay, DR |
 | T26 v5.6 corrections | 15 | Alpha_congestion, AC, reward_scale, capacity |
+| T27 v5.7 RESOLUTION_PLAN | 12 | Shaping recalib, PID gain scheduling, constraint selection |
 
 ## Revision History
 
@@ -194,7 +195,8 @@ python -m pytest tests/ -v
 | v9 | Design improvements (D1–D7) | 100 | PID Lagrangian, slice-specific Q_sig, 3-phase |
 | v10 | EP1 + review (CR/ME/HI) | 109 | 1-cycle continuous, 23D obs, anti-windup |
 | v11 | Market + pricing (V11/PR) | 136 | rho_U bounds, bill shock, per-slice P_sig |
-| **v10.4** | **Hotfixes (v5.2–v5.6)** | **171** | **α=15, λ_max=5, AC 0.80, reward calibration** |
+| v10.4 | Hotfixes (v5.2–v5.6) | 171 | α=15, λ_max=5, AC 0.80, reward calibration |
+| **v5.7** | **RESOLUTION_PLAN** | **183** | **λ_max=15, clip [-8,8], PID gain scheduling, constraint-aware selection** |
 
 ## References
 
@@ -203,6 +205,7 @@ python -m pytest tests/ -v
 | [Achiam 2017] | Achiam et al., "Constrained Policy Optimization," ICML 2017 |
 | [Bacon 2017] | Bacon et al., "The Option-Critic Architecture," AAAI 2017 |
 | [Bengio 2009] | Bengio et al., "Curriculum Learning," ICML 2009 |
+| [Bonati 2023] | Bonati et al., "ColO-RAN: ML-based xApps for Open RAN," IEEE TMC 2023 |
 | [Boyd 2004] | Boyd & Vandenberghe, "Convex Optimization," Cambridge 2004 |
 | [Dalal 2018] | Dalal et al., "Safe Exploration in Continuous Action Spaces," NeurIPS 2018 |
 | [Dulac-Arnold 2021] | Dulac-Arnold et al., "Challenges of Real-World RL," JMLR 2021 |
@@ -214,11 +217,19 @@ python -m pytest tests/ -v
 | [Henderson 2018] | Henderson et al., "Deep RL that Matters," AAAI 2018 |
 | [Lambrecht & Skiera 2006] | Lambrecht & Skiera, "Paying Too Much and Being Happy About It," JMR 2006 |
 | [Mguni 2019] | Mguni et al., "Coordinating the Crowd," AAMAS 2019 |
+| [Nahum 2024] | Nahum et al., "Intent-Aware Radio Resource Management for DRL-based Network Slicing," IEEE TMC 2024 |
 | [Narvekar 2020] | Narvekar et al., "Curriculum Learning for RL," JMLR 2020 |
 | [Nevo 2016] | Nevo et al., "Usage-Based Pricing," Econometrica 2016 |
 | [Ng 1999] | Ng et al., "Policy Invariance Under Reward Transformations," ICML 1999 |
+| [O-RAN WG1] | O-RAN Alliance, "O-RAN Architecture Description," O-RAN.WG1.OAD-R003-v10.00, 2023 |
+| [O-RAN WG2] | O-RAN Alliance, "AI/ML Workflow Description," O-RAN.WG2.AIML-v01.03, 2023 |
+| [O-RAN WG3] | O-RAN Alliance, "Near-RT RIC Architecture," O-RAN.WG3.RICARCH-R003-v04.00, 2023 |
 | [Pardo 2018] | Pardo et al., "Time Limits in Reinforcement Learning," ICML 2018 |
+| [Polese 2023] | Polese et al., "Understanding O-RAN," IEEE Comms Surveys & Tutorials 2023 |
+| [Raffin 2021] | Raffin et al., "Stable-Baselines3: Reliable RL Implementations," JMLR 2021 |
+| [Saha 2023] | Saha et al., "DRL Approaches to Network Slice Scaling: A Survey," IEEE CommMag 2023 |
 | [Stooke 2020] | Stooke et al., "Responsive Safety in RL by PID Lagrangian Methods," ICLR 2020 |
+| [Sulaiman 2023] | Sulaiman et al., "Coordinated Slicing and Admission Control Using Multi-Agent DRL," IEEE TNSM 2023 |
 | [Tessler 2019] | Tessler et al., "Reward Constrained Policy Optimization," ICML 2019 |
 | [Tirole 1988] | Tirole, "The Theory of Industrial Organization," MIT Press 1988 |
 | [Train 2009] | Train, "Discrete Choice Methods with Simulation," Cambridge 2009 |
