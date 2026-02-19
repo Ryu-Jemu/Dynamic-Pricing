@@ -77,6 +77,48 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
 
     is_active = np.where(np.arange(N) < N_act, 1, 0)
 
+    # ── [WTP-CHURN] WTP 분포 샘플링 ────────────────────────────────────
+    # [Nevo et al. Econometrica 2016; Train & Weeks JChoice 2005]
+    wtp_cfg = cfg.get("wtp_model", {})
+    if wtp_cfg.get("enabled", False):
+        wtp_base = np.zeros(N)
+        wtp_total = np.zeros(N)
+        wtp_decay = np.zeros(N)
+        income = np.zeros(N)
+        outside = np.zeros(N)
+        loyalty = np.zeros(N)
+
+        # Vectorized: build lookup arrays per segment×slice
+        for i in range(N):
+            sl_key = "urllc" if slices[i] == "URLLC" else "embb"
+            seg_key = segments[i]
+
+            # LogNormal WTP sampling [Nevo et al. 2016]
+            dist_params = wtp_cfg[sl_key][seg_key]
+            wtp_base[i] = rng.lognormal(
+                dist_params["mu_base"], dist_params["sigma_base"])
+            wtp_total[i] = rng.lognormal(
+                dist_params["mu_total"], dist_params["sigma_total"])
+
+            # Segment-specific behavioral parameters
+            # [Bolton 2003; Deaton 1980; Train 2009; Koszegi 2006]
+            seg_params = wtp_cfg["segments"][seg_key]
+            wtp_decay[i] = rng.uniform(*seg_params["wtp_decay_rate"])
+            income[i] = rng.uniform(*seg_params["income_proxy"])
+            outside[i] = rng.uniform(*seg_params["outside_option"])
+            loyalty[i] = rng.uniform(*seg_params["loyalty_inertia"])
+
+        # Consistency constraint: wtp_total >= wtp_base * 1.05
+        wtp_total = np.maximum(wtp_total, wtp_base * 1.05)
+    else:
+        # WTP model disabled → NaN columns (backward compat)
+        wtp_base = np.full(N, np.nan)
+        wtp_total = np.full(N, np.nan)
+        wtp_decay = np.full(N, np.nan)
+        income = np.full(N, np.nan)
+        outside = np.full(N, np.nan)
+        loyalty = np.full(N, np.nan)
+
     return pd.DataFrame({
         "user_id": np.arange(N),
         "slice": slices,
@@ -90,6 +132,12 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
         "switching_cost": np.round(sc, 4),
         "clv_discount_rate": np.round(dr, 5),
         "is_active_init": is_active,
+        "wtp_base_fee": np.round(wtp_base, 0),
+        "wtp_total_bill": np.round(wtp_total, 0),
+        "wtp_decay_rate": np.round(wtp_decay, 4),
+        "income_proxy": np.round(income, 4),
+        "outside_option": np.round(outside, 4),
+        "loyalty_inertia": np.round(loyalty, 4),
     })
 
 

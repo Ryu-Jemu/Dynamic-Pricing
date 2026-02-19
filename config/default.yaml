@@ -209,11 +209,12 @@ training:
     min_timesteps: auto         # auto = 0.75 × total_timesteps; Phase 3 충분 학습 보장  [Prechelt 2002]
     min_improvement: 0.01      # 1% 상대 개선 임계값
 
-# ── §3.2  Observation  [ME-1] 23-D ──
+# ── §3.2  Observation  [WTP-CHURN] 25-D ──
 # [ME-1] 24D→23D: removed obs[1] (inactive fraction = 1 - obs[0], linearly dependent)
-# [Dulac-Arnold JMLR 2021] — minimize observation dimensionality for sample efficiency
+# [WTP-CHURN] 23D→25D: obs[23]=surplus_ratio, obs[24]=erosion_frac
+# [Dulac-Arnold JMLR 2021] — observation dimensionality for sample efficiency
 observation:
-  dim: 23                       # [ME-1] 24→23; [D5][D6] pviol_E EMA + load headroom
+  dim: 25                       # [WTP-CHURN] 23→25; +surplus_ratio, +erosion_frac
   clip_min: -10.0
   clip_max: 10.0
 
@@ -298,7 +299,55 @@ wtp_reference:
   epsilon_F_E: 0.20              # eMBB: 중간 탄력성 [Nevo 2016: -0.4~-0.6]
   floor_F: 0.7                   # 기본료 수요 하한 (초과요금 floor=0.5보다 높음)
 
-# ── §20b  Evaluation settings ──
+# ── §20b  WTP 기반 확률적 이탈 모델 ──
+# [Nevo et al. Econometrica 2016] 3-part tariff 이질적 WTP
+# [Train 2009 §3] Random Utility Model; [McFadden Econometrica 1974]
+# [Koszegi & Rabin QJE 2006 §III.A] 참조점 적응
+# [Bolton et al. JCR 2003] 가격 불공정 → WTP 침식
+# [Deaton & Muellbauer AER 1980] 소득 효과
+wtp_model:
+  enabled: true
+  gamma: 5.0                      # 이탈 민감도 스케일 [Train 2009 §3.5]
+  wtp_floor_multiplier: 1.5       # WTP 하한 = switching_cost × 1.5 [Shy 2002]
+
+  # 동적 WTP 업데이트 파라미터
+  dynamics:
+    adapt_rate_default: 0.85      # α: WTP 적응 관성 [Koszegi & Rabin QJE 2006 §III.A]
+    erosion_base: 0.10            # δ: Bill > WTP 시 추가 침식률 [Bolton et al. JCR 2003]
+
+  # URLLC WTP 분포 (LogNormal 파라미터)
+  # p50 = exp(mu), 한국 B2B 요금 기준 [GSMA GST v6.0; Nokia 2024]
+  urllc:
+    price_sensitive:  {mu_base: 11.00, sigma_base: 0.30, mu_total: 11.29, sigma_total: 0.30}
+    balanced:         {mu_base: 11.51, sigma_base: 0.25, mu_total: 11.78, sigma_total: 0.25}
+    qos_sensitive:    {mu_base: 11.85, sigma_base: 0.20, mu_total: 12.21, sigma_total: 0.20}
+
+  # eMBB WTP 분포 (LogNormal 파라미터)
+  # 한국 소비자 5G 요금 기준 [SKT Direct 27-39K; SKT 5GX Prime-Premium 89-109K]
+  embb:
+    price_sensitive:  {mu_base: 10.46, sigma_base: 0.30, mu_total: 10.71, sigma_total: 0.30}
+    balanced:         {mu_base: 10.92, sigma_base: 0.25, mu_total: 11.22, sigma_total: 0.25}
+    qos_sensitive:    {mu_base: 11.22, sigma_base: 0.20, mu_total: 11.61, sigma_total: 0.20}
+
+  # 세그먼트별 행동경제학 파라미터 범위
+  segments:
+    price_sensitive:
+      wtp_decay_rate: [0.10, 0.20]    # 높은 침식률 [Bolton et al. 2003]
+      income_proxy: [0.1, 0.4]        # 낮은 소득 → 예산 제약 [Deaton & Muellbauer 1980]
+      outside_option: [0.2, 0.5]      # 높은 대안 매력도 [Train 2009 §3.7]
+      loyalty_inertia: [0.50, 0.75]   # 낮은 관성 [Koszegi & Rabin 2006]
+    balanced:
+      wtp_decay_rate: [0.05, 0.12]
+      income_proxy: [0.3, 0.7]
+      outside_option: [0.05, 0.25]
+      loyalty_inertia: [0.70, 0.85]
+    qos_sensitive:
+      wtp_decay_rate: [0.02, 0.08]    # 낮은 침식률
+      income_proxy: [0.6, 1.0]        # 높은 소득
+      outside_option: [0.0, 0.15]     # 낮은 대안 (lock-in)
+      loyalty_inertia: [0.80, 0.95]   # 높은 관성
+
+# ── §20c  Evaluation settings ──
 eval:
   action_ema_alpha: 0.7          # [FIX-B1] Eval-time action EMA smoothing  [Dulac-Arnold JMLR 2021 §4.2]
 

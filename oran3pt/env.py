@@ -49,10 +49,12 @@ Action (5-D continuous, §4):
   [D2] Pricing dims (a[0:4]) update only at cycle boundaries when
        hierarchical_actions.enabled=true. ρ_U (a[4]) updates every step.
 
-Observation (23-D, §3.2):
-  Indices 0–21: see ``_build_obs`` for layout
-  [D6] 22: pviol_E_ema (EMA α=0.3 trend signal)
-  [D5] 23: load_headroom_E
+Observation (25-D, §3.2):
+  Indices 0–22: see ``_build_obs`` for layout
+  [D6] 21: pviol_E_ema (EMA α=0.3 trend signal)
+  [D5] 22: load_headroom_E
+  [WTP-CHURN] 23: surplus_ratio (mean Bill/WTP, normalized [0,1])
+  [WTP-CHURN] 24: erosion_frac (fraction with WTP < 90% initial)
 
 Revenue per step (§5.2 — online accrual):
   BaseRev_t = (F_U·N_U + F_E·N_E) / T
@@ -135,9 +137,9 @@ class OranSlicingPricingEnv(gym.Env):
         ], dtype=np.float64)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(5,), dtype=np.float32)
 
-        # Observation (§3.2)  [D5] 24-D
+        # Observation (§3.2)  [WTP-CHURN] 25-D
         obs_cfg = cfg.get("observation", {})
-        self._obs_dim: int = obs_cfg.get("dim", 24)
+        self._obs_dim: int = obs_cfg.get("dim", 25)
         self._obs_lo = obs_cfg.get("clip_min", -10.0)
         self._obs_hi = obs_cfg.get("clip_max", 10.0)
         self.observation_space = spaces.Box(
@@ -221,6 +223,21 @@ class OranSlicingPricingEnv(gym.Env):
         self._wtp_F_ref_base_E: float = (
             acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
         self._wtp_floor_F: float = wtp_cfg.get("floor_F", 0.7)
+
+        # ── [WTP-CHURN] WTP 기반 확률적 이탈 (§20b) ─────────────────────
+        # [Nevo et al. Econometrica 2016; Train 2009; McFadden 1974]
+        wtp_m = cfg.get("wtp_model", {})
+        self._wtp_model_enabled_cfg: bool = wtp_m.get("enabled", False)
+        self._wtp_gamma: float = wtp_m.get("gamma", 5.0)
+        self._wtp_floor_multiplier: float = wtp_m.get(
+            "wtp_floor_multiplier", 1.5)
+        wtp_dyn = wtp_m.get("dynamics", {})
+        self._wtp_adapt_default: float = wtp_dyn.get(
+            "adapt_rate_default", 0.85)
+        self._wtp_erosion_base: float = wtp_dyn.get("erosion_base", 0.10)
+        # Actual enablement decided in _load_users() after CSV column check
+        self._wtp_model_available: bool = False
+        self._wtp_model_enabled: bool = False
 
         # Demand-price elasticity (§6b)
         de = cfg.get("demand_elasticity", {})
@@ -374,6 +391,30 @@ class OranSlicingPricingEnv(gym.Env):
         self._swcost = df["switching_cost"].values.astype(np.float64)
         self._init_active = df["is_active_init"].values.astype(bool)
 
+        # ── [WTP-CHURN] WTP 열 로드 ─────────────────────────────────────
+        if ("wtp_base_fee" in df.columns
+                and not df["wtp_base_fee"].isna().all()):
+            self._wtp_base_fee = df["wtp_base_fee"].values.astype(np.float64)
+            self._wtp_total_bill = df["wtp_total_bill"].values.astype(
+                np.float64)
+            self._wtp_decay_rate = df["wtp_decay_rate"].values.astype(
+                np.float64)
+            self._income_proxy = df["income_proxy"].values.astype(np.float64)
+            self._outside_option = df["outside_option"].values.astype(
+                np.float64)
+            self._loyalty_inertia = df["loyalty_inertia"].values.astype(
+                np.float64)
+            self._wtp_model_available = True
+            # Dynamic WTP state (starts from wtp_total_bill)
+            self._current_wtp = self._wtp_total_bill.copy()
+        else:
+            self._wtp_model_available = False
+            self._current_wtp = np.zeros(len(df), dtype=np.float64)
+
+        # Final enablement: config AND CSV both satisfied
+        self._wtp_model_enabled = (
+            self._wtp_model_enabled_cfg and self._wtp_model_available)
+
     # ── Public setters ────────────────────────────────────────────────
 
     def set_curriculum_phase(self, phase: int) -> None:
@@ -451,8 +492,11 @@ class OranSlicingPricingEnv(gym.Env):
             self._churn_rate_ema = 0.0     # [EP1]
             self._ref_F_U = self._wtp_F_ref_base_U   # [WTP-REF]
             self._ref_F_E = self._wtp_F_ref_base_E   # [WTP-REF]
+            # [WTP-CHURN] Reset dynamic WTP to initial values
+            if self._wtp_model_enabled:
+                self._current_wtp = self._wtp_total_bill.copy()
         # else: continuous mode — population, prev_action, pviol_E_ema,
-        #       financial state, churn_rate_ema, ref prices all persist
+        #       financial state, churn_rate_ema, ref prices, WTP all persist
 
         # [OPT-F] Initialize population cache for first _build_obs call
         self._cached_N_act = int(self._active_mask.sum())
@@ -580,6 +624,10 @@ class OranSlicingPricingEnv(gym.Env):
             a_ref = self._wtp_alpha_ref
             self._ref_F_U = a_ref * F_U + (1.0 - a_ref) * self._ref_F_U
             self._ref_F_E = a_ref * F_E + (1.0 - a_ref) * self._ref_F_E
+
+        # [WTP-CHURN] Dynamic WTP update at billing cycle boundary
+        if self._is_cycle_start and self._total_steps > 0:
+            self._update_dynamic_wtp(F_U, F_E, p_over_U, p_over_E)
 
         # Market dynamics
         if self._curriculum_phase == 1:
@@ -724,7 +772,7 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_over_rev_E = over_rev_E
         self._prev_n_rejected = n_rejected
 
-        return {
+        info_dict = {
             "step": self.t,
             "cycle": (self.t - 1) // self.T + 1,
             "cycle_step": self._cycle_step,
@@ -758,6 +806,68 @@ class OranSlicingPricingEnv(gym.Env):
             "ref_F_U": self._ref_F_U,                  # [WTP-REF]
             "ref_F_E": self._ref_F_E,                  # [WTP-REF]
         }
+        # [WTP-CHURN] WTP diagnostic metrics
+        if self._wtp_model_enabled:
+            active_mask = self._active_mask
+            wtp_U = self._current_wtp[
+                active_mask & (self._slice_is_U > 0.5)]
+            wtp_E = self._current_wtp[
+                active_mask & (self._slice_is_E > 0.5)]
+            info_dict["mean_wtp_U"] = (
+                float(wtp_U.mean()) if len(wtp_U) > 0 else 0.0)
+            info_dict["mean_wtp_E"] = (
+                float(wtp_E.mean()) if len(wtp_E) > 0 else 0.0)
+        return info_dict
+
+    # ── [WTP-CHURN] Dynamic WTP update ──────────────────────────────
+
+    def _update_dynamic_wtp(self, F_U: float, F_E: float,
+                            p_over_U: float, p_over_E: float) -> None:
+        """[WTP-CHURN] Billing cycle 경계에서 WTP 동적 업데이트.
+
+        3가지 메커니즘:
+          (1) 참조점 적응: WTP가 실제 Bill 방향으로 이동
+              [Koszegi & Rabin QJE 2006 §III.A]
+          (2) 초과 청구 침식: Bill > WTP 시 추가 δ 하락
+              [Bolton, Warlop & Alba JCR 2003]
+          (3) 소득 효과 증폭: 저소득 → 침식 가속
+              [Deaton & Muellbauer AER 1980]
+        """
+        if not self._wtp_model_enabled:
+            return
+
+        # Per-user estimated bill (base fee + average overage)
+        N_U = max(self._cached_N_U, 1)
+        N_E = max(self._cached_N_E, 1)
+        avg_over_U = (max(0, self._cycle_usage_U - self.Q_U * N_U)
+                      * p_over_U / N_U)
+        avg_over_E = (max(0, self._cycle_usage_E - self.Q_E * N_E)
+                      * p_over_E / N_E)
+
+        est_bills = np.where(
+            self._slice_is_U,
+            F_U + avg_over_U,
+            F_E + avg_over_E
+        )
+
+        # (1) Reference point adaptation: α·WTP + (1-α)·Bill
+        alpha = self._loyalty_inertia  # per-user inertia
+        adapted = alpha * self._current_wtp + (1.0 - alpha) * est_bills
+
+        # (2) Excess billing erosion
+        excess = np.maximum(0.0, est_bills - self._current_wtp)
+        erosion = self._wtp_decay_rate * excess
+
+        # (3) Income effect amplification: low income → faster erosion
+        income_amplifier = 1.0 + (1.0 - self._income_proxy) * 0.5
+        erosion *= income_amplifier
+
+        # Update WTP
+        self._current_wtp = adapted - erosion
+
+        # WTP floor: switching_cost × floor_multiplier × 10000 (KRW scale)
+        wtp_floor = self._swcost * self._wtp_floor_multiplier * 10000.0
+        self._current_wtp = np.maximum(self._current_wtp, wtp_floor)
 
     # ── Traffic ───────────────────────────────────────────────────────
 
@@ -911,14 +1021,69 @@ class OranSlicingPricingEnv(gym.Env):
                 max(0.0, delta_F_E))
 
         # ── Churn logit ──────────────────────────────────────────────
-        churn_logits = (
-            self.b0_churn
-            + self.bp_churn * self._psens * P_sig_users       # [PR-1] per-slice
-            + self._wtp_beta_ref_churn * self._psens * ref_churn_term  # [WTP-REF]
-            + self._beta_bill_shock * self._psens * bill_shock_users  # [PR-2]
-            - self.bq_churn * self._qsens * Q_sig_users       # [D4] per-user
-            - self.bsw_churn * self._swcost)
-        p_churn_all = sigmoid(churn_logits)
+        if self._wtp_model_enabled:
+            # [WTP-CHURN] Bill/WTP 기반 이탈 확률
+            # p_churn_i = σ(γ · (Bill_i/WTP_i - 1 + QoS_penalty - sw_barrier + outside))
+            # [Nevo et al. Econometrica 2016; Train 2009 §3; McFadden 1974]
+            N_U_safe = max(self._cached_N_U, 1)
+            N_E_safe = max(self._cached_N_E, 1)
+            per_over_U = (
+                max(0, self._cycle_usage_U - self.Q_U * N_U_safe)
+                * p_over_U / N_U_safe
+            )
+            per_over_E = (
+                max(0, self._cycle_usage_E - self.Q_E * N_E_safe)
+                * p_over_E / N_E_safe
+            )
+            est_bills = np.where(
+                self._slice_is_U,
+                F_U + per_over_U,
+                F_E + per_over_E
+            )
+
+            # Bill/WTP ratio (surplus ratio)
+            safe_wtp = np.maximum(self._current_wtp, 1.0)
+            surplus_ratio = est_bills / safe_wtp
+
+            # QoS violation penalty (per-slice)
+            qos_penalty = np.where(
+                self._slice_is_U,
+                self._prev_pviol_U,
+                self._prev_pviol_E
+            ) * self.bq_churn
+
+            # WTP-REF reference price effect (reduced weight when WTP model active)
+            ref_term = np.zeros(self.N_total, dtype=np.float64)
+            if self._wtp_ref_enabled:
+                ref_term = ref_churn_term * 0.5
+
+            gamma = self._wtp_gamma
+            churn_logits = (
+                self.b0_churn                    # Baseline stickiness intercept [Kim & Yoon 2004]
+                + gamma * (surplus_ratio - 1.0)  # Bill/WTP > 1 → churn up
+                + gamma * qos_penalty            # QoS violation → churn up
+                + gamma * ref_term               # Reference price effect (reduced)
+                - self.bsw_churn * self._swcost  # Switching cost barrier
+                + gamma * self._outside_option   # External alternative attractiveness
+            )
+
+            # Bill shock additional (existing mechanism preserved)
+            if self._bill_shock_enabled and self._cycle_step > 0:
+                churn_logits += (
+                    self._beta_bill_shock * self._psens * bill_shock_users
+                )
+
+            p_churn_all = sigmoid(churn_logits)
+        else:
+            # Legacy v10.4 churn model (backward compat)
+            churn_logits = (
+                self.b0_churn
+                + self.bp_churn * self._psens * P_sig_users       # [PR-1]
+                + self._wtp_beta_ref_churn * self._psens * ref_churn_term
+                + self._beta_bill_shock * self._psens * bill_shock_users
+                - self.bq_churn * self._qsens * Q_sig_users       # [D4]
+                - self.bsw_churn * self._swcost)
+            p_churn_all = sigmoid(churn_logits)
         p_churn_active = p_churn_all * self._active_mask
         E_churn = float(p_churn_active.sum())
 
@@ -1080,5 +1245,35 @@ class OranSlicingPricingEnv(gym.Env):
             obs[21] = self._pviol_E_ema          # [D6] pviol_E trend (EMA)
             obs[22] = max(0.0, 1.0 - self._prev_L_E / max(
                 self._prev_C_E, 1e-6))            # load headroom
+
+        # ── [WTP-CHURN] 관측 공간 확장 ───────────────────────────────────
+        if self._obs_dim >= 25:
+            if self._wtp_model_enabled:
+                # obs[23]: 평균 부담률 (mean Bill/WTP ratio)
+                active_wtp = self._current_wtp[self._active_mask]
+                active_bills_est = np.where(
+                    self._slice_is_U[self._active_mask],
+                    self._prev_action[0],   # F_U
+                    self._prev_action[2]    # F_E
+                )
+                if len(active_wtp) > 0 and active_wtp.mean() > 0:
+                    mean_surplus_ratio = float(
+                        active_bills_est.mean() / active_wtp.mean())
+                else:
+                    mean_surplus_ratio = 1.0
+                obs[23] = float(np.clip(mean_surplus_ratio, 0.0, 2.0)) / 2.0
+
+                # obs[24]: WTP 침식 비율 (WTP < 초기값 90%인 사용자 비율)
+                if self.N_total > 0:
+                    wtp_decline_frac = float(
+                        (self._current_wtp
+                         < self._wtp_total_bill * 0.9).sum()
+                    ) / self.N_total
+                else:
+                    wtp_decline_frac = 0.0
+                obs[24] = float(np.clip(wtp_decline_frac, 0.0, 1.0))
+            else:
+                obs[23] = 0.0
+                obs[24] = 0.0
 
         return np.clip(obs, self._obs_lo, self._obs_hi)
