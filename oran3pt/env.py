@@ -1,11 +1,17 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Constrained MDP  (§§3–11)
 
-Implements an xApp on the O-RAN Near-RT RIC [O-RAN WG1 OAD 2023; O-RAN WG3
-RICARCH 2023] that jointly optimises network-slice pricing and PRB allocation
-using SAC [Haarnoja ICML 2018] via Stable-Baselines3 [Raffin JMLR 2021].
-See also [Polese IEEE CST 2023] for O-RAN architecture survey and
-[Bonati IEEE TMC 2023] for ML-based xApp design patterns.
+Implements an rApp on the O-RAN Non-RT RIC (within SMO) [O-RAN WG1 OAD
+2023 §5.1; O-RAN WG2 AIML 2023 §4.2] that jointly optimises network-slice
+pricing and PRB-allocation policy using SAC [Haarnoja ICML 2018] via
+Stable-Baselines3 [Raffin JMLR 2021].  The rApp outputs macro-level pricing
+and quota decisions (timescale: 1 day–30 days), which the Near-RT RIC
+translates into per-TTI PRB limits via the E2 interface [O-RAN WG3 RICARCH
+2023 §4.1].  See [Polese IEEE CST 2023] for O-RAN architecture survey.
+
+[ARCH-FIX] Agent timescale (1 day for ρ_U, 30 days for pricing) falls
+within the Non-RT RIC's >1 s decision range [O-RAN WG1 OAD §5.1.1],
+not the Near-RT RIC's 10 ms–1 s xApp range [O-RAN WG3 §4.1].
 
 REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] 1-Cycle Continuous Episode Design      [Pardo ICML 2018; Wan arXiv 2025]
@@ -97,7 +103,27 @@ logger = logging.getLogger("oran3pt.env")
 
 
 class OranSlicingPricingEnv(gym.Env):
-    """O-RAN single-cell CMDP with 3-part tariff and admission control."""
+    """O-RAN single-cell CMDP with 3-part tariff and admission control.
+
+    O-RAN Architecture Mapping (cf. System Architecture Diagram):
+    ──────────────────────────────────────────────────────────────
+    │  SMO / Non-RT RIC  (this agent = rApp)                   │
+    │    SAC Actor-Critic → a_t = [F_U, p^ov_U, F_E, p^ov_E, ρ_U] │
+    │    Pricing: 30-day cycle  |  ρ_U: daily                  │
+    │    [O-RAN WG1 OAD §5.1; O-RAN WG2 AIML §4.2]           │
+    ────────────── A1 Interface ───────────────────────────────┤
+    │  Near-RT RIC  (Enforcement Function)                     │
+    │    _admission_gate() → NSACF load-aware gating           │
+    │    C_s = ρ_s × C_total → PRB capacity translation        │
+    │    [O-RAN WG3 RICARCH §4.1; 3GPP TS 23.501 §5.2.3]     │
+    ────────────── E2 Interface ───────────────────────────────┤
+    │  O-DU / gNB  (MAC Scheduler, abstracted)                 │
+    │    Rule-based PRB allocation at TTI level                │
+    │    Abstracted as daily aggregate load vs. capacity        │
+    │    [3GPP TS 38.321 §5.4]                                 │
+    ──────────────────────────────────────────────────────────────
+    Telemetry (Load, QoS) flows upward → _build_obs() → s_{t+1}
+    """
 
     metadata = {"render_modes": []}
 
@@ -550,6 +576,12 @@ class OranSlicingPricingEnv(gym.Env):
                         ) -> Tuple[int, int]:
         """NSACF-style load-aware admission gating.
 
+        O-RAN mapping: This function models the Near-RT RIC's enforcement
+        of admission policy received via A1 from the Non-RT RIC rApp.
+        The rApp sets pricing/quota policy; the Near-RT RIC enforces
+        load-based admission constraints in near-real-time.
+        [O-RAN WG3 RICARCH §4.1; O-RAN WG1 OAD §5.1.2]
+
         For each join candidate, predict marginal load impact.
         Reject if admitting pushes projected load ratio above threshold
         or if current pviol_E already exceeds the pviol ceiling.
@@ -600,10 +632,15 @@ class OranSlicingPricingEnv(gym.Env):
     # ── Core step ─────────────────────────────────────────────────────
 
     def _run_step(self, raw_action: np.ndarray) -> Dict[str, Any]:
+        # ── [A1] Non-RT RIC rApp → Near-RT RIC: Policy Guidelines ──
+        # The rApp's macro action is translated to physical values.
+        # [O-RAN WG1 OAD §5.1.1; O-RAN WG2 AIML §4.2]
         a = self._map_action(raw_action)
         F_U, p_over_U, F_E, p_over_E, rho_U = a
 
         # [D2] Hierarchical: lock pricing at cycle start
+        # (Non-RT RIC policy timescale: 30-day pricing, daily ρ_U)
+        # [Vezhnevets ICML 2017; O-RAN WG1 OAD §5.1.1]
         if self._hier_enabled:
             if self._is_cycle_start:
                 self._cycle_pricing = np.array(
@@ -649,13 +686,17 @@ class OranSlicingPricingEnv(gym.Env):
         self._cycle_usage_U += L_U
         self._cycle_usage_E += L_E
 
-        # Capacity allocation
+        # ── [E2] Near-RT RIC → O-DU: Resource Limits ──
+        # Enforcement Function translates ρ_U policy into PRB capacity
+        # [O-RAN WG3 RICARCH §4.1]
         C_U = rho_U * self.C_total * self.kappa_U
         C_E = (1.0 - rho_U) * self.C_total
         C_U = max(C_U, 1e-6)
         C_E = max(C_E, 1e-6)
 
-        # QoS violation
+        # ── [O-DU] MAC Scheduler: QoS measurement (abstracted) ──
+        # TTI-level scheduling aggregated to daily load vs capacity
+        # [3GPP TS 38.321 §5.4; 3GPP TS 38.104]
         pviol_U = float(sigmoid(
             self.alpha_cong * (L_U / C_U - 1.0)))
         pviol_E = float(sigmoid(

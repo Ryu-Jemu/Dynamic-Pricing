@@ -31,7 +31,7 @@ if [ "$MODE" != "light" ] && [ "$MODE" != "full" ]; then
     echo "  사용법: ./scripts/run.sh <모드>"
     echo ""
     echo "  모드 선택:"
-    echo "    light  — 경량 실행 (200K steps, 2 seeds, ~10분)"
+    echo "    light  — 경량 실행 (100K steps, 1 seed, ~10분)"
     echo "             개발/디버깅/빠른 검증용"
     echo ""
     echo "    full   — 전체 실행 (1M steps, 5 seeds, ~2시간)"
@@ -52,7 +52,7 @@ if [ "$MODE" = "light" ]; then
     EVAL_REPEATS=3
     OVERRIDE_FLAG=""
     MODE_LABEL="경량 (Light)"
-    MODE_DESC="200K steps × 2 seeds"
+    MODE_DESC="100K steps × 1 seed"
 else
     TIMESTEPS=""
     N_SEEDS=""

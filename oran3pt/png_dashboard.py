@@ -30,6 +30,7 @@ References:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -936,7 +937,8 @@ def _render_sheet_07_convergence(
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     n_seeds = len(seed_dfs)
-    fig.suptitle(f"Sheet 7: Training Convergence ({n_seeds} Seeds)",
+    seed_label = "1 Seed" if n_seeds == 1 else f"{n_seeds} Seeds"
+    fig.suptitle(f"Sheet 7: Training Convergence ({seed_label})",
                  fontsize=14, fontweight="bold", y=0.98)
 
     # Aggregate each seed to episode level
@@ -971,8 +973,11 @@ def _render_sheet_07_convergence(
         for sid in sorted(seed_episodes.keys()):
             ep = seed_episodes[sid]
             vals = ep[metric].values
-            ax.plot(range(len(vals)), vals, color=color, alpha=0.25, lw=0.7,
-                    label=f"Seed {sid}" if sid == min(seed_episodes.keys()) else "")
+            # [DASH-1] Single seed: skip thin line (mean line is identical)
+            # Multi-seed: label first thin line as "Individual seeds"
+            if n_seeds > 1:
+                ax.plot(range(len(vals)), vals, color=color, alpha=0.25, lw=0.7,
+                        label="Individual seeds" if sid == min(seed_episodes.keys()) else "")
             # Pad to max_episodes for envelope computation
             padded = np.full(max_episodes, np.nan)
             padded[:len(vals)] = vals
@@ -980,14 +985,20 @@ def _render_sheet_07_convergence(
 
         arr = np.array(all_series)
         mean_vals = np.nanmean(arr, axis=0)
-        p25 = np.nanpercentile(arr, 25, axis=0)
-        p75 = np.nanpercentile(arr, 75, axis=0)
 
         episodes = np.arange(max_episodes)
-        ax.plot(episodes, mean_vals, color=color, lw=2.5,
-                label="Mean (all seeds)")
-        ax.fill_between(episodes, p25, p75, color=color, alpha=0.15,
-                        label="P25–P75 envelope")
+        # [DASH-1] Single seed: label as "Seed N", no envelope
+        # Multi-seed: label as "Mean (all seeds)" with P25-P75 envelope
+        if n_seeds == 1:
+            ax.plot(episodes, mean_vals, color=color, lw=2.5,
+                    label=f"Seed {min(seed_episodes.keys())}")
+        else:
+            p25 = np.nanpercentile(arr, 25, axis=0)
+            p75 = np.nanpercentile(arr, 75, axis=0)
+            ax.plot(episodes, mean_vals, color=color, lw=2.5,
+                    label="Mean (all seeds)")
+            ax.fill_between(episodes, p25, p75, color=color, alpha=0.15,
+                            label="P25\u2013P75 envelope")
 
         # [ME-4] Curriculum phase boundaries — use phases list (v9+)
         cur_cfg = cfg.get("training", {}).get("curriculum", {})
@@ -1097,7 +1108,10 @@ def generate_all_pngs(
     if mode == "eval" and has_eval:
         logger.info("=== Generating Evaluation Dashboard (7 sheets) ===")
         rollout, _, _ = _load_eval_data(output_dir)
-        assert rollout is not None
+        if rollout is None:
+            logger.error("rollout_log.csv detected but could not be loaded from %s",
+                         output_dir)
+            return []
 
         rollout = _add_derived_columns(rollout)
 
@@ -1128,8 +1142,19 @@ def generate_all_pngs(
         logger.info("=== Generating Training Dashboard (7 sheets) ===")
         seed_dfs = _load_training_data(output_dir)
 
-        # Use seed 0 as primary for sheets 1-6, aggregated to episode level
-        primary_seed = min(seed_dfs.keys())
+        # [DASH-1] Use best seed from training_metadata.json for sheets 1-6
+        primary_seed = min(seed_dfs.keys())  # default fallback
+        meta_path = out / "training_metadata.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as _f:
+                    _meta = json.load(_f)
+                candidate = _meta.get("best_seed", primary_seed)
+                if candidate in seed_dfs:
+                    primary_seed = candidate
+            except Exception:
+                pass  # graceful fallback
+        logger.info("  Primary seed for Sheets 1-6: seed %d", primary_seed)
         primary_df = seed_dfs[primary_seed]
         primary_df = _add_derived_columns(primary_df)
 

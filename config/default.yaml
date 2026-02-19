@@ -26,7 +26,10 @@
 #   [R1–R8] Training / observation / reward improvements
 #
 # Architectural references:
-#   [REF-1] O-RAN xApp on Near-RT RIC  [O-RAN WG1 OAD 2023; O-RAN WG3 RICARCH 2023]
+#   [REF-1] O-RAN rApp on Non-RT RIC (SMO)  [O-RAN WG1 OAD 2023 §5.1; O-RAN WG2 AIML 2023 §4.2]
+#           Agent timescale (1 day–30 days) → Non-RT RIC range (>1 s)
+#           Policy delivered via A1; Near-RT RIC enforces PRB limits via E2
+#           [ARCH-FIX] Corrected from xApp/Near-RT RIC — see O-RAN WG1 OAD §5.1.1
 #   [REF-2] SB3 SAC implementation     [Raffin JMLR 2021]
 # ================================================================
 

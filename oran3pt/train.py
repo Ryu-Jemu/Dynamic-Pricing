@@ -1,6 +1,10 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
+The SAC agent is deployed as an rApp on the Non-RT RIC (within SMO),
+outputting pricing and PRB-allocation policies at macro timescales
+(1 day–30 days).  [O-RAN WG1 OAD 2023 §5.1; O-RAN WG2 AIML 2023 §4.2]
+
 REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] 1-Cycle continuous episode mode support
         SB3 auto-handles truncated=True via ReplayBuffer
@@ -818,6 +822,19 @@ def train(cfg: Dict[str, Any],
     if best_lag.exists() and best_lag.resolve() != canonical_lag.resolve():
         shutil.copy2(best_lag, canonical_lag)
         logger.info("[V11-4] Lagrangian state → %s", canonical_lag)
+
+    # [DASH-1] Save training metadata for dashboard seed selection
+    metadata = {
+        "best_seed": int(best_seed),
+        "best_reward": float(best_reward),
+        "best_pviol_E": float(best_pviol),
+        "best_score": float(best_score),
+        "n_seeds": len(valid_results),
+    }
+    meta_path = out / "training_metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("[DASH-1] Training metadata -> %s (best_seed=%d)", meta_path, best_seed)
 
     logger.info("[WP-2a] Best model: seed %d (reward=%.4f, pviol_E=%.4f, "
                "score=%.4f) -> %s",
