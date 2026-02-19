@@ -40,6 +40,25 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 **Objective**: Maximize E[Σ γ^t Profit_t] where Profit = Revenue − Cost,
 subject to E[pviol_E] ≤ ε_QoS (Constrained MDP, Lagrangian dual ascent).
 
+## O-RAN Architecture Mapping
+
+The SAC agent is deployed as an **rApp** on the **Non-RT RIC** (within SMO),
+consistent with O-RAN Alliance architecture specifications:
+
+| O-RAN Component | Role in This System | Decision Timescale | Standard |
+|-----------------|--------------------|--------------------|----------|
+| **Non-RT RIC (SMO)** | SAC rApp: pricing + ρ_U policy | 1 day (ρ_U), 30 days (pricing) | O-RAN WG1 OAD §5.1 |
+| **A1 Interface** | Policy guidelines delivery | Per billing cycle | O-RAN WG1 OAD §6.2 |
+| **Near-RT RIC** | Enforcement: admission control, PRB limit translation | Simulated daily | O-RAN WG3 RICARCH §4.1 |
+| **E2 Interface** | Resource limits to O-DU | Per ρ_U update | O-RAN WG3 RICARCH §5.2 |
+| **O-DU / gNB** | MAC scheduler (rule-based, abstracted) | 1 ms TTI (aggregated) | 3GPP TS 38.321 §5.4 |
+
+> **Simulation abstraction**: The Near-RT RIC enforcement and O-DU MAC scheduler
+> are modeled within the Gymnasium environment (`env.py`) as capacity allocation
+> formulas (`C_s = ρ_s × C_total`) and sigmoid-based QoS violation functions.
+> TTI-level scheduling is aggregated to daily load statistics.
+> [Polese IEEE CST 2023 §III-B; Bonati IEEE TMC 2023 §II-A]
+
 ## Architecture
 
 ```
@@ -64,8 +83,7 @@ Dynamic-Pricing/
 ├── data/                         # Generated users_init.csv
 ├── outputs/                      # Models, logs, plots, dashboards
 ├── docs/                         # Consolidated documentation
-│   ├── REVISION_HISTORY.md       # v1–v9 revision notes
-│   └── DESIGN_DOCUMENTS.md       # Design/analysis documents
+│   └── PROJECT_KNOWLEDGE.md      # Unified project knowledge base
 └── README.md
 ```
 

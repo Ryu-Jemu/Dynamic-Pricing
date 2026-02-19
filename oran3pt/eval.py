@@ -268,7 +268,22 @@ def generate_dashboards(cfg: Dict[str, Any],
     generated: List[Path] = []
 
     # ── 1. HTML Convergence Dashboard ──
-    train_csv = out / "train_log_seed0.csv"
+    # [DASH-1] Use best seed from training_metadata.json (not always seed 0)
+    best_seed = 0
+    meta_path = out / "training_metadata.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                _meta = json.load(f)
+            best_seed = _meta.get("best_seed", 0)
+            logger.info("[DASH-1] Using best seed %d from training_metadata.json",
+                        best_seed)
+        except Exception:
+            pass  # graceful fallback to seed 0
+
+    train_csv = out / f"train_log_seed{best_seed}.csv"
+    if not train_csv.exists():
+        train_csv = out / "train_log_seed0.csv"  # fallback
     fallback_csv = out / "rollout_log.csv"
     src_csv = str(train_csv) if train_csv.exists() else (
         str(fallback_csv) if fallback_csv.exists() else None)
@@ -278,7 +293,7 @@ def generate_dashboards(cfg: Dict[str, Any],
             p = generate_html_dashboard(
                 csv_path=src_csv,
                 output_path=str(out / "training_convergence_dashboard.html"),
-                seed=0, revision="10")
+                seed=best_seed, revision="10")
             generated.append(Path(p))
             logger.info("[M15] HTML convergence dashboard -> %s", p)
         except Exception as e:
