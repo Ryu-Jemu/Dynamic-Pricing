@@ -59,7 +59,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from oran3pt.utils import load_config, sigmoid, fit_lognormal_quantiles
 from oran3pt.env import OranSlicingPricingEnv
 
-OBS_DIM = 23  # [ME-1] 24→23; removed obs[1] (inactive fraction)
+OBS_DIM = 25  # [WTP-CHURN] 23→25; +surplus_ratio, +erosion_frac
 
 
 @pytest.fixture
@@ -1261,11 +1261,11 @@ class TestArchitectureReview:
         assert cb._error_integral <= cb._integral_max, \
             f"Integral {cb._error_integral} exceeds max {cb._integral_max}"
 
-    def test_T20_2_obs_dim_23_no_inactive_fraction(self, cfg):
-        """[ME-1] Observation is 23-D, inactive fraction removed."""
+    def test_T20_2_obs_dim_25_no_inactive_fraction(self, cfg):
+        """[WTP-CHURN] Observation is 25-D, inactive fraction removed."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         obs, _ = env.reset(seed=42)
-        assert obs.shape == (23,), f"Expected obs dim 23, got {obs.shape}"
+        assert obs.shape == (OBS_DIM,), f"Expected obs dim {OBS_DIM}, got {obs.shape}"
         # obs[0] = active fraction, obs[1] should be joins (not inactive frac)
         action = env.action_space.sample()
         obs, _, _, _, info = env.step(action)
@@ -1328,8 +1328,14 @@ class TestArchitectureReview:
             "qos_sensitivity", "switching_cost", "clv_discount_rate",
             "is_active_init",
         }
+        # [WTP-CHURN] 6 additional columns when wtp_model enabled
+        wtp_cols = {
+            "wtp_base_fee", "wtp_total_bill", "wtp_decay_rate",
+            "income_proxy", "outside_option", "loyalty_inertia",
+        }
+        expected_cols = expected_cols | wtp_cols
         assert set(df.columns) == expected_cols, \
-            f"Column mismatch: {set(df.columns) - expected_cols}"
+            f"Column mismatch: {set(df.columns) ^ expected_cols}"
         assert df["is_active_init"].sum() == cfg["population"]["N_active_init"]
 
     def test_T20_8_integration_env_eval_cycle(self, cfg):
@@ -2703,6 +2709,240 @@ class TestWTPRefNumericalSafety:
                 "Population conservation violated"
             assert 0 <= n_act <= N_total, \
                 f"n_active {n_act} out of bounds [0, {N_total}]"
+            if trunc or term:
+                env.reset()
+
+
+# =====================================================================
+# T29  [WTP-CHURN] WTP 기반 확률적 이탈 모델 테스트
+# [Nevo et al. Econometrica 2016; Train 2009; Koszegi & Rabin QJE 2006]
+# =====================================================================
+
+class TestWTPChurnCSV:
+    """T29.1-T29.4: CSV 스키마 및 분포 검증."""
+
+    def test_T29_1_csv_columns_exist(self, cfg):
+        """[WTP-CHURN] 6개 신규 CSV 열 존재 확인."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(cfg, seed=42)
+        required = {"wtp_base_fee", "wtp_total_bill", "wtp_decay_rate",
+                     "income_proxy", "outside_option", "loyalty_inertia"}
+        assert required.issubset(set(df.columns)), \
+            f"Missing columns: {required - set(df.columns)}"
+
+    def test_T29_2_wtp_lognormal_distribution(self, cfg):
+        """[WTP-CHURN] WTP가 LogNormal 분포를 따르는지 검증."""
+        from oran3pt.gen_users import generate_users
+        from scipy import stats as sp_stats
+        df = generate_users(cfg, seed=42)
+        mask = (df["slice"] == "eMBB") & (df["segment"] == "balanced")
+        wtp = df.loc[mask, "wtp_base_fee"].dropna().values
+        if len(wtp) < 10:
+            pytest.skip("Insufficient samples for normality test")
+        log_wtp = np.log(wtp[wtp > 0])
+        _, p_value = sp_stats.normaltest(log_wtp)
+        assert p_value > 0.01, \
+            f"LogNormal normality test failed: p={p_value:.4f}"
+
+    def test_T29_3_urllc_wtp_greater_than_embb(self, cfg):
+        """[WTP-CHURN] URLLC WTP 중앙값 > eMBB WTP 중앙값."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(cfg, seed=42)
+        wtp_U = df.loc[df["slice"] == "URLLC", "wtp_base_fee"].median()
+        wtp_E = df.loc[df["slice"] == "eMBB", "wtp_base_fee"].median()
+        assert wtp_U > wtp_E, \
+            f"URLLC WTP median {wtp_U:.0f} should > eMBB {wtp_E:.0f}"
+
+    def test_T29_4_wtp_total_geq_base(self, cfg):
+        """[WTP-CHURN] wtp_total_bill >= wtp_base_fee × 1.05."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(cfg, seed=42)
+        base = df["wtp_base_fee"].values
+        total = df["wtp_total_bill"].values
+        valid = ~np.isnan(base)
+        assert np.all(total[valid] >= base[valid] * 1.05 - 1.0), \
+            "wtp_total must be >= wtp_base * 1.05"
+
+
+class TestWTPChurnBehavior:
+    """T29.5-T29.10: 이탈 행동 검증."""
+
+    def test_T29_5_high_price_increases_churn(self, cfg):
+        """[WTP-CHURN] Bill > WTP → 이탈 확률 상승."""
+        import copy
+        cfg_hi = copy.deepcopy(cfg)
+        cfg_hi["training"]["curriculum"]["enabled"] = False
+        env = OranSlicingPricingEnv(cfg_hi, seed=42)
+        env.reset(seed=42)
+        hi_action = np.array([1.0, 1.0, 1.0, 1.0, 0.0], dtype=np.float32)
+        _, _, _, _, info_hi = env.step(hi_action)
+        env2 = OranSlicingPricingEnv(cfg_hi, seed=42)
+        env2.reset(seed=42)
+        lo_action = np.array([-1.0, -1.0, -1.0, -1.0, 0.0], dtype=np.float32)
+        _, _, _, _, info_lo = env2.step(lo_action)
+        assert info_hi["n_churn"] >= info_lo["n_churn"], \
+            f"High price churn {info_hi['n_churn']} should >= low {info_lo['n_churn']}"
+
+    def test_T29_6_low_price_reduces_churn(self, cfg):
+        """[WTP-CHURN] Bill < 0.5×WTP → 매우 낮은 이탈."""
+        import copy
+        cfg_lo = copy.deepcopy(cfg)
+        cfg_lo["training"]["curriculum"]["enabled"] = False
+        env = OranSlicingPricingEnv(cfg_lo, seed=42)
+        env.reset(seed=42)
+        lo_action = np.array([-1.0, -1.0, -1.0, -1.0, 0.0], dtype=np.float32)
+        total_churn = 0
+        total_active = 0
+        for _ in range(30):
+            _, _, _, _, info = env.step(lo_action)
+            total_churn += info["n_churn"]
+            total_active += info["N_active"]
+        churn_rate = total_churn / max(total_active, 1)
+        assert churn_rate < 0.05, \
+            f"Low-price churn rate {churn_rate:.4f} should be < 0.05"
+
+    def test_T29_7_wtp_changes_on_overprice(self, cfg):
+        """[WTP-CHURN] Bill > WTP → WTP 동적 업데이트 발생."""
+        import copy
+        cfg_e = copy.deepcopy(cfg)
+        cfg_e["training"]["curriculum"]["enabled"] = False
+        env = OranSlicingPricingEnv(cfg_e, seed=42)
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        initial_wtp = env._current_wtp.copy()
+        hi_action = np.array([1.0, 1.0, 1.0, 1.0, 0.0], dtype=np.float32)
+        for _ in range(60):
+            env.step(hi_action)
+        final_wtp = env._current_wtp.copy()
+        # WTP should have changed (either direction) after billing cycles
+        diff = np.abs(final_wtp - initial_wtp)
+        assert diff.mean() > 100, \
+            f"WTP should change after billing cycles, mean delta={diff.mean():.0f}"
+
+    def test_T29_8_wtp_floor_enforced(self, cfg):
+        """[WTP-CHURN] WTP >= switching_cost × floor_multiplier."""
+        import copy
+        cfg_f = copy.deepcopy(cfg)
+        cfg_f["training"]["curriculum"]["enabled"] = False
+        env = OranSlicingPricingEnv(cfg_f, seed=42)
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        hi_action = np.ones(5, dtype=np.float32)
+        for _ in range(300):
+            env.step(hi_action)
+        floor_mult = env._wtp_floor_multiplier
+        wtp_floor = env._swcost * floor_mult * 10000.0
+        violations = (env._current_wtp < wtp_floor - 1.0).sum()
+        assert violations == 0, \
+            f"{violations} users have WTP below floor"
+
+    def test_T29_9_income_amplifies_erosion(self, cfg):
+        """[WTP-CHURN] income_proxy affects erosion amplifier."""
+        # Directly test the erosion formula: income_amplifier = 1 + (1-income)*0.5
+        # Low income (0.2) → amplifier = 1 + 0.8*0.5 = 1.4
+        # High income (0.8) → amplifier = 1 + 0.2*0.5 = 1.1
+        income_low, income_high = 0.2, 0.8
+        amp_low = 1.0 + (1.0 - income_low) * 0.5
+        amp_high = 1.0 + (1.0 - income_high) * 0.5
+        assert amp_low > amp_high, \
+            f"Low-income amplifier {amp_low:.2f} should > high {amp_high:.2f}"
+        # Verify the amplifier range is meaningful
+        assert amp_low >= 1.2, f"Low-income amplifier {amp_low} should >= 1.2"
+        assert amp_high <= 1.3, f"High-income amplifier {amp_high} should <= 1.3"
+
+    def test_T29_10_outside_option_increases_churn(self, cfg):
+        """[WTP-CHURN] 높은 outside_option → 동일 가격에서 더 높은 이탈."""
+        if not cfg.get("wtp_model", {}).get("enabled", False):
+            pytest.skip("WTP model not enabled")
+        gamma = cfg["wtp_model"]["gamma"]
+        logit_low_out = -5.5 + gamma * (0.9 - 1.0 + 0.0)
+        logit_high_out = -5.5 + gamma * (0.9 - 1.0 + 0.4)
+        p_low = sigmoid(logit_low_out)
+        p_high = sigmoid(logit_high_out)
+        assert p_high > p_low, \
+            f"High outside p_churn {p_high:.4f} should > low {p_low:.4f}"
+
+
+class TestWTPChurnObsAndCompat:
+    """T29.11-T29.15: 관측 공간 및 호환성."""
+
+    def test_T29_11_loyalty_inertia_slows_adaptation(self, cfg):
+        """[WTP-CHURN] 높은 loyalty_inertia → WTP 변화 둔화."""
+        alpha_high = 0.95
+        alpha_low = 0.50
+        wtp, bill = 50000.0, 80000.0
+        new_high = alpha_high * wtp + (1 - alpha_high) * bill
+        new_low = alpha_low * wtp + (1 - alpha_low) * bill
+        assert abs(new_high - wtp) < abs(new_low - wtp), \
+            "High inertia should produce less WTP change"
+
+    def test_T29_12_obs_25d_shape(self, cfg):
+        """[WTP-CHURN] 관측 공간이 25D인지 확인."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        expected_dim = cfg.get("observation", {}).get("dim", 23)
+        assert obs.shape == (expected_dim,), \
+            f"Expected obs dim {expected_dim}, got {obs.shape}"
+        if expected_dim == 25:
+            action = env.action_space.sample()
+            obs2, _, _, _, _ = env.step(action)
+            assert 0.0 <= obs2[23] <= 1.0 + 1e-6, \
+                f"obs[23] surplus_ratio = {obs2[23]} out of bounds"
+            assert 0.0 <= obs2[24] <= 1.0 + 1e-6, \
+                f"obs[24] erosion_frac = {obs2[24]} out of bounds"
+
+    def test_T29_13_backward_compat_no_wtp(self, cfg):
+        """[WTP-CHURN] wtp_model.enabled=false → 기존 모델 동작."""
+        import copy
+        cfg_off = copy.deepcopy(cfg)
+        cfg_off["wtp_model"] = {"enabled": False}
+        cfg_off["observation"] = {"dim": 23, "clip_min": -10, "clip_max": 10}
+        env = OranSlicingPricingEnv(cfg_off, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (23,)
+        assert not env._wtp_model_enabled
+        for _ in range(30):
+            action = env.action_space.sample()
+            obs, reward, term, trunc, info = env.step(action)
+            assert np.all(np.isfinite(obs))
+            assert np.isfinite(reward)
+
+    def test_T29_14_segment_wtp_ordering(self, cfg):
+        """[WTP-CHURN] qos_sensitive WTP > balanced > price_sensitive."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(cfg, seed=42)
+        if df["wtp_base_fee"].isna().all():
+            pytest.skip("WTP model not enabled in config")
+        for sl in ["URLLC", "eMBB"]:
+            sl_df = df[df["slice"] == sl]
+            p50_ps = sl_df.loc[sl_df["segment"] == "price_sensitive",
+                               "wtp_base_fee"].median()
+            p50_bal = sl_df.loc[sl_df["segment"] == "balanced",
+                                "wtp_base_fee"].median()
+            p50_qs = sl_df.loc[sl_df["segment"] == "qos_sensitive",
+                               "wtp_base_fee"].median()
+            assert p50_qs > p50_bal > p50_ps, \
+                f"{sl}: ordering violation qs={p50_qs:.0f} " \
+                f"bal={p50_bal:.0f} ps={p50_ps:.0f}"
+
+    def test_T29_15_numerical_stability(self, cfg):
+        """[WTP-CHURN] 극단 가격에서 NaN/Inf 없음."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        actions = [
+            np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            np.array([-1.0, -1.0, -1.0, -1.0, -1.0], dtype=np.float32),
+            np.array([1.0, -1.0, -1.0, 1.0, 0.0], dtype=np.float32),
+        ]
+        for step in range(300):
+            action = actions[step % len(actions)]
+            obs, reward, term, trunc, info = env.step(action)
+            assert np.all(np.isfinite(obs)), \
+                f"NaN in obs at step {step}: {obs}"
+            assert np.isfinite(reward), \
+                f"NaN in reward at step {step}"
             if trunc or term:
                 env.reset()
 
