@@ -1,0 +1,122 @@
+"""
+Synthetic user population generator (Requirement 6 / §13).
+
+Produces ``data/users_init.csv`` with per-user lognormal traffic parameters,
+price/QoS sensitivities, switching cost, and CLV discount rate.
+
+Parameter calibration policy (§13.3):
+  - Lognormal (mu, sigma) fitted to target p50/p90 daily usage per slice.
+  - Segment-level sensitivities drawn from literature-grounded ranges.
+
+References:
+  [Grubb AER 2009]       — 3-part tariff user heterogeneity
+  [Nevo et al. 2015]     — broadband usage heterogeneity
+  [Gupta JSR 2006]       — CLV discount rate
+  [CHURN logit]          — switching-cost distributions
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+from typing import Any, Dict
+
+import numpy as np
+import pandas as pd
+
+from .utils import load_config, fit_lognormal_quantiles
+
+logger = logging.getLogger("oran3pt.gen_users")
+
+
+def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
+    """[HI-2] Vectorized user generation — numpy batch operations replace
+    Python for-loop. Output schema and statistical properties are identical.
+    [Grubb AER 2009; Nevo 2016 — user heterogeneity]
+    """
+    rng = np.random.default_rng(seed)
+    pop = cfg["population"]
+    N = pop["N_total"]
+    N_act = pop["N_active_init"]
+    frac_u = pop["frac_urllc"]
+
+    seg_names = pop["segments"]["names"]
+    seg_probs = pop["segments"]["proportions"]
+    psens_map = pop["segments"]["price_sensitivity"]
+    qsens_map = pop["segments"]["qos_sensitivity"]
+    swcost_map = pop["segments"]["switching_cost"]
+
+    # Calibrate lognormal params from config targets
+    traf = cfg["traffic"]
+    mu_u, sig_u = fit_lognormal_quantiles(
+        traf["URLLC"]["target_p50_gb_day"], traf["URLLC"]["target_p90_gb_day"])
+    mu_e, sig_e = fit_lognormal_quantiles(
+        traf["eMBB"]["target_p50_gb_day"], traf["eMBB"]["target_p90_gb_day"])
+
+    # Vectorized slice assignment
+    slices = np.where(rng.random(N) < frac_u, "URLLC", "eMBB")
+
+    # Vectorized segment assignment
+    segments = rng.choice(seg_names, size=N, p=seg_probs)
+
+    # Vectorized per-user noise on lognormal params (±10% std)
+    u_mu_u = mu_u + rng.normal(0, abs(mu_u) * 0.10, N)
+    u_sig_u = np.maximum(0.05, sig_u + rng.normal(0, sig_u * 0.10, N))
+    u_mu_e = mu_e + rng.normal(0, abs(mu_e) * 0.10, N)
+    u_sig_e = np.maximum(0.05, sig_e + rng.normal(0, sig_e * 0.10, N))
+
+    # Vectorized sensitivities: look up segment values, add noise
+    ps_base = np.array([psens_map[s] for s in segments])
+    qs_base = np.array([qsens_map[s] for s in segments])
+    sc_base = np.array([swcost_map[s] for s in segments])
+
+    ps = ps_base + rng.normal(0, 0.05, N)
+    qs = qs_base + rng.normal(0, 0.05, N)
+    sc = np.maximum(0.0, sc_base + rng.normal(0, 0.05, N))
+    dr = 0.01 + rng.uniform(-0.002, 0.002, N)
+
+    is_active = np.where(np.arange(N) < N_act, 1, 0)
+
+    return pd.DataFrame({
+        "user_id": np.arange(N),
+        "slice": slices,
+        "segment": segments,
+        "mu_urllc": np.round(u_mu_u, 5),
+        "sigma_urllc": np.round(u_sig_u, 5),
+        "mu_embb": np.round(u_mu_e, 5),
+        "sigma_embb": np.round(u_sig_e, 5),
+        "price_sensitivity": np.round(ps, 4),
+        "qos_sensitivity": np.round(qs, 4),
+        "switching_cost": np.round(sc, 4),
+        "clv_discount_rate": np.round(dr, 5),
+        "is_active_init": is_active,
+    })
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate synthetic user CSV")
+    parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--output", default="data/users_init.csv")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO,
+                        format="[%(asctime)s][%(name)s] %(message)s")
+
+    cfg = load_config(args.config)
+    df = generate_users(cfg, seed=args.seed)
+
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False)
+    logger.info("Wrote %d users → %s", len(df), out)
+    logger.info("  Active: %d  Inactive: %d",
+                int(df["is_active_init"].sum()),
+                int((1 - df["is_active_init"]).sum()))
+    logger.info("  URLLC: %d  eMBB: %d",
+                int((df["slice"] == "URLLC").sum()),
+                int((df["slice"] == "eMBB").sum()))
+
+
+if __name__ == "__main__":
+    main()

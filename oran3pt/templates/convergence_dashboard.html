@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SAC Training Convergence — O-RAN 3PT</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-body: #0c0e14;
+  --bg-card: #141722;
+  --bg-card-hover: #1a1e2e;
+  --border: #1e2336;
+  --border-accent: #2a3050;
+  --text-primary: #e8eaf0;
+  --text-secondary: #8890a4;
+  --text-dim: #555d74;
+  --accent-blue: #4a9eff;
+  --accent-blue-dim: rgba(74,158,255,0.12);
+  --accent-green: #34d399;
+  --accent-green-dim: rgba(52,211,153,0.12);
+  --accent-red: #f87171;
+  --accent-red-dim: rgba(248,113,113,0.12);
+  --accent-orange: #fb923c;
+  --accent-orange-dim: rgba(251,146,60,0.12);
+  --accent-purple: #a78bfa;
+  --accent-purple-dim: rgba(167,139,250,0.12);
+  --accent-cyan: #22d3ee;
+  --accent-yellow: #fbbf24;
+  --grid: rgba(255,255,255,0.04);
+  --grid-line: rgba(255,255,255,0.06);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg-body);
+  color: var(--text-primary);
+  font-family: 'DM Sans', sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 32px 40px;
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 36px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.header-left h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+.header-left .subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  font-weight: 400;
+}
+.header-right {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 400;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.tag .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.tag-blue .dot { background: var(--accent-blue); }
+.tag-green .dot { background: var(--accent-green); }
+.tag-orange .dot { background: var(--accent-orange); }
+
+/* KPI strip */
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 32px;
+}
+.kpi-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+}
+.kpi-card.blue::before { background: var(--accent-blue); }
+.kpi-card.green::before { background: var(--accent-green); }
+.kpi-card.orange::before { background: var(--accent-orange); }
+.kpi-card.red::before { background: var(--accent-red); }
+.kpi-card.purple::before { background: var(--accent-purple); }
+.kpi-card.cyan::before { background: var(--accent-cyan); }
+.kpi-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.kpi-value {
+  font-size: 22px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: -0.02em;
+}
+.kpi-delta {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 4px;
+  font-weight: 500;
+}
+.kpi-delta.positive { color: var(--accent-green); }
+.kpi-delta.negative { color: var(--accent-red); }
+
+/* Section titles */
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  margin-top: 40px;
+}
+.section-title h2 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.section-title .line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.section-title .badge {
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+  border-radius: 4px;
+}
+
+/* Chart containers */
+.chart-row {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.chart-row.cols-1 { grid-template-columns: 1fr; }
+.chart-row.cols-2 { grid-template-columns: 1fr 1fr; }
+.chart-row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+.chart-row.cols-2-1 { grid-template-columns: 2fr 1fr; }
+.chart-row.cols-1-2 { grid-template-columns: 1fr 2fr; }
+
+.chart-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px 16px;
+}
+.chart-card-title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.chart-card-subtitle {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  margin-bottom: 14px;
+}
+.chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* Legend badge */
+.legend-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.legend-swatch {
+  width: 14px; height: 3px;
+  border-radius: 2px;
+}
+.legend-swatch.dashed {
+  background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 8px);
+  height: 2px;
+}
+
+/* Footer */
+.footer {
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+}
+.footer a { color: var(--text-secondary); text-decoration: none; }
+
+/* Phase annotation labels */
+.phase-labels {
+  display: flex;
+  gap: 0;
+  margin-top: 4px;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-dim);
+}
+.phase-label {
+  text-align: center;
+  padding: 3px 0;
+  border-top: 2px solid transparent;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+  .chart-row.cols-3 { grid-template-columns: 1fr; }
+  .chart-row.cols-2 { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <h1>SAC Training Convergence Dashboard</h1>
+      <div class="subtitle">__SUBTITLE__</div>
+    </div>
+    <div class="header-right">
+      <span class="tag tag-blue"><span class="dot"></span>SAC γ=0.995</span>
+      <span class="tag tag-green"><span class="dot"></span>LR 3e-4→1e-5</span>
+      <span class="tag tag-orange"><span class="dot"></span>5D Action</span>
+    </div>
+  </div>
+
+  <!-- KPI Strip -->
+  <div class="kpi-strip">
+    <div class="kpi-card blue">
+      <div class="kpi-label">Mean Reward</div>
+      <div class="kpi-value" id="kpi-reward">—</div>
+      <div class="kpi-delta positive" id="kpi-reward-d">—</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-label">Episode Profit</div>
+      <div class="kpi-value" id="kpi-profit">—</div>
+      <div class="kpi-delta positive" id="kpi-profit-d">—</div>
+    </div>
+    <div class="kpi-card orange">
+      <div class="kpi-label">Profit Margin</div>
+      <div class="kpi-value" id="kpi-margin">—</div>
+      <div class="kpi-delta positive" id="kpi-margin-d">—</div>
+    </div>
+    <div class="kpi-card purple">
+      <div class="kpi-label">Mean N_active</div>
+      <div class="kpi-value" id="kpi-users">—</div>
+      <div class="kpi-delta" id="kpi-users-d">—</div>
+    </div>
+    <div class="kpi-card cyan">
+      <div class="kpi-label">eMBB p_viol</div>
+      <div class="kpi-value" id="kpi-pviol">—</div>
+      <div class="kpi-delta positive" id="kpi-pviol-d">—</div>
+    </div>
+    <div class="kpi-card red">
+      <div class="kpi-label">eMBB Load Factor</div>
+      <div class="kpi-value" id="kpi-load">—</div>
+      <div class="kpi-delta positive" id="kpi-load-d">—</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ SECTION 1: Performance ═══════════════════ -->
+  <div class="section-title">
+    <h2>Performance Overview: Financial & Operational</h2>
+    <div class="line"></div>
+    <div class="badge">EPISODE-LEVEL</div>
+  </div>
+
+  <!-- P1: Financial Growth -->
+  <div class="chart-row cols-1">
+    <div class="chart-card">
+      <div class="chart-card-title">Financial Growth vs User Base</div>
+      <div class="chart-card-subtitle">Revenue & Profit (KRW) · N_active (count) · per episode mean</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-green)"></span>Revenue</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-blue)"></span>Profit</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-purple);opacity:0.7"></span>N_active</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-financial" height="110"></canvas></div>
+    </div>
+  </div>
+
+  <!-- P2: Network + P3: Reward -->
+  <div class="chart-row cols-2">
+    <div class="chart-card">
+      <div class="chart-card-title">Network Efficiency</div>
+      <div class="chart-card-subtitle">eMBB Traffic Volume (GB) · Load Factor (L_E / C_E)</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:rgba(255,255,255,0.15)"></span>Traffic L_E</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-red)"></span>Load Factor</span>
+        <span class="legend-item"><span class="legend-swatch dashed" style="color:var(--accent-yellow)"></span>Threshold 0.7</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-network" height="140"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">Optimization Goal: Reward Maximization</div>
+      <div class="chart-card-subtitle">Mean Episode Reward · QoS Violation (eMBB p_viol)</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-blue)"></span>Reward</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:rgba(74,158,255,0.15)"></span>P10–P90 Band</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-red);opacity:0.6"></span>p_viol eMBB</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-reward" height="140"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ SECTION 2: Pricing ═══════════════════ -->
+  <div class="section-title">
+    <h2>Strategic Pricing Evolution (Dual Axis)</h2>
+    <div class="line"></div>
+    <div class="badge">CONVERGENCE</div>
+  </div>
+
+  <div class="chart-row cols-2">
+    <div class="chart-card">
+      <div class="chart-card-title">URLLC: Premium Pricing Strategy (High Reliability)</div>
+      <div class="chart-card-subtitle">Base Fee F_U (KRW/mo) · Overage p_over_U (KRW/GB)</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-blue)"></span>Base (Monthly)</span>
+        <span class="legend-item"><span class="legend-swatch dashed" style="color:var(--accent-cyan)"></span>Excess (per GB)</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-urllc-price" height="150"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">eMBB: Volume Pricing Strategy (High Bandwidth)</div>
+      <div class="chart-card-subtitle">Base Fee F_E (KRW/mo) · Overage p_over_E (KRW/GB)</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-orange)"></span>Base (Monthly)</span>
+        <span class="legend-item"><span class="legend-swatch dashed" style="color:var(--accent-yellow)"></span>Excess (per GB)</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-embb-price" height="150"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Capacity allocation -->
+  <div class="chart-row cols-2">
+    <div class="chart-card">
+      <div class="chart-card-title">Capacity Allocation: ρ_U Convergence</div>
+      <div class="chart-card-subtitle">URLLC PRB share (0–0.6) · Action volatility (1σ band)</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-purple)"></span>Mean ρ_U</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:rgba(167,139,250,0.15)"></span>±1σ</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-rho" height="140"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">Market Dynamics: User Retention</div>
+      <div class="chart-card-subtitle">Net user change per episode · Total churn & join</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-green)"></span>Joins</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-red)"></span>Churns</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-blue)"></span>Net Δ</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-users" height="140"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ SECTION 3: Micro-Analysis ═══════════════════ -->
+  <div class="section-title">
+    <h2>Micro-Analysis: Intra-Cycle Dynamics (Last Episode)</h2>
+    <div class="line"></div>
+    <div class="badge">STEP-LEVEL</div>
+  </div>
+
+  <div class="chart-row cols-2">
+    <div class="chart-card">
+      <div class="chart-card-title">Daily Load Risk Analysis</div>
+      <div class="chart-card-subtitle">Avg eMBB load factor by cycle day · Peak risk envelope</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-green)"></span>Avg Load</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-yellow);opacity:0.4"></span>Peak Risk</span>
+        <span class="legend-item"><span class="legend-swatch dashed" style="color:var(--accent-red)"></span>Limit</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-daily-load" height="150"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">Traffic Efficiency</div>
+      <div class="chart-card-subtitle">eMBB Traffic (GB) vs Load Factor · colored by cycle day</div>
+      <div class="chart-wrap"><canvas id="chart-scatter" height="150"></canvas></div>
+    </div>
+  </div>
+
+  <div class="chart-row cols-1">
+    <div class="chart-card">
+      <div class="chart-card-title">Episode Load Profile (Last Episode — 320 Steps)</div>
+      <div class="chart-card-subtitle">eMBB load factor per step · billing cycle boundaries shown</div>
+      <div class="legend-row">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--accent-blue)"></span>Load Factor</span>
+        <span class="legend-item"><span class="legend-swatch dashed" style="color:var(--accent-red)"></span>Limit 0.7</span>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-load-profile" height="80"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>__FOOTER_LEFT__</span>
+    <span>References: [Haarnoja 2018] SAC · [Henderson 2018] Evaluation · [Dulac-Arnold 2021] Real-World RL</span>
+  </div>
+
+</div>
+
+<script>
+// ── Data ──
+const EP_DATA = __EP_DATA__;
+const LAST_EP = __LAST_EP__;
+
+// ── Chart.js defaults ──
+Chart.defaults.color = '#8890a4';
+Chart.defaults.borderColor = 'rgba(255,255,255,0.06)';
+Chart.defaults.font.family = "'DM Sans', sans-serif";
+Chart.defaults.font.size = 11;
+Chart.defaults.plugins.legend.display = false;
+Chart.defaults.animation.duration = 0;
+Chart.defaults.elements.point.radius = 0;
+Chart.defaults.elements.point.hoverRadius = 4;
+Chart.defaults.elements.line.tension = 0.3;
+
+const BLUE = '#4a9eff', GREEN = '#34d399', RED = '#f87171', ORANGE = '#fb923c',
+      PURPLE = '#a78bfa', CYAN = '#22d3ee', YELLOW = '#fbbf24';
+const eps = EP_DATA.map(d => d.episode);
+
+// ── Helpers ──
+function makeBand(data, key, stdKey, color, fillColor) {
+  const upper = data.map(d => d[key] + d[stdKey]);
+  const lower = data.map(d => d[key] - d[stdKey]);
+  return [
+    { data: upper, borderColor: 'transparent', backgroundColor: fillColor,
+      fill: '+1', pointRadius: 0 },
+    { data: lower, borderColor: 'transparent', backgroundColor: fillColor,
+      fill: false, pointRadius: 0 },
+  ];
+}
+
+function fmt(v, dec=0) { return v.toLocaleString(undefined, {maximumFractionDigits:dec}); }
+
+// ── KPIs ──
+(function fillKPIs() {
+  const first5 = EP_DATA.slice(0,5), last5 = EP_DATA.slice(-5);
+  const avg = (arr, k) => arr.reduce((s,d)=>s+d[k],0)/arr.length;
+  const delta = (a,b) => ((b-a)/Math.abs(a||1))*100;
+
+  const rw0=avg(first5,'mean_reward'), rw1=avg(last5,'mean_reward');
+  document.getElementById('kpi-reward').textContent = rw1.toFixed(3);
+  document.getElementById('kpi-reward-d').textContent = `${delta(rw0,rw1)>=0?'+':''}${delta(rw0,rw1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-reward-d').className = 'kpi-delta '+(rw1>rw0?'positive':'negative');
+
+  const pr0=avg(first5,'total_profit'), pr1=avg(last5,'total_profit');
+  document.getElementById('kpi-profit').textContent = (pr1/1e6).toFixed(0)+'M';
+  document.getElementById('kpi-profit-d').textContent = `${delta(pr0,pr1)>=0?'+':''}${delta(pr0,pr1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-profit-d').className = 'kpi-delta '+(pr1>pr0?'positive':'negative');
+
+  const mg0=avg(first5,'profit_margin'), mg1=avg(last5,'profit_margin');
+  document.getElementById('kpi-margin').textContent = (mg1*100).toFixed(1)+'%';
+  document.getElementById('kpi-margin-d').textContent = `${delta(mg0,mg1)>=0?'+':''}${delta(mg0,mg1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-margin-d').className = 'kpi-delta '+(mg1>mg0?'positive':'negative');
+
+  const us0=avg(first5,'mean_N_active'), us1=avg(last5,'mean_N_active');
+  document.getElementById('kpi-users').textContent = us1.toFixed(0);
+  document.getElementById('kpi-users-d').textContent = `${delta(us0,us1)>=0?'+':''}${delta(us0,us1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-users-d').className = 'kpi-delta '+(us1>=us0?'positive':'negative');
+
+  const pv0=avg(first5,'mean_pviol_E'), pv1=avg(last5,'mean_pviol_E');
+  document.getElementById('kpi-pviol').textContent = pv1.toFixed(3);
+  document.getElementById('kpi-pviol-d').textContent = `${delta(pv0,pv1)>=0?'+':''}${delta(pv0,pv1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-pviol-d').className = 'kpi-delta '+(pv1<pv0?'positive':'negative');
+
+  const lf0=avg(first5,'mean_load_factor_E'), lf1=avg(last5,'mean_load_factor_E');
+  document.getElementById('kpi-load').textContent = lf1.toFixed(2);
+  document.getElementById('kpi-load-d').textContent = `${delta(lf0,lf1)>=0?'+':''}${delta(lf0,lf1).toFixed(1)}% vs first 5 ep`;
+  document.getElementById('kpi-load-d').className = 'kpi-delta '+(lf1<lf0?'positive':'negative');
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CHART 1: Financial Growth vs User Base
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-financial'), {
+  type: 'line',
+  data: {
+    labels: eps,
+    datasets: [
+      { label: 'Revenue', data: EP_DATA.map(d=>d.mean_revenue),
+        borderColor: GREEN, borderWidth: 2, yAxisID: 'y' },
+      { label: 'Profit', data: EP_DATA.map(d=>d.mean_profit),
+        borderColor: BLUE, borderWidth: 2.5, yAxisID: 'y' },
+      { label: 'N_active', data: EP_DATA.map(d=>d.mean_N_active),
+        borderColor: PURPLE, borderWidth: 1.5, borderDash: [6,4],
+        yAxisID: 'y1' },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { position: 'left',
+           title: { display: true, text: 'KRW / step', color: '#555d74' },
+           ticks: { callback: v => (v/1e6).toFixed(1)+'M' },
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+      y1: { position: 'right',
+            title: { display: true, text: 'Count', color: '#555d74' },
+            min: 100, max: 220,
+            grid: { drawOnChartArea: false } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 2: Network Efficiency
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-network'), {
+  type: 'bar',
+  data: {
+    labels: eps,
+    datasets: [
+      { type: 'bar', label: 'Traffic L_E', data: EP_DATA.map(d=>d.mean_L_E),
+        backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 2,
+        yAxisID: 'y', barPercentage: 0.7 },
+      { type: 'line', label: 'Load Factor', data: EP_DATA.map(d=>d.mean_load_factor_E),
+        borderColor: RED, borderWidth: 2, yAxisID: 'y1', pointRadius: 0 },
+      { type: 'line', label: 'Threshold', data: EP_DATA.map(()=>0.7),
+        borderColor: YELLOW, borderWidth: 1, borderDash: [6,4],
+        yAxisID: 'y1', pointRadius: 0 },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { position: 'left',
+           title: { display: true, text: 'Traffic Volume (GB)', color: '#555d74' },
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+      y1: { position: 'right',
+            title: { display: true, text: 'Utilization (0–1)', color: '#555d74' },
+            min: 0, max: 1.5,
+            grid: { drawOnChartArea: false } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 3: Reward Maximization
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-reward'), {
+  type: 'line',
+  data: {
+    labels: eps,
+    datasets: [
+      { label: 'P90', data: EP_DATA.map(d=>d.reward_p90),
+        borderColor: 'transparent', backgroundColor: 'rgba(74,158,255,0.1)',
+        fill: '+1', pointRadius: 0 },
+      { label: 'P10', data: EP_DATA.map(d=>d.reward_p10),
+        borderColor: 'transparent', backgroundColor: 'transparent',
+        fill: false, pointRadius: 0 },
+      { label: 'Reward', data: EP_DATA.map(d=>d.mean_reward),
+        borderColor: BLUE, borderWidth: 2.5, yAxisID: 'y' },
+      { label: 'p_viol eMBB', data: EP_DATA.map(d=>d.mean_pviol_E),
+        borderColor: RED, borderWidth: 1.5, borderDash: [5,3],
+        yAxisID: 'y1' },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { position: 'left',
+           title: { display: true, text: 'Reward', color: '#555d74' },
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+      y1: { position: 'right',
+            title: { display: true, text: 'Violation Count', color: '#555d74' },
+            min: 0, max: 1.0,
+            grid: { drawOnChartArea: false } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 4: URLLC Pricing
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-urllc-price'), {
+  type: 'line',
+  data: {
+    labels: eps,
+    datasets: [
+      // ±1σ band for base fee
+      { data: EP_DATA.map(d=>d.mean_F_U + d.std_F_U),
+        borderColor: 'transparent', backgroundColor: 'rgba(74,158,255,0.08)',
+        fill: '+1', pointRadius: 0, yAxisID: 'y' },
+      { data: EP_DATA.map(d=>d.mean_F_U - d.std_F_U),
+        borderColor: 'transparent', fill: false, pointRadius: 0, yAxisID: 'y' },
+      { label: 'Base F_U', data: EP_DATA.map(d=>d.mean_F_U),
+        borderColor: BLUE, borderWidth: 2.5, yAxisID: 'y' },
+      { label: 'Excess p_U', data: EP_DATA.map(d=>d.mean_p_over_U),
+        borderColor: CYAN, borderWidth: 1.8, borderDash: [6,3],
+        yAxisID: 'y1' },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { position: 'left',
+           title: { display: true, text: 'Base Price (KRW)', color: '#555d74' },
+           min: 30000, max: 90000,
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+      y1: { position: 'right',
+            title: { display: true, text: 'Excess Price (KRW)', color: '#555d74' },
+            min: 500, max: 5000,
+            grid: { drawOnChartArea: false } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 5: eMBB Pricing
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-embb-price'), {
+  type: 'line',
+  data: {
+    labels: eps,
+    datasets: [
+      { data: EP_DATA.map(d=>d.mean_F_E + d.std_F_E),
+        borderColor: 'transparent', backgroundColor: 'rgba(251,146,60,0.08)',
+        fill: '+1', pointRadius: 0, yAxisID: 'y' },
+      { data: EP_DATA.map(d=>d.mean_F_E - d.std_F_E),
+        borderColor: 'transparent', fill: false, pointRadius: 0, yAxisID: 'y' },
+      { label: 'Base F_E', data: EP_DATA.map(d=>d.mean_F_E),
+        borderColor: ORANGE, borderWidth: 2.5, yAxisID: 'y' },
+      { label: 'Excess p_E', data: EP_DATA.map(d=>d.mean_p_over_E),
+        borderColor: YELLOW, borderWidth: 1.8, borderDash: [6,3],
+        yAxisID: 'y1' },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { position: 'left',
+           title: { display: true, text: 'Base Price (KRW)', color: '#555d74' },
+           min: 35000, max: 110000,
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+      y1: { position: 'right',
+            title: { display: true, text: 'Excess Price (KRW)', color: '#555d74' },
+            min: 500, max: 3000,
+            grid: { drawOnChartArea: false } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 6: ρ_U Convergence
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-rho'), {
+  type: 'line',
+  data: {
+    labels: eps,
+    datasets: [
+      { data: EP_DATA.map(d=>Math.min(0.6, d.mean_rho_U + d.std_rho_U)),
+        borderColor: 'transparent', backgroundColor: 'rgba(167,139,250,0.1)',
+        fill: '+1', pointRadius: 0 },
+      { data: EP_DATA.map(d=>Math.max(0.05, d.mean_rho_U - d.std_rho_U)),
+        borderColor: 'transparent', fill: false, pointRadius: 0 },
+      { label: 'ρ_U', data: EP_DATA.map(d=>d.mean_rho_U),
+        borderColor: PURPLE, borderWidth: 2.5 },
+    ]
+  },
+  options: {
+    responsive: true,
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false } },
+      y: { min: 0.0, max: 0.6,
+           title: { display: true, text: 'ρ_U', color: '#555d74' },
+           grid: { color: 'rgba(255,255,255,0.04)' } },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 7: User Retention
+// ═══════════════════════════════════════════════════════════
+new Chart(document.getElementById('chart-users'), {
+  type: 'bar',
+  data: {
+    labels: eps,
+    datasets: [
+      { type: 'bar', label: 'Joins', data: EP_DATA.map(d=>d.total_join),
+        backgroundColor: 'rgba(52,211,153,0.5)', borderRadius: 2, barPercentage: 0.6 },
+      { type: 'bar', label: 'Churns', data: EP_DATA.map(d=>-d.total_churn),
+        backgroundColor: 'rgba(248,113,113,0.5)', borderRadius: 2, barPercentage: 0.6 },
+      { type: 'line', label: 'Net Δ', data: EP_DATA.map(d=>d.net_user_change),
+        borderColor: BLUE, borderWidth: 2, pointRadius: 0, yAxisID: 'y' },
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { title: { display: true, text: 'Episode', color: '#555d74' },
+           grid: { display: false }, stacked: true },
+      y: { title: { display: true, text: 'Users', color: '#555d74' },
+           grid: { color: 'rgba(255,255,255,0.04)' }, stacked: false },
+    },
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// CHART 8: Daily Load Risk (last episode)
+// ═══════════════════════════════════════════════════════════
+(function() {
+  // Group last episode by cycle_step
+  const byDay = {};
+  LAST_EP.forEach(d => {
+    const cs = d.cycle_step;
+    if (!byDay[cs]) byDay[cs] = [];
+    byDay[cs].push(d.load_factor_E);
+  });
+  const days = Object.keys(byDay).map(Number).sort((a,b)=>a-b);
+  const avgLoad = days.map(d => {
+    const v = byDay[d];
+    return v.reduce((s,x)=>s+x,0)/v.length;
+  });
+  const maxLoad = days.map(d => Math.max(...byDay[d]));
+  const minLoad = days.map(d => Math.min(...byDay[d]));
+
+  new Chart(document.getElementById('chart-daily-load'), {
+    type: 'line',
+    data: {
+      labels: days,
+      datasets: [
+        { label: 'Peak Risk', data: maxLoad,
+          borderColor: 'transparent',
+          backgroundColor: 'rgba(251,191,36,0.18)',
+          fill: '+1', pointRadius: 0 },
+        { label: 'Min', data: minLoad,
+          borderColor: 'transparent', fill: false, pointRadius: 0 },
+        { label: 'Avg Load', data: avgLoad,
+          borderColor: GREEN, borderWidth: 2.5 },
+        { label: 'Limit', data: days.map(()=>0.7),
+          borderColor: RED, borderWidth: 1.5, borderDash: [6,3], pointRadius: 0 },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { title: { display: true, text: 'Day in Billing Cycle', color: '#555d74' },
+             grid: { display: false } },
+        y: { min: 0, max: 1.2,
+             title: { display: true, text: 'Load Factor', color: '#555d74' },
+             grid: { color: 'rgba(255,255,255,0.04)' } },
+      },
+    }
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CHART 9: Traffic Efficiency Scatter
+// ═══════════════════════════════════════════════════════════
+(function() {
+  const points = LAST_EP.map(d => ({
+    x: d.L_E,
+    y: d.load_factor_E,
+    day: d.cycle_step,
+  }));
+
+  // Color by cycle_step (0=dark blue → 29=bright)
+  const colors = points.map(p => {
+    const t = p.day / 29;
+    const r = Math.round(100 + 155*t);
+    const g = Math.round(130 + 80*(1-t));
+    const b = Math.round(255 - 100*t);
+    return `rgba(${r},${g},${b},0.7)`;
+  });
+
+  new Chart(document.getElementById('chart-scatter'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        data: points.map(p => ({x: p.x, y: p.y})),
+        backgroundColor: colors,
+        pointRadius: 3.5,
+        pointHoverRadius: 6,
+      },
+      { type: 'line', data: [{x:0,y:0.7},{x:500,y:0.7}],
+        borderColor: RED, borderWidth: 1, borderDash: [5,3],
+        pointRadius: 0, showLine: true },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { title: { display: true, text: 'Traffic (GB)', color: '#555d74' },
+             grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { min: 0, max: 1.2,
+             title: { display: true, text: 'Load Rate', color: '#555d74' },
+             grid: { color: 'rgba(255,255,255,0.04)' } },
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.datasetIndex === 0) {
+                const p = points[ctx.dataIndex];
+                return `Day ${p.day}: ${p.x.toFixed(0)} GB, LF=${p.y.toFixed(3)}`;
+              }
+              return '';
+            }
+          }
+        }
+      }
+    }
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════
+// CHART 10: Full Episode Load Profile
+// ═══════════════════════════════════════════════════════════
+(function() {
+  const steps = LAST_EP.map(d => d.step);
+  const loadF = LAST_EP.map(d => d.load_factor_E);
+
+  new Chart(document.getElementById('chart-load-profile'), {
+    type: 'line',
+    data: {
+      labels: steps,
+      datasets: [
+        { label: 'Load Factor', data: loadF,
+          borderColor: BLUE, borderWidth: 1.2, pointRadius: 0, fill: false },
+        { label: 'Limit', data: steps.map(()=>0.7),
+          borderColor: RED, borderWidth: 1.5, borderDash: [6,3], pointRadius: 0 },
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { title: { display: true, text: 'Step (within episode)', color: '#555d74' },
+             grid: { display: false },
+             ticks: { maxTicksLimit: 15 } },
+        y: { min: 0, max: 1.0,
+             title: { display: true, text: 'Load Factor', color: '#555d74' },
+             grid: { color: 'rgba(255,255,255,0.04)' } },
+      },
+    }
+  });
+})();
+</script>
+</body>
+</html>
