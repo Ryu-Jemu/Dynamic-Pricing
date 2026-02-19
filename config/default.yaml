@@ -90,7 +90,8 @@ radio:
 
 # ── §8  QoS / SLA violation ──
 qos:
-  alpha_congestion: 10.0
+  alpha_congestion: 15.0          # [ERR-1] 10→15; sharpen sigmoid for distributional pviol (Jensen's inequality)
+                                   # [Caballero JSAC 2019; Sciancalepore TNSM 2019]
   lambda_U: 500000.0
   lambda_E: 500000.0            # [D3] 200K→500K  [Tessler 2019; KCC 2023]
   gamma_sla_E: 3.0              # [F2] 4.0→3.0 revert; γ=4 weakens penalty at pviol_E=0.2 by 5× vs γ=3
@@ -155,16 +156,17 @@ population:
   # [Tobin IROS 2017; Rajeswaran NeurIPS 2017; Henderson AAAI 2018]
   domain_randomization:
     enabled: true
-    N_active_init_range: [160, 240]   # ±20% around N_active_init=200
+    N_active_init_range: [150, 250]   # [FIX-B2] ±25% wider DR range  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
+    traffic_noise_std: 0.15           # [FIX-B2] Per-step multiplicative traffic perturbation  [Tobin IROS 2017]
 
 # ── §12  Training ──
 training:
-  total_timesteps: 100000            # [OPT] 1M→100K (개발용 축소)
+  total_timesteps: 1000000            # [M1] Full training budget  [Henderson 2018]
   learning_rate: 0.0003
   learning_rate_end: 0.00001
   lr_schedule: "linear"
   batch_size: 512                   # [OPT-D] 256→512 GPU 활용도 향상  [Fedus 2020]
-  buffer_size: 50000                # [OPT] 200K→50K (개발용 축소)
+  buffer_size: 200000                # Full replay buffer capacity
   gamma: 0.995
   tau: 0.005
   ent_coef: "auto"
@@ -173,30 +175,31 @@ training:
   train_freq: 4                 # [M7]  [Fedus 2020]
   gradient_steps: 2             # [OPT-D] 4→2; 총 gradient 계산량 유지 (2×512=4×256)  [Fedus 2020]
   eval_freq: 20000              # [OPT-E] 10K→20K; 평가 간격 2배
-  n_eval_episodes: 10            # [OPT-E] 20→10; 에피소드 수 절반
-  n_seeds: 1                        # [OPT] 5→1 (개발용 축소)
-  parallel_seeds: false          # [OPT-A] 다중 seed 병렬 실행  [Henderson 2018]
+  n_eval_episodes: 20            # [OPT-E] 20→10; 에피소드 수 절반
+  n_seeds: 5                        # [E9] Multi-seed for statistical significance  [Henderson 2018]
+  parallel_seeds: true          # [OPT-A] 다중 seed 병렬 실행  [Henderson 2018]
   max_parallel: 5                # [OPT-A] 최대 동시 프로세스 수
   curriculum:
     enabled: true
     # [D5] 3-phase curriculum  [Narvekar 2020; Bengio 2009; Achiam 2017]
     phases:
-      - fraction: 0.15          # Phase 1: pricing/capacity isolation (no churn/join)
+      - fraction: 0.10          # [FIX-B3] Phase 1: shortened isolation (0.15→0.10)
         churn_join: false
         lagrangian_boost: 0.0
-      - fraction: 0.25          # Phase 2: QoS-focused with boosted Lagrangian
+      - fraction: 0.35          # [FIX-B3] Phase 2: extended QoS focus (0.25→0.35)
         churn_join: true
         lagrangian_boost: 2.0
-      - fraction: 0.60          # Phase 3: full optimization
+        boost_decay_steps: 10000  # [FIX-B3] Gradual 0→2.0 boost transition  [Narvekar 2020; Achiam 2017]
+      - fraction: 0.55          # [FIX-B3] Phase 3: full optimization (0.60→0.55)
         churn_join: true
         lagrangian_boost: 1.0
-        boost_decay_steps: 5000   # [FIX-S3] Phase 2 boost(2.0)에서 선형 감소  [Narvekar 2020; Achiam 2017]
+        boost_decay_steps: 5000   # [FIX-S3] 2.0→1.0 선형 감소  [Narvekar 2020; Achiam 2017]
   # [OPT-C] Early stopping  [Prechelt 2002; Henderson 2018]
   # [ME-5] min_timesteps = 60% × total_timesteps = Phase 3 시작(40%) + 20% 추가 학습 보장
   early_stopping:
     enabled: true
     patience: 15               # [V11-6] 10→15  [Henderson AAAI 2018]
-    min_timesteps: 75000       # [V11-6] 60K→75K; 0.75 × 100K  [Prechelt 2002]
+    min_timesteps: 750000       # [V11-6] 0.75 × 1M; Phase 3 충분 학습 보장  [Prechelt 2002]
     min_improvement: 0.01      # 1% 상대 개선 임계값
 
 # ── §3.2  Observation  [ME-1] 23-D ──
@@ -216,8 +219,8 @@ action_smoothing:
 # ── §15c  Population-aware reward ──
 population_reward:
   enabled: true
-  beta_pop: 0.6                 # [V11-2] 0.3→0.6  [Mguni 2019 §4.2; Zheng 2022 ExtData Fig.3]
-  target_ratio: 0.4
+  beta_pop: 1.0                 # [ERR-5] 0.6→1.0; stronger population signal  [Mguni 2019 §4.2; Zheng 2022]
+  target_ratio: 0.37            # [ERR-5] 0.4→0.37; capacity-aligned (185 users ≈ 80% C_E)  [Boyd 2004]
   quadratic: true               # [V11-8] Asymmetric quadratic  [Zheng 2022; Mguni 2019]
 
 # ── §15d  Lagrangian QoS constraint  [M6][D2] ──
@@ -226,9 +229,9 @@ lagrangian_qos:
   enabled: true
   pviol_E_threshold: 0.08       # [FIX-S2] 0.10→0.08; 20% 추가 마진 for train-eval shift  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
   Kp: 0.05                      # [D2] Proportional gain  [Stooke 2020]
-  Ki: 0.02                      # [F4] 0.005→0.02; 4× increase for timely constraint enforcement  [Stooke 2020; Mao 2025]
+  Ki: 0.01                      # [ERR-3] 0.02→0.01; slower integral with tighter λ range [0.5, 5.0]  [Stooke 2020; Boyd 2004]
   Kd: 0.01                      # [D2] Derivative gain
-  lambda_max: 20.0               # [FIX-S1] 10.0→20.0; λ 포화 해소, penalty headroom 확보  [Boyd 2004; Stooke 2020]
+  lambda_max: 5.0                # [ERR-3] 20.0→5.0; calibrated for reward ~0.7; penalty 17% at moderate violation  [Boyd 2004; Stooke 2020]
   lambda_min: 0.5                # [FIX-M3] 0.1→0.5; penalty at pviol=0.2: 0.5×0.1=0.05 (2.8% of reward range)  [Paternain CDC 2019; TAC 2022]
   update_freq: 200               # [D2] 1000→200  [Stooke 2020]
   eval_lambda_floor: 2.0         # [FIX-S5] 1.0→2.0; eval 시 최소 QoS 인센티브 강화  [Tessler 2019 §5; Tobin IROS 2017]
@@ -238,8 +241,8 @@ lagrangian_qos:
 # Gating: reject new joins if projected load > threshold or pviol > ceiling
 admission_control:
   enabled: true
-  load_threshold: 0.92          # [V11-3] 0.85→0.92  [Samdanis CommMag 2016]
-  pviol_ceiling: 0.50           # [V11-3] 0.30→0.50  [Caballero JSAC 2019]
+  load_threshold: 0.80          # [ERR-4] 0.92→0.80; proactive admission gating  [Caballero JSAC 2019 §IV-B; 3GPP TS 23.501 §5.2.3]
+  pviol_ceiling: 0.25           # [ERR-4] 0.50→0.25; tighter QoS gate  [Sciancalepore TNSM 2019]
   per_user_load_estimate_E_gb: 1.5    # eMBB p50 daily traffic
   per_user_load_estimate_U_gb: 0.15   # URLLC p50 daily traffic
 
@@ -254,8 +257,8 @@ hierarchical_actions:
 # [3GPP TS 23.501 §5.15.7; Samdanis CommMag 2016; Huang IoT-J 2020]
 capacity_guard:
   enabled: true
-  embb_load_ratio_max: 0.85      # [FIX-M2] 0.95→0.85; activates near operating point  [3GPP TS 23.501 §5.15.7]
-  penalty_scale: 0.10            # [FIX-M2] 0.02→0.10; 5× for meaningful gradient  [Samdanis CommMag 2016]
+  embb_load_ratio_max: 0.78      # [ADD-1] 0.85→0.78; activates before AC threshold  [3GPP TS 23.501 §5.15.7; Wiewiora ICML 2003]
+  penalty_scale: 2.0             # [ADD-1] 0.10→2.0; 20× for dominant constraint signal  [Samdanis CommMag 2016]
 
 # ── §19  [I-5a] SLA Awareness Penalty ──
 # Additional reward shaping when SLA penalty exceeds revenue threshold
@@ -264,6 +267,10 @@ sla_awareness:
   enabled: true
   revenue_ratio_threshold: 0.05  # Trigger when sla_penalty/revenue > 5%
   penalty_scale: 0.1             # Penalty coefficient
+
+# ── §20  Evaluation settings ──
+eval:
+  action_ema_alpha: 0.7          # [FIX-B1] Eval-time action EMA smoothing  [Dulac-Arnold JMLR 2021 §4.2]
 
 # ── Calibration targets ──
 calibration:

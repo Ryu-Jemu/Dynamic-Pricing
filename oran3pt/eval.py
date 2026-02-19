@@ -34,7 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -138,7 +138,6 @@ def run_evaluation(cfg: Dict[str, Any],
     eval_lambda_floor = lag_cfg.get("eval_lambda_floor", 1.0)
     lag_path = Path(output_dir) / "lagrangian_state.json"
     if lag_path.exists():
-        import json
         with open(lag_path) as f:
             lag_state = json.load(f)
         lambda_val = max(lag_state.get("lambda", 0.0), eval_lambda_floor)

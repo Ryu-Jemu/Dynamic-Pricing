@@ -17,7 +17,7 @@ training:
   n_seeds: 5                   # [E9] Multi-seed for statistical significance
   buffer_size: 200000          # Full replay buffer capacity
   parallel_seeds: true         # [OPT-A] Enable parallel seed training
-  eval_freq: 10000             # More frequent evaluation with larger budget
+  eval_freq: 20000             # [OPT-E] 10K→20K; consistent with default.yaml
   n_eval_episodes: 20          # [EP1] Sufficient for short-episode variance
   early_stopping:
     min_timesteps: 750000      # [V11-6] 600K→750K; 0.75 × 1M  [Prechelt 2002]

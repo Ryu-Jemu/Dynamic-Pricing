@@ -106,8 +106,8 @@ class OranSlicingPricingEnv(gym.Env):
         # Time (§3.1)
         tc = cfg["time"]
         self.T: int = tc["steps_per_cycle"]
-        self.n_cycles: int = tc["episode_cycles"]
-        self.episode_len: int = self.T * self.n_cycles
+        n_cycles: int = tc["episode_cycles"]
+        self.episode_len: int = self.T * n_cycles
 
         # [EP1] Episode mode: "continuous" or "episodic" (legacy)
         # [Pardo ICML 2018; Wan arXiv 2025]
@@ -210,14 +210,14 @@ class OranSlicingPricingEnv(gym.Env):
         # Action smoothing (§15b)
         sm = cfg.get("action_smoothing", {})
         self._smooth_enabled: bool = sm.get("enabled", False)
-        self._smooth_weight: float = sm.get("weight", 0.05)
         smooth_weights = sm.get("weights", None)
         if smooth_weights is not None and len(smooth_weights) == 5:
             self._smooth_weights = np.array(
                 smooth_weights, dtype=np.float64)
         else:
+            default_weight: float = sm.get("weight", 0.05)
             self._smooth_weights = np.full(
-                5, self._smooth_weight, dtype=np.float64)
+                5, default_weight, dtype=np.float64)
 
         # CLV reward shaping (§11b)
         clv_rs = cfg.get("clv_reward_shaping", {})
@@ -278,14 +278,16 @@ class OranSlicingPricingEnv(gym.Env):
         _dr_range = dr_cfg.get("N_active_init_range", [_n_init, _n_init])
         self._dr_N_range: Tuple[int, int] = (int(_dr_range[0]),
                                               int(_dr_range[1]))
+        # [FIX-B2] Per-step traffic demand perturbation  [Tobin IROS 2017]
+        self._traffic_noise_std: float = dr_cfg.get("traffic_noise_std", 0.0)
 
         # Load users
-        self._users_csv_path = users_csv
         self._load_users(users_csv)
 
         # Reward normalisation
-        self._reward_scale = max(
-            self._a_hi[0] * self.N_total / self.T, 1.0)
+        # [FIX-C2r] Calibrated to profit P50 (~300K KRW/step)
+        # [Andrychowicz ICLR 2021 §2.3; Henderson AAAI 2018 §5.2]
+        self._reward_scale = 300_000.0
 
         # Per-episode state
         self.t: int = 0
@@ -743,6 +745,15 @@ class OranSlicingPricingEnv(gym.Env):
             raw_u *= mult_u
             raw_e *= mult_e
 
+        # [FIX-B2] Per-step traffic demand perturbation for domain randomization
+        # Multiplicative noise clipped to [0.5, 1.5]  [Tobin IROS 2017; Rajeswaran NeurIPS 2017]
+        if self._traffic_noise_std > 0.0:
+            noise = self._rng.normal(
+                1.0, self._traffic_noise_std, size=len(active_idx))
+            noise = np.clip(noise, 0.5, 1.5)
+            raw_u *= noise
+            raw_e *= noise
+
         slice_u_active = self._slice_is_U[active_idx]
         slice_e_active = self._slice_is_E[active_idx]
         raw_u *= slice_u_active
@@ -930,7 +941,7 @@ class OranSlicingPricingEnv(gym.Env):
         # to preserve constraint gradient  [Paternain CDC 2019]
         r_base = float(np.clip(r, -2.0, 2.0))
         r_final = r_base - lagrangian_penalty
-        return float(np.clip(r_final, -4.0, 4.0))
+        return float(np.clip(r_final, -5.0, 5.0))  # [FIX-C1] -4→-5 wider clip for recalibrated scale
 
     # ── Observation ───────────────────────────────────────────────────
 

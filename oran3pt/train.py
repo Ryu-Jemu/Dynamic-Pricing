@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
+import json
 import logging
 import multiprocessing as mp
 import shutil
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,6 +53,12 @@ try:
     _SB3_AVAILABLE = True
 except ImportError as e:
     _SB3_IMPORT_ERROR = str(e)
+
+def _unwrap_training_env(vec_env):
+    """[F6] Get the unwrapped base env from SB3 DummyVecEnv→Monitor chain."""
+    raw = vec_env.envs[0]
+    return getattr(raw, 'unwrapped', raw)
+
 
 # ── Keys injected by SB3 at episode boundaries ──────────────────────
 _SB3_INJECTED_KEYS = frozenset({
@@ -179,9 +186,7 @@ if _SB3_AVAILABLE:
                     "lagrangian_boost", 1.0)
                 self._current_phase += 1
                 phase_cfg = self._phases[self._current_phase]
-                # [F6] Use .unwrapped to bypass SB3 Monitor wrapper
-                raw_env = self.training_env.envs[0]
-                env = getattr(raw_env, 'unwrapped', raw_env)
+                env = _unwrap_training_env(self.training_env)
                 if hasattr(env, 'set_curriculum_phase'):
                     phase_val = 0 if phase_cfg.get("churn_join", True) else 1
                     env.set_curriculum_phase(phase_val)
@@ -217,14 +222,12 @@ if _SB3_AVAILABLE:
                     current_boost = (self._prev_boost
                                      + alpha * (self._decay_target
                                                 - self._prev_boost))
-                    raw_env = self.training_env.envs[0]
-                    env = getattr(raw_env, 'unwrapped', raw_env)
+                    env = _unwrap_training_env(self.training_env)
                     if hasattr(env, 'set_lagrangian_boost'):
                         env.set_lagrangian_boost(current_boost)
                 else:
                     # Decay complete
-                    raw_env = self.training_env.envs[0]
-                    env = getattr(raw_env, 'unwrapped', raw_env)
+                    env = _unwrap_training_env(self.training_env)
                     if hasattr(env, 'set_lagrangian_boost'):
                         env.set_lagrangian_boost(self._decay_target)
                     self._decay_steps = 0
@@ -314,9 +317,7 @@ if _SB3_AVAILABLE:
                 self._prev_error = error
                 self._pviol_buffer.clear()
 
-                # [F6] Use .unwrapped to bypass SB3 Monitor wrapper
-                raw_env = self.training_env.envs[0]
-                env = getattr(raw_env, 'unwrapped', raw_env)
+                env = _unwrap_training_env(self.training_env)
                 if hasattr(env, 'set_lagrangian_lambda'):
                     env.set_lagrangian_lambda(self.lambda_val)
                     # [FIX-C1] Propagate λ to eval_env for constraint-aware
@@ -516,7 +517,6 @@ def train_single_seed(cfg: Dict[str, Any],
             deterministic=True,
             verbose=0,
         )
-        import inspect
         if "best_model_save_name" in inspect.signature(EvalCallback.__init__).parameters:
             eval_cb_kwargs["best_model_save_path"] = str(out)
             eval_cb_kwargs["best_model_save_name"] = best_model_name
@@ -592,7 +592,6 @@ def train_single_seed(cfg: Dict[str, Any],
                     "threshold": cb._threshold,
                 }
                 break
-        import json
         with open(lagrangian_state_path, "w") as f:
             json.dump(lag_state, f, indent=2)
         logger.info("[V11-4] Lagrangian state saved: λ=%.4f → %s",
