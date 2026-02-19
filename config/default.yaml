@@ -1,7 +1,7 @@
 # ================================================================
 # 5G O-RAN 1-Cell  ·  3-Part Tariff  ·  2 Slices  ·  SB3 SAC
 # ================================================================
-# REVISION 9 (v9) — Design improvements from verification report
+# REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes
 #
 # New in v9:
 #   [D1] NSACF admission control           [3GPP TS 23.501 §5.2.3; Caballero JSAC 2019]
@@ -175,7 +175,7 @@ training:
   train_freq: 4                 # [M7]  [Fedus 2020]
   gradient_steps: 2             # [OPT-D] 4→2; 총 gradient 계산량 유지 (2×512=4×256)  [Fedus 2020]
   eval_freq: 20000              # [OPT-E] 10K→20K; 평가 간격 2배
-  n_eval_episodes: 20            # [OPT-E] 20→10; 에피소드 수 절반
+  n_eval_episodes: 20            # [EP1] 짧은 에피소드 보상 분산 보상; 20 episodes
   n_seeds: 5                        # [E9] Multi-seed for statistical significance  [Henderson 2018]
   parallel_seeds: true          # [OPT-A] 다중 seed 병렬 실행  [Henderson 2018]
   max_parallel: 5                # [OPT-A] 최대 동시 프로세스 수
@@ -195,11 +195,10 @@ training:
         lagrangian_boost: 1.0
         boost_decay_steps: 5000   # [FIX-S3] 2.0→1.0 선형 감소  [Narvekar 2020; Achiam 2017]
   # [OPT-C] Early stopping  [Prechelt 2002; Henderson 2018]
-  # [ME-5] min_timesteps = 60% × total_timesteps = Phase 3 시작(40%) + 20% 추가 학습 보장
   early_stopping:
     enabled: true
     patience: 15               # [V11-6] 10→15  [Henderson AAAI 2018]
-    min_timesteps: 750000       # [V11-6] 0.75 × 1M; Phase 3 충분 학습 보장  [Prechelt 2002]
+    min_timesteps: auto         # auto = 0.75 × total_timesteps; Phase 3 충분 학습 보장  [Prechelt 2002]
     min_improvement: 0.01      # 1% 상대 개선 임계값
 
 # ── §3.2  Observation  [ME-1] 23-D ──

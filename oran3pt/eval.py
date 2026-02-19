@@ -1,7 +1,7 @@
 """
 Evaluation script — export rollout log + summary (§14 data source).
 
-REVISION 10 — Changes from v9:
+REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] Chained episode evaluation for continuous mode
         In continuous mode (episode_cycles=1), chains 24 episodes into
         one repeat to produce 720-row rollout logs identical to v9 format.
@@ -319,6 +319,8 @@ def generate_dashboards(cfg: Dict[str, Any],
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate trained agent")
     parser.add_argument("--config", default="config/default.yaml")
+    parser.add_argument("--override", default=None,
+                        help="[CR-3] Override config (e.g. config/production.yaml)")
     parser.add_argument("--model", default="outputs/best_model")
     parser.add_argument("--users", default="data/users_init.csv")
     parser.add_argument("--output", default="outputs")
@@ -329,7 +331,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO,
                         format="[%(asctime)s][%(name)s] %(message)s")
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, override_path=args.override)
     users_csv = args.users if Path(args.users).exists() else None
     run_evaluation(cfg, model_path=args.model, users_csv=users_csv,
                    n_repeats=args.repeats, output_dir=args.output,

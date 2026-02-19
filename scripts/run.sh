@@ -2,9 +2,9 @@
 # ==============================================================================
 # O-RAN 3-Part Tariff Pricing — End-to-End Pipeline  (Requirement 15)
 #
-# REVISION 10 — v10 pipeline:
+# v10.4 pipeline:
 #   [R1] 1M training timesteps (restored)
-#   [R3] Curriculum learning (Phase 1: no churn/join; Phase 2: full dynamics)
+#   [R3] Curriculum learning (3-phase)
 #   [R8] Higher initial entropy coefficient
 #   [M15] Dashboard generation integrated into eval.py (Step 4)
 #   Prior: [E9] Multi-seed training, [F1] transparent pip, [F2] SB3 verify
@@ -17,7 +17,8 @@
 #   4) Evaluate & export logs + CLV + dashboards [M15]
 #
 # Usage:
-#   chmod +x scripts/run.sh && ./scripts/run.sh [--seeds N]
+#   chmod +x scripts/run.sh && ./scripts/run.sh [--seeds N] [--auto]
+#   --auto : Skip interactive prompts, use config defaults
 # ==============================================================================
 set -euo pipefail
 
@@ -25,20 +26,78 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-# Parse optional --seeds argument
+# Parse CLI arguments
 N_SEEDS=""
+TIMESTEPS=""
+BUFFER_SIZE=""
+BATCH_SIZE=""
+LR=""
+AUTO_MODE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --seeds) N_SEEDS="$2"; shift 2;;
+        --timesteps) TIMESTEPS="$2"; shift 2;;
+        --buffer-size) BUFFER_SIZE="$2"; shift 2;;
+        --batch-size) BATCH_SIZE="$2"; shift 2;;
+        --lr) LR="$2"; shift 2;;
+        --auto) AUTO_MODE=true; shift;;
         *) shift;;
     esac
 done
 
-echo "============================================"
-echo " O-RAN 3-Part Tariff — Full Pipeline (v10)"
-echo "============================================"
+echo "═══════════════════════════════════════════════"
+echo "  O-RAN 5G 3-Part Tariff SAC Training (v10.4)"
+echo "═══════════════════════════════════════════════"
 echo "Project dir: $PROJECT_DIR"
 echo ""
+
+# ── Interactive hyperparameter input ──
+# Skipped if --auto flag is provided or all values are set via CLI
+if [ "$AUTO_MODE" = false ]; then
+    echo "  하이퍼파라미터 설정 (Enter = 기본값 사용)"
+    echo "  ──────────────────────────────────────────"
+
+    if [ -z "$TIMESTEPS" ]; then
+        read -p "  Total timesteps [1000000 권장, 개발: 100000]: " TS_INPUT
+        TIMESTEPS="${TS_INPUT:-}"
+    fi
+
+    if [ -z "$N_SEEDS" ]; then
+        read -p "  Number of seeds [5 권장, 개발: 1]: " SEEDS_INPUT
+        N_SEEDS="${SEEDS_INPUT:-}"
+    fi
+
+    if [ -z "$BUFFER_SIZE" ]; then
+        read -p "  Replay buffer size [200000 권장, 개발: 50000]: " BUF_INPUT
+        BUFFER_SIZE="${BUF_INPUT:-}"
+    fi
+
+    if [ -z "$BATCH_SIZE" ]; then
+        read -p "  Batch size [512 권장]: " BS_INPUT
+        BATCH_SIZE="${BS_INPUT:-}"
+    fi
+
+    if [ -z "$LR" ]; then
+        read -p "  Learning rate [0.0003 권장]: " LR_INPUT
+        LR="${LR_INPUT:-}"
+    fi
+
+    echo ""
+    echo "  설정 요약:"
+    echo "    Timesteps:     ${TIMESTEPS:-config default}"
+    echo "    Seeds:         ${N_SEEDS:-config default}"
+    echo "    Buffer:        ${BUFFER_SIZE:-config default}"
+    echo "    Batch size:    ${BATCH_SIZE:-config default}"
+    echo "    Learning rate: ${LR:-config default}"
+    echo ""
+    read -p "  계속하시겠습니까? [Y/n]: " CONFIRM
+    CONFIRM="${CONFIRM:-Y}"
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        echo "  중단되었습니다."
+        exit 0
+    fi
+    echo ""
+fi
 
 # ── Step 0: Clean environment ──
 echo "===== Step 0: Environment Setup ====="
@@ -123,6 +182,18 @@ echo "===== Step 3: Train SAC ====="
 TRAIN_ARGS="--config config/default.yaml --users data/users_init.csv"
 if [ -n "$N_SEEDS" ]; then
     TRAIN_ARGS="$TRAIN_ARGS --seeds $N_SEEDS"
+fi
+if [ -n "$TIMESTEPS" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS --timesteps $TIMESTEPS"
+fi
+if [ -n "$BUFFER_SIZE" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS --buffer-size $BUFFER_SIZE"
+fi
+if [ -n "$BATCH_SIZE" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS --batch-size $BATCH_SIZE"
+fi
+if [ -n "$LR" ]; then
+    TRAIN_ARGS="$TRAIN_ARGS --lr $LR"
 fi
 python -m oran3pt.train $TRAIN_ARGS
 echo ""

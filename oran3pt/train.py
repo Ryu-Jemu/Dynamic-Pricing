@@ -1,7 +1,7 @@
 """
 SB3 SAC training for 5G O-RAN 3-Part Tariff environment (§12).
 
-REVISION 10 — Changes from v9:
+REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] 1-Cycle continuous episode mode support
         SB3 auto-handles truncated=True via ReplayBuffer
         n_eval_episodes increased (5→20) for shorter episodes
@@ -50,6 +50,7 @@ _SB3_IMPORT_ERROR = None
 try:
     from stable_baselines3 import SAC
     from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+    from stable_baselines3.common.monitor import Monitor
     _SB3_AVAILABLE = True
 except ImportError as e:
     _SB3_IMPORT_ERROR = str(e)
@@ -504,8 +505,8 @@ def train_single_seed(cfg: Dict[str, Any],
             logger.info("  [I-6a] target_entropy: %.1f", target_entropy)
         model = SAC("MlpPolicy", env, **sac_kwargs)
 
-        eval_env = OranSlicingPricingEnv(cfg, users_csv=users_csv,
-                                         seed=seed + 10000)
+        eval_env = Monitor(OranSlicingPricingEnv(cfg, users_csv=users_csv,
+                                                seed=seed + 10000))
         eval_freq = tc.get("eval_freq", 10000)
         n_eval_eps = tc.get("n_eval_episodes", 5)
         best_model_name = f"best_model_seed{seed}"
@@ -534,10 +535,15 @@ def train_single_seed(cfg: Dict[str, Any],
         # [OPT-C] Early stopping callback
         es_cfg = tc.get("early_stopping", {})
         if es_cfg.get("enabled", False):
+            # Auto-compute min_timesteps as 75% of total if not explicitly set
+            # or if set to "auto". Ensures Phase 3 gets sufficient training.
+            es_min_ts = es_cfg.get("min_timesteps", None)
+            if es_min_ts is None or es_min_ts == "auto":
+                es_min_ts = int(total_timesteps * 0.75)
             es_cb = _EarlyStoppingCallback(
                 eval_callback=eval_cb,
                 patience=es_cfg.get("patience", 10),
-                min_timesteps=es_cfg.get("min_timesteps", 500000),
+                min_timesteps=es_min_ts,
                 min_improvement=es_cfg.get("min_improvement", 0.01),
             )
             callbacks.append(es_cb)
@@ -659,28 +665,38 @@ def _train_parallel(cfg: Dict[str, Any],
                     n_seeds: int) -> Tuple[Path, List[Tuple[int, str, float]]]:
     """[OPT-A] Parallel multi-seed training via multiprocessing.
 
-    Each seed runs in a separate process. macOS spawn mode ensures
-    MPS safety. Memory: ~150MB/process × n_seeds.
+    Each seed runs in a separate process with batch scheduling when
+    max_parallel < n_seeds. macOS spawn mode ensures MPS safety.
+    Memory: ~150MB/process × max_parallel.
     [Henderson AAAI 2018] multi-seed reproducibility.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     max_parallel = cfg.get("training", {}).get("max_parallel", n_seeds)
-    result_queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
 
-    processes = []
-    for seed_idx in range(min(n_seeds, max_parallel)):
-        p = mp.Process(
-            target=_seed_worker,
-            args=(seed_idx, cfg, users_csv, output_dir, result_queue))
-        p.start()
-        processes.append(p)
-
+    remaining = list(range(n_seeds))
+    active: List[mp.Process] = []
     results: List[Tuple[int, str, float]] = []
-    for _ in range(n_seeds):
-        results.append(result_queue.get())
-    for p in processes:
+
+    while remaining or active:
+        # Launch new processes up to max_parallel
+        while remaining and len(active) < max_parallel:
+            seed_idx = remaining.pop(0)
+            p = mp.Process(
+                target=_seed_worker,
+                args=(seed_idx, cfg, users_csv, output_dir, result_queue))
+            p.start()
+            active.append(p)
+        # Collect one result (blocks until any seed finishes)
+        if active:
+            result = result_queue.get()
+            results.append(result)
+            active = [p for p in active if p.is_alive()]
+
+    # Ensure all processes are fully joined
+    for p in active:
         p.join()
 
     return out, results
@@ -739,6 +755,14 @@ def main() -> None:
     parser.add_argument("--output", default="outputs")
     parser.add_argument("--seeds", type=int, default=None,
                         help="Override n_seeds from config")
+    parser.add_argument("--timesteps", type=int, default=None,
+                        help="Override total_timesteps (recommend: 1000000)")
+    parser.add_argument("--buffer-size", type=int, default=None,
+                        help="Override buffer_size (recommend: 200000)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Override batch_size (recommend: 512)")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Override learning_rate (recommend: 0.0003)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -751,8 +775,17 @@ def main() -> None:
         logger.warning("SB3 NOT available: %s", _SB3_IMPORT_ERROR)
 
     cfg = load_config(args.config, override_path=args.override)
+    tc = cfg.setdefault("training", {})
     if args.seeds is not None:
-        cfg.setdefault("training", {})["n_seeds"] = args.seeds
+        tc["n_seeds"] = args.seeds
+    if args.timesteps is not None:
+        tc["total_timesteps"] = args.timesteps
+    if args.buffer_size is not None:
+        tc["buffer_size"] = args.buffer_size
+    if args.batch_size is not None:
+        tc["batch_size"] = args.batch_size
+    if args.lr is not None:
+        tc["learning_rate"] = args.lr
     users_csv = args.users if Path(args.users).exists() else None
     train(cfg, users_csv=users_csv, output_dir=args.output)
 

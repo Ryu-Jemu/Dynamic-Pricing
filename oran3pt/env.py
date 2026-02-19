@@ -1,7 +1,7 @@
 """
 O-RAN 1-Cell · 3-Part Tariff · 2 Slices · Constrained MDP  (§§3–11)
 
-REVISION 10 — Changes from v9:
+REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
   [EP1] 1-Cycle Continuous Episode Design      [Pardo ICML 2018; Wan arXiv 2025]
         - episode_cycles 24→1, episode_mode="continuous"
         - truncated=True (not terminated) at cycle boundary

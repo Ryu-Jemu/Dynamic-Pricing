@@ -1152,7 +1152,9 @@ class TestTrainingOptimization:
         assert "min_timesteps" in es, "Missing min_timesteps key"
         assert "min_improvement" in es, "Missing min_improvement key"
         assert es["patience"] > 0
-        assert es["min_timesteps"] > 0
+        # min_timesteps can be "auto" (computed as 75% of total at runtime)
+        min_ts = es["min_timesteps"]
+        assert min_ts == "auto" or min_ts > 0
         assert 0 < es["min_improvement"] < 1.0
 
     def test_T18_3_parallel_seeds_config(self, cfg):
@@ -1303,13 +1305,17 @@ class TestArchitectureReview:
         assert list(df.columns) == ["a", "b"]
 
     def test_T20_6_early_stopping_min_timesteps(self, cfg):
-        """[ME-5] min_timesteps >= 60% of total_timesteps."""
+        """[ME-5] min_timesteps >= 60% of total_timesteps (or 'auto')."""
         tc = cfg.get("training", {})
         total = tc.get("total_timesteps", 100000)
         es = tc.get("early_stopping", {})
         min_ts = es.get("min_timesteps", 0)
-        assert min_ts >= total * 0.60, \
-            f"min_timesteps {min_ts} should be >= {total * 0.60}"
+        if min_ts == "auto":
+            # "auto" computes as 75% at runtime, which is >= 60%
+            pass
+        else:
+            assert min_ts >= total * 0.60, \
+                f"min_timesteps {min_ts} should be >= {total * 0.60}"
 
     def test_T20_7_gen_users_vectorized_output(self, cfg):
         """[HI-2] Vectorized gen_users produces correct schema."""
@@ -1413,14 +1419,18 @@ class TestV11Improvements:
             f"Pop bonus should be negative at 30% active, got {info['pop_bonus']}"
 
     def test_T21_7_early_stopping_75pct(self, cfg):
-        """[V11-6] min_timesteps >= 75% of total_timesteps.
+        """[V11-6] min_timesteps >= 75% of total_timesteps (or 'auto').
         [Prechelt 2002; Henderson AAAI 2018]"""
         tc = cfg.get("training", {})
         total = tc.get("total_timesteps", 100000)
         es = tc.get("early_stopping", {})
         min_ts = es.get("min_timesteps", 0)
-        assert min_ts >= total * 0.75, \
-            f"min_timesteps {min_ts} should be >= {total * 0.75}"
+        if min_ts == "auto":
+            # "auto" computes as 75% at runtime
+            pass
+        else:
+            assert min_ts >= total * 0.75, \
+                f"min_timesteps {min_ts} should be >= {total * 0.75}"
 
     def test_T21_8_rho_U_smoothing_moderate(self, cfg):
         """[I-3a] rho_U smoothing weight ~0.05 for C_E stability.
