@@ -31,6 +31,7 @@ dist/
 # Experiment outputs
 outputs/
 outputs_light/
+outputs_test/
 *.csv
 
 # IDE
