@@ -88,25 +88,25 @@ def generate_users(cfg: Dict[str, Any], seed: int = 42) -> pd.DataFrame:
         outside = np.zeros(N)
         loyalty = np.zeros(N)
 
-        # Vectorized: build lookup arrays per segment×slice
-        for i in range(N):
-            sl_key = "urllc" if slices[i] == "URLLC" else "embb"
-            seg_key = segments[i]
+        # [FIX-S3] Vectorized WTP sampling per slice×segment batch
+        # [Nevo et al. 2016; Bolton 2003; Deaton 1980; Train 2009; Koszegi 2006]
+        for sl_key, sl_label in [("urllc", "URLLC"), ("embb", "eMBB")]:
+            for seg_key in seg_names:
+                mask = (slices == sl_label) & (segments == seg_key)
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                dp = wtp_cfg[sl_key][seg_key]
+                wtp_base[mask] = rng.lognormal(
+                    dp["mu_base"], dp["sigma_base"], n)
+                wtp_total[mask] = rng.lognormal(
+                    dp["mu_total"], dp["sigma_total"], n)
 
-            # LogNormal WTP sampling [Nevo et al. 2016]
-            dist_params = wtp_cfg[sl_key][seg_key]
-            wtp_base[i] = rng.lognormal(
-                dist_params["mu_base"], dist_params["sigma_base"])
-            wtp_total[i] = rng.lognormal(
-                dist_params["mu_total"], dist_params["sigma_total"])
-
-            # Segment-specific behavioral parameters
-            # [Bolton 2003; Deaton 1980; Train 2009; Koszegi 2006]
-            seg_params = wtp_cfg["segments"][seg_key]
-            wtp_decay[i] = rng.uniform(*seg_params["wtp_decay_rate"])
-            income[i] = rng.uniform(*seg_params["income_proxy"])
-            outside[i] = rng.uniform(*seg_params["outside_option"])
-            loyalty[i] = rng.uniform(*seg_params["loyalty_inertia"])
+                sp = wtp_cfg["segments"][seg_key]
+                wtp_decay[mask] = rng.uniform(*sp["wtp_decay_rate"], n)
+                income[mask] = rng.uniform(*sp["income_proxy"], n)
+                outside[mask] = rng.uniform(*sp["outside_option"], n)
+                loyalty[mask] = rng.uniform(*sp["loyalty_inertia"], n)
 
         # Consistency constraint: wtp_total >= wtp_base * 1.05
         wtp_total = np.maximum(wtp_total, wtp_base * 1.05)

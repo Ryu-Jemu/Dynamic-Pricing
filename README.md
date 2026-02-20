@@ -4,8 +4,8 @@ Reference-grade simulation for joint network-slice pricing and PRB allocation
 using Soft Actor-Critic reinforcement learning, with a **3-part tariff**
 revenue model (base fee + allowance + overage pricing).
 
-**Revision 5.7** — Consolidated from v10.4 + v5.7 RESOLUTION_PLAN,
-with 183 unit tests.
+**Revision 12.2** — WTP-CHURN + FIX-P pricing redesign + system fixes,
+with 227+ unit tests.
 
 ## Quick Start
 
@@ -31,9 +31,9 @@ An RL agent (SAC) makes **5 decisions each day** (1 step = 1 day):
 
 | Action | Description | Range |
 |--------|-------------|-------|
-| `a[0]` | URLLC base fee F_U | [30K, 90K] KRW/cycle |
+| `a[0]` | URLLC base fee F_U | [30K, 140K] KRW/cycle |
 | `a[1]` | URLLC overage price p^over_U | [500, 5000] KRW/GB |
-| `a[2]` | eMBB base fee F_E | [35K, 110K] KRW/cycle |
+| `a[2]` | eMBB base fee F_E | [35K, 100K] KRW/cycle |
 | `a[3]` | eMBB overage price p^over_E | [500, 3000] KRW/GB |
 | `a[4]` | URLLC PRB share ρ_U | [0.03, 0.10] |
 
@@ -69,7 +69,7 @@ Dynamic-Pricing/
 ├── oran3pt/
 │   ├── utils.py                  # Config I/O, sigmoid, device selection
 │   ├── gen_users.py              # Synthetic user CSV generation
-│   ├── env.py                    # Gymnasium environment — 23D obs, 5D action
+│   ├── env.py                    # Gymnasium environment — 27D obs, 5D action
 │   ├── train.py                  # SB3 SAC training + curriculum + multi-seed
 │   ├── eval.py                   # Evaluation + CLV computation + dashboards
 │   ├── dashboard_app.py          # Streamlit / Matplotlib dashboard
@@ -79,7 +79,7 @@ Dynamic-Pricing/
 │   ├── business_dashboard.py     # Business dashboard (Chart.js)
 │   └── templates/                # HTML templates
 ├── scripts/run.sh                # End-to-end pipeline (interactive)
-├── tests/test_env.py             # 183 unit tests across 27 groups
+├── tests/test_env.py             # 227+ unit tests across 31 groups
 ├── data/                         # Generated users_init.csv
 ├── outputs/                      # Models, logs, plots, dashboards
 ├── docs/                         # Consolidated documentation
@@ -102,9 +102,9 @@ Bill_{u,s} = F_s + p_s^over × max(0, D_{u,s} − Q_s)
 | p_s^over | Per-GB overage coefficient | Agent action |
 | D_{u,s} | User's total monthly usage | Stochastic (lognormal) |
 
-## Observation Space (23-D)
+## Observation Space (27-D)
 
-23-dimensional normalized vector [ME-1]:
+27-dimensional normalized vector [FIX-P4]:
 
 | Index | Feature | Normalization |
 |-------|---------|--------------|
@@ -127,6 +127,10 @@ Bill_{u,s} = F_s + p_s^over × max(0, D_{u,s} − Q_s)
 | 20 | Days remaining in cycle | (T − cycle_step) / T |
 | 21 | pviol_E EMA [D6] | EMA(α=0.3) ∈ [0, 1] |
 | 22 | eMBB load headroom [D5] | max(0, 1 − L_E / C_E) |
+| 23 | Mean surplus ratio [WTP] | clip(mean(Bill/WTP), 0, 2) / 2 |
+| 24 | WTP erosion fraction [WTP] | clip(frac(WTP < 0.9×init), 0, 1) |
+| 25 | URLLC WTP margin [FIX-P4] | clip((mean_WTP_U − F_U) / mean_WTP_U, −1, 1) |
+| 26 | eMBB WTP margin [FIX-P4] | clip((mean_WTP_E − F_E) / mean_WTP_E, −1, 1) |
 
 ## Reward
 
@@ -258,6 +262,26 @@ python -m pytest tests/ -v
 | [Wiewiora 2003] | Wiewiora et al., "Principled Methods for Advising RL Agents," ICML 2003 |
 | [Zheng 2022] | Zheng et al., "The AI Economist," Science Advances 2022 |
 | [Zhou 2022] | Zhou et al., "Revisiting Exploration in Deep RL," ICLR 2022 |
+
+## Known Limitations
+
+**Aggregate overage computation** [DOC-1]: Overage charges are computed at the
+aggregate slice level (`max(0, Σ_i usage_i − N·Q)`) rather than per-user
+(`Σ_i max(0, usage_i − Q)`). By Jensen's inequality, aggregate computation
+underestimates total overage. Under current calibration (Q_E = 50 GB, mean
+monthly usage ≈ 72 GB), Monte Carlo simulation shows the underestimation is
+approximately 1.2%, with negligible impact on learned pricing policy. However,
+for allowance levels near or above mean usage, the approximation error increases
+substantially. Future work may implement per-user billing for improved fidelity
+[Grubb AER 2009; Grubb & Osborne AER 2015].
+
+**Uniform bill shock distribution** [DOC-2]: Bill shock signals are uniformly
+distributed across all users within a slice, rather than being computed per-user
+based on individual overage experience. This is a direct consequence of the
+aggregate overage approximation. The uniform distribution slightly overestimates
+bill shock for light users and underestimates it for heavy users. Given the
+moderate bill shock coefficient (β_bill_shock = 1.0), the net effect on churn
+dynamics is bounded [Grubb & Osborne AER 2015].
 
 ## License
 

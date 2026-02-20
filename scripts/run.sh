@@ -162,27 +162,53 @@ fi
 if [ -n "${BUFFER_SIZE:-}" ]; then
     TRAIN_ARGS="$TRAIN_ARGS --buffer-size $BUFFER_SIZE"
 fi
-python -m oran3pt.train $TRAIN_ARGS
+TRAIN_OK=true
+python -m oran3pt.train $TRAIN_ARGS || {
+    echo "WARNING: Training encountered an error (continuing to evaluation)"
+    TRAIN_OK=false
+}
 echo ""
 
 # ── Step 4: Evaluate ──
 echo "===== Step 4: Evaluation (repeats=$EVAL_REPEATS) ====="
 MODEL_PATH="outputs/best_model.zip"
+EVAL_OK=true
 if [ -f "$MODEL_PATH" ]; then
     echo "  Found trained model: $MODEL_PATH"
     python -m oran3pt.eval \
         --config config/default.yaml \
         --users data/users_init.csv \
         --model "$MODEL_PATH" \
-        --repeats "$EVAL_REPEATS"
+        --repeats "$EVAL_REPEATS" || {
+        echo "WARNING: Evaluation encountered an error"
+        EVAL_OK=false
+    }
 else
     echo "  No trained model found — evaluating random baseline"
     python -m oran3pt.eval \
         --config config/default.yaml \
         --users data/users_init.csv \
-        --repeats "$EVAL_REPEATS"
+        --repeats "$EVAL_REPEATS" || {
+        echo "WARNING: Evaluation encountered an error"
+        EVAL_OK=false
+    }
 fi
 echo ""
+
+# ── Step 5: Fallback dashboard generation ──
+# If training produced CSVs but eval didn't generate dashboards,
+# generate them now from whatever data is available.
+if [ ! -f "outputs/training_convergence_dashboard.html" ] && \
+   [ -f "outputs/train_log_seed0.csv" ]; then
+    echo "===== Step 5: Fallback Dashboard Generation ====="
+    python -c "
+from oran3pt.eval import generate_dashboards
+from oran3pt.utils import load_config
+cfg = load_config('config/default.yaml')
+generate_dashboards(cfg, output_dir='outputs', config_path='config/default.yaml')
+" || echo "WARNING: Fallback dashboard generation failed"
+    echo ""
+fi
 
 # ── Summary ──
 echo "═══════════════════════════════════════════════"

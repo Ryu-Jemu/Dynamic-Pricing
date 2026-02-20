@@ -60,7 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from oran3pt.utils import load_config, sigmoid, fit_lognormal_quantiles
 from oran3pt.env import OranSlicingPricingEnv
 
-OBS_DIM = 25  # [WTP-CHURN] 23→25; +surplus_ratio, +erosion_frac
+OBS_DIM = 27  # [FIX-P4] 25→27; +URLLC WTP margin, +eMBB WTP margin
 
 
 @pytest.fixture
@@ -1490,18 +1490,21 @@ class TestPR1SliceSpecificPricing:
         assert np.isfinite(info1["n_churn"])
         assert np.isfinite(info2["n_churn"])
 
-    def test_T22_2_psig_bounded_01(self, cfg):
-        """Per-slice P_sig should be bounded by [0, 1] at action extremes."""
+    def test_T22_2_psig_no_nan_at_extremes(self, cfg):
+        """[FIX-P2] P_sig should be finite at action extremes.
+        WTP-based P_sig may exceed 1.0 (intended); check no NaN/Inf."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         env.reset(seed=42)
-        # At maximum actions: F_U/F_U_max=1.0, F_E/F_E_max=1.0
         max_action = np.ones(5, dtype=np.float32)
-        env.step(max_action)
-        # At minimum actions: F_U/F_U_max > 0, F_E/F_E_max > 0
+        obs1, r1, _, _, info1 = env.step(max_action)
         min_action = -np.ones(5, dtype=np.float32)
-        env.step(min_action)
-        # Check P_sig values indirectly via env (no NaN/crash)
-        assert env._use_per_slice_psig, "Per-slice P_sig should be enabled"
+        obs2, r2, _, _, info2 = env.step(min_action)
+        assert np.all(np.isfinite(obs1))
+        assert np.all(np.isfinite(obs2))
+        assert np.isfinite(r1) and np.isfinite(r2)
+        assert (env._use_per_slice_psig
+                or env._use_wtp_price_signal), \
+            "Per-slice or WTP P_sig should be enabled"
 
     def test_T22_3_embb_churn_responds_to_F_E(self, cfg):
         """eMBB churn should increase with F_E."""
@@ -2506,16 +2509,22 @@ class TestWTPRefConfig:
         assert wtp.get("beta_ref_join", 0) > 0, "beta_ref_join should be positive"
         assert wtp.get("alpha_ref", 0) > 0, "alpha_ref should be positive"
 
-    def test_T28_2_ref_price_init_midpoint(self, env):
-        """Reference prices initialize to action range midpoint."""
+    def test_T28_2_ref_price_init(self, env):
+        """[FIX-P3] Reference prices initialize to configured values.
+        May use WTP-based ref or action midpoint."""
         env.reset(seed=42)
-        acfg = env.cfg["action"]
-        expected_U = (acfg["F_U_min"] + acfg["F_U_max"]) / 2.0
-        expected_E = (acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
+        wtp_cfg = env.cfg.get("wtp_reference", {})
+        if wtp_cfg.get("use_wtp_ref", False):
+            expected_U = wtp_cfg["F_ref_base_U"]
+            expected_E = wtp_cfg["F_ref_base_E"]
+        else:
+            acfg = env.cfg["action"]
+            expected_U = (acfg["F_U_min"] + acfg["F_U_max"]) / 2.0
+            expected_E = (acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
         assert abs(env._ref_F_U - expected_U) < 1.0, \
-            f"ref_F_U {env._ref_F_U} != midpoint {expected_U}"
+            f"ref_F_U {env._ref_F_U} != expected {expected_U}"
         assert abs(env._ref_F_E - expected_E) < 1.0, \
-            f"ref_F_E {env._ref_F_E} != midpoint {expected_E}"
+            f"ref_F_E {env._ref_F_E} != expected {expected_E}"
 
 
 class TestWTPRefDynamics:
@@ -3055,6 +3064,145 @@ class TestT30DashboardSeed:
                             "assert should have been replaced with error handling")
             except Exception:
                 pass  # pandas EmptyDataError or similar is acceptable
+
+
+# =====================================================================
+# T31  [FIX-P] Pricing mechanism redesign
+# =====================================================================
+class TestFIXP:
+    """[FIX-P1~P4] Pricing redesign: action bounds, WTP price signal,
+    WTP reference price, observation extension."""
+
+    def test_T31_1_action_bounds_urllc(self, cfg):
+        """[FIX-P1] F_U_max should be 140K for URLLC WTP headroom."""
+        assert cfg["action"]["F_U_max"] == 140000.0, \
+            "F_U_max should be 140K [FIX-P1]"
+
+    def test_T31_2_action_bounds_embb(self, cfg):
+        """[FIX-P1] F_E_max should be 100K for eMBB WTP alignment."""
+        assert cfg["action"]["F_E_max"] == 100000.0, \
+            "F_E_max should be 100K [FIX-P1]"
+
+    def test_T31_3_wtp_price_signal_config(self, cfg):
+        """[FIX-P2] use_wtp_price_signal should be enabled."""
+        assert cfg["market"].get("use_wtp_price_signal", False), \
+            "use_wtp_price_signal should be true [FIX-P2]"
+
+    def test_T31_4_wtp_price_signal_env(self, cfg):
+        """[FIX-P2] env should use WTP-based price signal when configured."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        assert env._use_wtp_price_signal, \
+            "env._use_wtp_price_signal should be True"
+
+    def test_T31_5_wtp_ref_base_config(self, cfg):
+        """[FIX-P3] WTP-based reference prices should be configured."""
+        wtp_cfg = cfg.get("wtp_reference", {})
+        assert wtp_cfg.get("use_wtp_ref", False), \
+            "use_wtp_ref should be true [FIX-P3]"
+        assert abs(wtp_cfg["F_ref_base_U"] - 97852.0) < 1.0
+        assert abs(wtp_cfg["F_ref_base_E"] - 53991.0) < 1.0
+
+    def test_T31_6_wtp_ref_base_env(self, cfg):
+        """[FIX-P3] env ref base should use WTP values, not action midpoint."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        # Should NOT be action midpoint ((30K+140K)/2 = 85K)
+        assert abs(env._wtp_F_ref_base_U - 97852.0) < 1.0, \
+            f"ref_base_U {env._wtp_F_ref_base_U} should be 97852"
+        assert abs(env._wtp_F_ref_base_E - 53991.0) < 1.0, \
+            f"ref_base_E {env._wtp_F_ref_base_E} should be 53991"
+
+    def test_T31_7_obs_27d(self, cfg):
+        """[FIX-P4] Observation space should be 27-D."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (27,), f"Expected 27D, got {obs.shape}"
+        assert env.observation_space.shape == (27,)
+
+    def test_T31_8_obs_wtp_margin_range(self, cfg):
+        """[FIX-P4] obs[25], obs[26] WTP margins should be in [-1, 1]."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.reset(seed=42)
+        for _ in range(5):
+            action = env.action_space.sample()
+            obs, _, _, _, _ = env.step(action)
+            assert -1.0 - 1e-6 <= obs[25] <= 1.0 + 1e-6, \
+                f"obs[25] WTP margin URLLC out of range: {obs[25]}"
+            assert -1.0 - 1e-6 <= obs[26] <= 1.0 + 1e-6, \
+                f"obs[26] WTP margin eMBB out of range: {obs[26]}"
+
+    def test_T31_9_numerical_stability_30steps(self, cfg):
+        """[FIX-P1~P4] 30 steps without NaN/Inf after all pricing changes."""
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        env.set_curriculum_phase(2)
+        obs, _ = env.reset(seed=42)
+        for _ in range(30):
+            action = env.action_space.sample()
+            obs, reward, _, _, info = env.step(action)
+            assert np.all(np.isfinite(obs)), "NaN/Inf in obs"
+            assert np.isfinite(reward), "NaN/Inf in reward"
+            assert info["N_active"] >= 0, "Negative active users"
+
+    def test_T31_10_backward_compat_25d(self):
+        """[FIX-P4] Backward compat: 25D config should still work."""
+        import copy
+        cfg = load_config(
+            str(Path(__file__).resolve().parent.parent
+                / "config" / "default.yaml"))
+        cfg = copy.deepcopy(cfg)
+        cfg["observation"]["dim"] = 25
+        env = OranSlicingPricingEnv(cfg, seed=42)
+        obs, _ = env.reset(seed=42)
+        assert obs.shape == (25,), f"Expected 25D, got {obs.shape}"
+
+
+# ── T32: System Fix Plan (FIX-S1, FIX-S2, FIX-S3) ─────────────────
+class TestSystemFixes:
+    """[FIX-S] System-level fixes: delta normalization, dead code, vectorization."""
+
+    @pytest.fixture(autouse=True)
+    def _cfg(self):
+        self.cfg = load_config(
+            str(Path(__file__).resolve().parent.parent
+                / "config" / "default.yaml"))
+
+    def test_T32_1_wtp_ref_delta_uses_ref_not_fmax(self):
+        """[FIX-S1] WTP-REF delta normalized by ref_F, not F_max."""
+        env = OranSlicingPricingEnv(self.cfg, seed=42)
+        env.reset(seed=42)
+        # ref_F should be initialized and positive
+        assert env._ref_F_U > 0, f"ref_F_U={env._ref_F_U}"
+        assert env._ref_F_E > 0, f"ref_F_E={env._ref_F_E}"
+        # ref_F should differ from F_max (midpoint or WTP-based)
+        assert env._ref_F_U != env._F_U_max, \
+            "ref_F_U should not equal F_U_max"
+
+    def test_T32_2_adapt_rate_default_removed(self):
+        """[FIX-S2] adapt_rate_default is no longer stored in env."""
+        env = OranSlicingPricingEnv(self.cfg, seed=42)
+        env.reset(seed=42)
+        assert not hasattr(env, "_wtp_adapt_default"), \
+            "_wtp_adapt_default should be removed"
+
+    def test_T32_3_wtp_vectorized_output_schema(self):
+        """[FIX-S3] Vectorized WTP produces correct schema and no NaN."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(self.cfg, seed=42)
+        wtp_cols = ["wtp_base_fee", "wtp_total_bill", "wtp_decay_rate",
+                    "income_proxy", "outside_option", "loyalty_inertia"]
+        for col in wtp_cols:
+            assert col in df.columns, f"Missing column: {col}"
+            assert not df[col].isna().any(), f"{col} has NaN"
+
+    def test_T32_4_wtp_vectorized_all_groups_filled(self):
+        """[FIX-S3] All slice×segment groups have non-zero WTP values."""
+        from oran3pt.gen_users import generate_users
+        df = generate_users(self.cfg, seed=42)
+        for sl in ["URLLC", "eMBB"]:
+            mask = df["slice"] == sl
+            if mask.sum() > 0:
+                assert (df.loc[mask, "wtp_base_fee"] > 0).all(), \
+                    f"wtp_base_fee should be positive for {sl}"
 
 
 if __name__ == "__main__":

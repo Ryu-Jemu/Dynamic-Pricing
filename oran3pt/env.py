@@ -40,7 +40,7 @@ REVISION 10.4 (v10.4) — Consolidated from v10 + v5.2/v5.3/v5.5/v5.6 hotfixes:
 Gymnasium-compatible environment for SB3 SAC.
 
 Formal Problem Structure — Constrained MDP (CMDP) [Altman 1999]:
-  State:   s_t ∈ ℝ²³  (normalised observation vector)
+  State:   s_t ∈ ℝ²⁷  (normalised observation vector)
   Action:  a_t ∈ ℝ⁵   [F_U, p_U^over, F_E, p_E^over, ρ_U]
   Reward:  r(s,a) = sign(π)·log1p(|π|/s) − penalties + bonuses
   Constraint:  E[pviol_E] ≤ ε_QoS  (Lagrangian dual ascent [M6])
@@ -55,12 +55,14 @@ Action (5-D continuous, §4):
   [D2] Pricing dims (a[0:4]) update only at cycle boundaries when
        hierarchical_actions.enabled=true. ρ_U (a[4]) updates every step.
 
-Observation (25-D, §3.2):
+Observation (27-D, §3.2):
   Indices 0–22: see ``_build_obs`` for layout
   [D6] 21: pviol_E_ema (EMA α=0.3 trend signal)
   [D5] 22: load_headroom_E
   [WTP-CHURN] 23: surplus_ratio (mean Bill/WTP, normalized [0,1])
   [WTP-CHURN] 24: erosion_frac (fraction with WTP < 90% initial)
+  [FIX-P4] 25: URLLC WTP margin (mean_WTP_U - F_U) / mean_WTP_U
+  [FIX-P4] 26: eMBB WTP margin  (mean_WTP_E - F_E) / mean_WTP_E
 
 Revenue per step (§5.2 — online accrual):
   BaseRev_t = (F_U·N_U + F_E·N_E) / T
@@ -163,9 +165,9 @@ class OranSlicingPricingEnv(gym.Env):
         ], dtype=np.float64)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(5,), dtype=np.float32)
 
-        # Observation (§3.2)  [WTP-CHURN] 25-D
+        # Observation (§3.2)  [FIX-P4] 27-D
         obs_cfg = cfg.get("observation", {})
-        self._obs_dim: int = obs_cfg.get("dim", 25)
+        self._obs_dim: int = obs_cfg.get("dim", 27)
         self._obs_lo = obs_cfg.get("clip_min", -10.0)
         self._obs_hi = obs_cfg.get("clip_max", 10.0)
         self.observation_space = spaces.Box(
@@ -232,6 +234,10 @@ class OranSlicingPricingEnv(gym.Env):
         # [PR-4] Overage price → join dampening [Nevo et al. Econometrica 2016]
         self._beta_p_over_join: float = mc.get("beta_p_over_join", 0.0)
 
+        # [FIX-P2] WTP-based price signal  [Koszegi & Rabin QJE 2006]
+        self._use_wtp_price_signal: bool = mc.get(
+            "use_wtp_price_signal", False)
+
         # [WTP-REF] Reference-Dependent WTP (§20a)
         # [Koszegi & Rabin QJE 2006; Kahneman & Tversky Econometrica 1979]
         wtp_cfg = cfg.get("wtp_reference", {})
@@ -244,10 +250,20 @@ class OranSlicingPricingEnv(gym.Env):
             "base_fee_elasticity_enabled", False)
         self._wtp_eps_F_U: float = wtp_cfg.get("epsilon_F_U", 0.10)
         self._wtp_eps_F_E: float = wtp_cfg.get("epsilon_F_E", 0.20)
-        self._wtp_F_ref_base_U: float = (
-            acfg["F_U_min"] + acfg["F_U_max"]) / 2.0
-        self._wtp_F_ref_base_E: float = (
-            acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
+        # [FIX-P3] WTP 분포 기반 참조가격 or action midpoint fallback
+        # [Koszegi & Rabin QJE 2006; Heidhues & Koszegi AER 2014]
+        if wtp_cfg.get("use_wtp_ref", False):
+            self._wtp_F_ref_base_U: float = wtp_cfg.get(
+                "F_ref_base_U",
+                (acfg["F_U_min"] + acfg["F_U_max"]) / 2.0)
+            self._wtp_F_ref_base_E: float = wtp_cfg.get(
+                "F_ref_base_E",
+                (acfg["F_E_min"] + acfg["F_E_max"]) / 2.0)
+        else:
+            self._wtp_F_ref_base_U: float = (
+                acfg["F_U_min"] + acfg["F_U_max"]) / 2.0
+            self._wtp_F_ref_base_E: float = (
+                acfg["F_E_min"] + acfg["F_E_max"]) / 2.0
         self._wtp_floor_F: float = wtp_cfg.get("floor_F", 0.7)
 
         # ── [WTP-CHURN] WTP 기반 확률적 이탈 (§20b) ─────────────────────
@@ -258,8 +274,7 @@ class OranSlicingPricingEnv(gym.Env):
         self._wtp_floor_multiplier: float = wtp_m.get(
             "wtp_floor_multiplier", 1.5)
         wtp_dyn = wtp_m.get("dynamics", {})
-        self._wtp_adapt_default: float = wtp_dyn.get(
-            "adapt_rate_default", 0.85)
+        # [FIX-S2] adapt_rate_default 제거 → per-user loyalty_inertia 사용
         self._wtp_erosion_base: float = wtp_dyn.get("erosion_base", 0.10)
         # Actual enablement decided in _load_users() after CSV column check
         self._wtp_model_available: bool = False
@@ -993,10 +1008,25 @@ class OranSlicingPricingEnv(gym.Env):
         N_act = int(self._active_mask.sum())
         N_inact = self.N_total - N_act
 
-        # ── [PR-1] Slice-specific price signal ────────────────────────
-        # BEFORE: P_sig = (F_U + F_E) / (2 × price_norm)  → all users same
-        # AFTER:  P_sig_users[i] = F_s(i) / F_s_max       → per-slice
-        if self._use_per_slice_psig:
+        # ── [FIX-P2] WTP-based or per-slice price signal ─────────────
+        # [FIX-P2] P_sig = F_s / mean_WTP_s when WTP model enabled
+        # [Koszegi & Rabin QJE 2006; Bolton et al. JCR 2003]
+        # Fallback: [PR-1] F_s / F_s_max per-slice normalization
+        if self._use_wtp_price_signal and self._wtp_model_enabled:
+            # WTP-based price signal: F / mean(WTP_active_slice)
+            active_U = self._active_mask & (self._slice_is_U > 0.5)
+            active_E = self._active_mask & (self._slice_is_E > 0.5)
+            mean_wtp_U = (float(self._current_wtp[active_U].mean())
+                          if active_U.any() else self._F_U_max)
+            mean_wtp_E = (float(self._current_wtp[active_E].mean())
+                          if active_E.any() else self._F_E_max)
+            P_sig_users = np.where(
+                self._slice_is_U,
+                F_U / max(mean_wtp_U, 1.0),
+                F_E / max(mean_wtp_E, 1.0)
+            )
+        elif self._use_per_slice_psig:
+            # [PR-1] Per-slice: F_s / F_s_max
             P_sig_users = np.where(
                 self._slice_is_U,
                 F_U / self._F_U_max,      # URLLC: only see F_U
@@ -1048,8 +1078,10 @@ class OranSlicingPricingEnv(gym.Env):
         ref_churn_term = np.zeros(self.N_total, dtype=np.float64)
         ref_join_term = np.zeros(self.N_total, dtype=np.float64)
         if self._wtp_ref_enabled:
-            delta_F_U = (F_U - self._ref_F_U) / max(self._F_U_max, 1e-6)
-            delta_F_E = (F_E - self._ref_F_E) / max(self._F_E_max, 1e-6)
+            # [FIX-S1] ref_F 기반 정규화: F_max 변경에 무관한 일관된 신호
+            # [Koszegi & Rabin QJE 2006 §II.A: 참조점 대비 상대적 변화]
+            delta_F_U = (F_U - self._ref_F_U) / max(self._ref_F_U, 1e-6)
+            delta_F_E = (F_E - self._ref_F_E) / max(self._ref_F_E, 1e-6)
             lam = self._wtp_lambda_loss
             ref_U = lam * delta_F_U if delta_F_U > 0 else delta_F_U
             ref_E = lam * delta_F_E if delta_F_E > 0 else delta_F_E
@@ -1316,5 +1348,27 @@ class OranSlicingPricingEnv(gym.Env):
             else:
                 obs[23] = 0.0
                 obs[24] = 0.0
+
+        # ── [FIX-P4] Per-slice WTP margin observations ─────────────────
+        # obs[25]: URLLC WTP margin = (mean_WTP_U - F_U) / mean_WTP_U
+        # obs[26]: eMBB WTP margin  = (mean_WTP_E - F_E) / mean_WTP_E
+        # [Dulac-Arnold JMLR 2021 §4.1; Sutton & Barto 2018 §3.1]
+        if self._obs_dim >= 27:
+            if self._wtp_model_enabled:
+                active_U_mask = (self._slice_is_U > 0.5) & self._active_mask
+                active_E_mask = (self._slice_is_E > 0.5) & self._active_mask
+                mean_wtp_U = (float(self._current_wtp[active_U_mask].mean())
+                              if active_U_mask.any() else 1.0)
+                mean_wtp_E = (float(self._current_wtp[active_E_mask].mean())
+                              if active_E_mask.any() else 1.0)
+                obs[25] = float(np.clip(
+                    (mean_wtp_U - self._prev_action[0])
+                    / max(mean_wtp_U, 1.0), -1.0, 1.0))
+                obs[26] = float(np.clip(
+                    (mean_wtp_E - self._prev_action[2])
+                    / max(mean_wtp_E, 1.0), -1.0, 1.0))
+            else:
+                obs[25] = 0.0
+                obs[26] = 0.0
 
         return np.clip(obs, self._obs_lo, self._obs_hi)

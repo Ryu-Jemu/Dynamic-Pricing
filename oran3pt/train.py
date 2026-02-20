@@ -839,6 +839,19 @@ def train(cfg: Dict[str, Any],
     logger.info("[WP-2a] Best model: seed %d (reward=%.4f, pviol_E=%.4f, "
                "score=%.4f) -> %s",
                best_seed, best_reward, best_pviol, best_score, canonical)
+
+    # [DASH-2] Generate training-mode dashboards immediately after training.
+    # This ensures visualizations exist even if eval.py never runs (e.g. model
+    # save failure, pipeline interruption, eval crash).
+    # [Dulac-Arnold JMLR 2021 — post-training observability]
+    try:
+        from .eval import generate_dashboards
+        generate_dashboards(cfg, output_dir=output_dir,
+                            config_path=None)
+        logger.info("[DASH-2] Training dashboards generated in %s", output_dir)
+    except Exception as e:
+        logger.warning("[DASH-2] Training dashboard generation failed: %s", e)
+
     return canonical
 
 

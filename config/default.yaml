@@ -46,9 +46,11 @@ time:
 # [PR-BOUNDS] Korean 5G market calibration [SKT/KT 2024; ITU DDI 2023]
 action:
   F_U_min: 30000.0                # KT 슬림 4GB 30K [KT 2024]
-  F_U_max: 90000.0                # SKT 프라임 89K [SKT 2024]
+  F_U_max: 140000.0               # [FIX-P1] 90K→140K; URLLC balanced p90=137K, qos_sens p50=140K
+                                   # [Dulac-Arnold JMLR 2021 Challenge #6; Nokia URLLC SLA 130-150K]
   F_E_min: 35000.0                # [PR-BOUNDS] 40K→35K  [SKT 컴팩트 39K, 다이렉트 27K]
-  F_E_max: 110000.0               # [PR-BOUNDS] 150K→110K [SKT 프리미엄 109K; WTP P99]
+  F_E_max: 100000.0               # [FIX-P1] 110K→100K; eval 사용량 93K 기준 축소
+                                   # qos_sensitive p90=96K 포괄 [Dulac-Arnold JMLR 2021]
   p_over_U_min: 500.0
   p_over_U_max: 5000.0
   p_over_E_min: 500.0             # [PR-BOUNDS] 200→500 [Tirole 1988: marginal cost floor]
@@ -125,6 +127,7 @@ market:
   beta_q_join: 1.5
   beta_p_over_join: 0.3           # [PR-4] Overage price dampens joins [Nevo et al. 2016]
   mode: "stochastic"
+  use_wtp_price_signal: true       # [FIX-P2] WTP 기반 가격 신호 [Koszegi & Rabin QJE 2006; Bolton et al. JCR 2003]
   # price_norm: 120000.0          # [PR-3] REMOVED → replaced by per-slice normalization
 
 # ── §11  CLV ──
@@ -217,7 +220,8 @@ training:
 # [WTP-CHURN] 23D→25D: obs[23]=surplus_ratio, obs[24]=erosion_frac
 # [Dulac-Arnold JMLR 2021] — observation dimensionality for sample efficiency
 observation:
-  dim: 25                       # [WTP-CHURN] 23→25; +surplus_ratio, +erosion_frac
+  dim: 27                       # [FIX-P4] 25→27; +URLLC WTP margin, +eMBB WTP margin
+                                 # [Dulac-Arnold JMLR 2021 §4.1; Sutton & Barto 2018 §3.1]
   clip_min: -10.0
   clip_max: 10.0
 
@@ -296,6 +300,10 @@ wtp_reference:
   # 참조의존 가입 억제 (비가입자: 약한 참조 앵커)
   # [Train 2009: 잠재 가입자는 경험 가격이 아닌 사전 신념 기반]
   beta_ref_join: 0.5
+  # [FIX-P3] WTP 분포 가중 중위값 기반 참조가격 [Koszegi & Rabin QJE 2006; Heidhues & Koszegi AER 2014]
+  use_wtp_ref: true
+  F_ref_base_U: 97852.0           # URLLC WTP_base 가중 p50 (세그먼트 비율 반영)
+  F_ref_base_E: 53991.0           # eMBB WTP_base 가중 p50 (세그먼트 비율 반영)
   # 기본료 수요 탄력성 [Nevo et al. Econometrica 2016]
   base_fee_elasticity_enabled: true
   epsilon_F_U: 0.10              # URLLC: 미션 크리티컬, 비탄력적
@@ -315,7 +323,8 @@ wtp_model:
 
   # 동적 WTP 업데이트 파라미터
   dynamics:
-    adapt_rate_default: 0.85      # α: WTP 적응 관성 [Koszegi & Rabin QJE 2006 §III.A]
+    # [FIX-S2] adapt_rate_default 제거 → per-user loyalty_inertia로 대체됨
+    # [Koszegi & Rabin QJE 2006 §III.A: 개인별 참조점 적응]
     erosion_base: 0.10            # δ: Bill > WTP 시 추가 침식률 [Bolton et al. JCR 2003]
 
   # URLLC WTP 분포 (LogNormal 파라미터)
