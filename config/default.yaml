@@ -320,12 +320,15 @@ wtp_model:
   enabled: true
   gamma: 5.0                      # 이탈 민감도 스케일 [Train 2009 §3.5]
   wtp_floor_multiplier: 1.5       # WTP 하한 = switching_cost × 1.5 [Shy 2002]
+  structural_floor_ratio: 0.50    # [R3] 초기 WTP의 50% 하한 [Klemperer QJE 1987; Shy 2002]
 
   # 동적 WTP 업데이트 파라미터
   dynamics:
     # [FIX-S2] adapt_rate_default 제거 → per-user loyalty_inertia로 대체됨
     # [Koszegi & Rabin QJE 2006 §III.A: 개인별 참조점 적응]
     erosion_base: 0.10            # δ: Bill > WTP 시 추가 침식률 [Bolton et al. JCR 2003]
+    adapt_rate_down_offset: 0.10  # [R1] 가격 하락 시 α += offset [Popescu & Wu OR 2007]
+    adapt_rate_down_max: 0.97     # [R1] α_down 상한
 
   # URLLC WTP 분포 (LogNormal 파라미터)
   # p50 = exp(mu), 한국 B2B 요금 기준 [GSMA GST v6.0; Nokia 2024]
@@ -359,7 +362,21 @@ wtp_model:
       outside_option: [0.0, 0.15]     # 낮은 대안 (lock-in)
       loyalty_inertia: [0.80, 0.95]   # 높은 관성
 
-# ── §20c  Evaluation settings ──
+# ── §20c  [R4] Price change rate limit ──
+# 가격 급변 방지: action range의 15%/cycle 이내로 기본료 변동 제한
+# [den Boer & Keskin Mgmt Sci 2022; Fibich et al. OR 2003; Dalal NeurIPS 2018]
+price_rate_limit:
+  enabled: true
+  max_change_frac: 0.15           # action range의 15%/cycle
+
+# ── §20d  [R5] WTP erosion reward penalty ──
+# 에이전트에게 WTP 보존 인센티브 제공
+# [Ng et al. ICML 1999; Wiewiora et al. ICML 2003]
+wtp_erosion_penalty:
+  enabled: true
+  alpha: 0.5                      # r_base의 ~25% 수준 패널티 (mean r_base ≈ 0.5-0.7)
+
+# ── §20e  Evaluation settings ──
 eval:
   action_ema_alpha: 0.7          # [FIX-B1] Eval-time action EMA smoothing  [Dulac-Arnold JMLR 2021 §4.2]
 

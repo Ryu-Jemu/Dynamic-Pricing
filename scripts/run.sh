@@ -3,7 +3,7 @@
 # O-RAN 3-Part Tariff Pricing — End-to-End Pipeline (v5.7)
 #
 # Mode selection (no interactive input):
-#   ./scripts/run.sh light   — 경량 실행 (200K steps, 2 seeds, ~10분)
+#   ./scripts/run.sh light   — 경량 실행 (100K steps, 1 seeds, ~10분)
 #   ./scripts/run.sh full    — 전체 실행 (1M steps, 5 seeds, ~2시간)
 #
 # Steps:

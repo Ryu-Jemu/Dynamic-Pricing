@@ -273,9 +273,18 @@ class OranSlicingPricingEnv(gym.Env):
         self._wtp_gamma: float = wtp_m.get("gamma", 5.0)
         self._wtp_floor_multiplier: float = wtp_m.get(
             "wtp_floor_multiplier", 1.5)
+        # [R3] Structural floor ratio: WTP >= initial_WTP × ratio [Klemperer QJE 1987; Shy 2002]
+        self._wtp_structural_floor_ratio: float = wtp_m.get(
+            "structural_floor_ratio", 0.50)
         wtp_dyn = wtp_m.get("dynamics", {})
         # [FIX-S2] adapt_rate_default 제거 → per-user loyalty_inertia 사용
         self._wtp_erosion_base: float = wtp_dyn.get("erosion_base", 0.10)
+        # [R1] Asymmetric WTP adaptation: slower downward adjustment
+        # [Popescu & Wu OR 2007 Theorem 1; Kahneman & Tversky Econometrica 1979]
+        self._wtp_adapt_down_offset: float = wtp_dyn.get(
+            "adapt_rate_down_offset", 0.10)
+        self._wtp_adapt_down_max: float = wtp_dyn.get(
+            "adapt_rate_down_max", 0.97)
         # Actual enablement decided in _load_users() after CSV column check
         self._wtp_model_available: bool = False
         self._wtp_model_enabled: bool = False
@@ -349,6 +358,19 @@ class OranSlicingPricingEnv(gym.Env):
         self._sla_aw_threshold: float = sla_aw_cfg.get(
             "revenue_ratio_threshold", 0.05)
         self._sla_aw_scale: float = sla_aw_cfg.get("penalty_scale", 0.1)
+
+        # ── [R4] Price change rate limiter ───────────────────────────
+        # [den Boer & Keskin Mgmt Sci 2022; Fibich et al. OR 2003; Dalal NeurIPS 2018]
+        prl_cfg = cfg.get("price_rate_limit", {})
+        self._price_rate_limit_enabled: bool = prl_cfg.get("enabled", False)
+        self._price_rate_limit_frac: float = prl_cfg.get(
+            "max_change_frac", 0.15)
+
+        # ── [R5] WTP erosion reward penalty ─────────────────────────
+        # [Ng et al. ICML 1999; Wiewiora et al. ICML 2003]
+        wep_cfg = cfg.get("wtp_erosion_penalty", {})
+        self._wtp_erosion_penalty_enabled: bool = wep_cfg.get("enabled", False)
+        self._alpha_wtp_erosion: float = wep_cfg.get("alpha", 0.5)
 
         # ── [FIX-S4] Domain Randomization ─────────────────────────
         # Randomize initial active population count for robustness
@@ -448,9 +470,13 @@ class OranSlicingPricingEnv(gym.Env):
             self._wtp_model_available = True
             # Dynamic WTP state (starts from wtp_total_bill)
             self._current_wtp = self._wtp_total_bill.copy()
+            # [R2] Structural WTP: immutable churn decision baseline
+            # [Train 2009 §3.6; Koszegi & Rabin QJE 2006]
+            self._structural_wtp = self._wtp_total_bill.copy()
         else:
             self._wtp_model_available = False
             self._current_wtp = np.zeros(len(df), dtype=np.float64)
+            self._structural_wtp = np.zeros(len(df), dtype=np.float64)
 
         # Final enablement: config AND CSV both satisfied
         self._wtp_model_enabled = (
@@ -536,6 +562,7 @@ class OranSlicingPricingEnv(gym.Env):
             # [WTP-CHURN] Reset dynamic WTP to initial values
             if self._wtp_model_enabled:
                 self._current_wtp = self._wtp_total_bill.copy()
+                self._structural_wtp = self._wtp_total_bill.copy()  # [R2]
         # else: continuous mode — population, prev_action, pviol_E_ema,
         #       financial state, churn_rate_ema, ref prices, WTP all persist
 
@@ -652,6 +679,22 @@ class OranSlicingPricingEnv(gym.Env):
         # [O-RAN WG1 OAD §5.1.1; O-RAN WG2 AIML §4.2]
         a = self._map_action(raw_action)
         F_U, p_over_U, F_E, p_over_E, rho_U = a
+
+        # [R4] Price change rate limiter (base fees only, at cycle start)
+        # Prevents death spiral trigger from rapid price drops
+        # [den Boer & Keskin Mgmt Sci 2022; Fibich et al. OR 2003; Dalal NeurIPS 2018]
+        if self._price_rate_limit_enabled and self._is_cycle_start:
+            max_frac = self._price_rate_limit_frac
+            for i in [0, 2]:  # F_U (idx 0), F_E (idx 2) only
+                delta_max = max_frac * self._a_range[i]
+                a[i] = np.clip(
+                    a[i],
+                    self._prev_action[i] - delta_max,
+                    self._prev_action[i] + delta_max
+                )
+                # Re-clip to action bounds
+                a[i] = np.clip(a[i], self._a_lo[i], self._a_hi[i])
+            F_U, p_over_U, F_E, p_over_E, rho_U = a
 
         # [D2] Hierarchical: lock pricing at cycle start
         # (Non-RT RIC policy timescale: 30-day pricing, daily ρ_U)
@@ -800,6 +843,18 @@ class OranSlicingPricingEnv(gym.Env):
                 sla_awareness_penalty = self._sla_aw_scale * (
                     sla_ratio - self._sla_aw_threshold)
 
+        # [R5] WTP erosion penalty: incentivise WTP conservation
+        # [Ng et al. ICML 1999; Wiewiora et al. ICML 2003]
+        wtp_erosion_penalty = 0.0
+        if self._wtp_model_enabled and self._wtp_erosion_penalty_enabled:
+            active_initial = self._wtp_total_bill[self._active_mask]
+            active_current = self._current_wtp[self._active_mask]
+            if len(active_initial) > 0:
+                erosion_frac = 1.0 - (active_current.mean()
+                                      / max(active_initial.mean(), 1.0))
+                wtp_erosion_penalty = self._alpha_wtp_erosion * max(
+                    0.0, erosion_frac)
+
         lagrangian_penalty = 0.0
         if self._lagrangian_enabled and self._lagrangian_lambda > 0.0:
             lagrangian_penalty = self._lagrangian_lambda * max(
@@ -809,7 +864,8 @@ class OranSlicingPricingEnv(gym.Env):
         reward = self._compute_reward(
             profit, smooth_penalty, retention_penalty,
             pop_bonus, lagrangian_penalty,
-            capacity_penalty, sla_awareness_penalty)
+            capacity_penalty, sla_awareness_penalty,
+            wtp_erosion_penalty)
 
         # Store state for next step
         self._prev_action = np.array(
@@ -855,6 +911,7 @@ class OranSlicingPricingEnv(gym.Env):
             "lagrangian_penalty": lagrangian_penalty,
             "capacity_penalty": capacity_penalty,
             "sla_awareness_penalty": sla_awareness_penalty,
+            "wtp_erosion_penalty": wtp_erosion_penalty,   # [R5]
             "cycle_usage_U": self._cycle_usage_U,
             "cycle_usage_E": self._cycle_usage_E,
             "bill_shock_U": self._last_bill_shock_U,   # [WP-3c]
@@ -906,12 +963,22 @@ class OranSlicingPricingEnv(gym.Env):
             F_E + avg_over_E
         )
 
-        # (1) Reference point adaptation: α·WTP + (1-α)·Bill
-        alpha = self._loyalty_inertia  # per-user inertia
+        # (1) Reference point adaptation: asymmetric α
+        # [R1] Bill < WTP → slower WTP decrease (loss aversion for downward drift)
+        # [Popescu & Wu OR 2007 Theorem 1; Kahneman & Tversky Econometrica 1979]
+        bill_below_wtp = est_bills < self._current_wtp
+        alpha = np.where(
+            bill_below_wtp,
+            np.minimum(self._loyalty_inertia + self._wtp_adapt_down_offset,
+                       self._wtp_adapt_down_max),  # α_down: slower WTP decline
+            self._loyalty_inertia                    # α_up: normal adaptation
+        )
         adapted = alpha * self._current_wtp + (1.0 - alpha) * est_bills
 
-        # (2) Excess billing erosion
-        excess = np.maximum(0.0, est_bills - self._current_wtp)
+        # (2) Excess billing erosion — uses structural WTP as reference
+        # [R2] Structural WTP prevents eroded dynamic WTP from amplifying excess
+        # [Koszegi & Rabin QJE 2006; Bolton et al. JCR 2003]
+        excess = np.maximum(0.0, est_bills - self._structural_wtp)
         erosion = self._wtp_decay_rate * excess
 
         # (3) Income effect amplification: low income → faster erosion
@@ -921,8 +988,12 @@ class OranSlicingPricingEnv(gym.Env):
         # Update WTP
         self._current_wtp = adapted - erosion
 
-        # WTP floor: switching_cost × floor_multiplier × 10000 (KRW scale)
-        wtp_floor = self._swcost * self._wtp_floor_multiplier * 10000.0
+        # [R3] WTP floor: max(switching cost floor, structural floor)
+        # [Klemperer QJE 1987; Shy Int.J.Ind.Org 2002]
+        wtp_floor_switching = self._swcost * self._wtp_floor_multiplier * 10000.0
+        wtp_floor_structural = (
+            self._wtp_total_bill * self._wtp_structural_floor_ratio)
+        wtp_floor = np.maximum(wtp_floor_switching, wtp_floor_structural)
         self._current_wtp = np.maximum(self._current_wtp, wtp_floor)
 
     # ── Traffic ───────────────────────────────────────────────────────
@@ -1114,9 +1185,10 @@ class OranSlicingPricingEnv(gym.Env):
                 F_E + per_over_E
             )
 
-            # Bill/WTP ratio (surplus ratio)
-            safe_wtp = np.maximum(self._current_wtp, 1.0)
-            surplus_ratio = est_bills / safe_wtp
+            # [R2] Bill/structural_WTP ratio (churn baseline: immutable WTP)
+            # [Train 2009 §3.6: WTP is stable individual parameter]
+            safe_structural = np.maximum(self._structural_wtp, 1.0)
+            surplus_ratio = est_bills / safe_structural
 
             # QoS violation penalty (per-slice)
             qos_penalty = np.where(
@@ -1252,7 +1324,8 @@ class OranSlicingPricingEnv(gym.Env):
                         pop_bonus: float = 0.0,
                         lagrangian_penalty: float = 0.0,
                         capacity_penalty: float = 0.0,
-                        sla_awareness_penalty: float = 0.0) -> float:
+                        sla_awareness_penalty: float = 0.0,
+                        wtp_erosion_penalty: float = 0.0) -> float:
         if not np.isfinite(profit):
             profit = 0.0
         r = float(np.sign(profit) * np.log1p(
@@ -1262,6 +1335,7 @@ class OranSlicingPricingEnv(gym.Env):
         r += pop_bonus
         r -= capacity_penalty           # [I-3b]
         r -= sla_awareness_penalty      # [I-5a]
+        r -= wtp_erosion_penalty         # [R5]
         # [D2] Lagrangian penalty applied OUTSIDE base reward clip
         # to preserve constraint gradient  [Paternain CDC 2019]
         r_base = float(np.clip(r, -2.0, 2.0))

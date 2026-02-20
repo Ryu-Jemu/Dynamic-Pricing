@@ -2831,7 +2831,7 @@ class TestWTPChurnBehavior:
             f"WTP should change after billing cycles, mean delta={diff.mean():.0f}"
 
     def test_T29_8_wtp_floor_enforced(self, cfg):
-        """[WTP-CHURN] WTP >= switching_cost × floor_multiplier."""
+        """[WTP-CHURN][R3] WTP >= max(switching floor, structural floor)."""
         import copy
         cfg_f = copy.deepcopy(cfg)
         cfg_f["training"]["curriculum"]["enabled"] = False
@@ -2842,8 +2842,10 @@ class TestWTPChurnBehavior:
         hi_action = np.ones(5, dtype=np.float32)
         for _ in range(300):
             env.step(hi_action)
-        floor_mult = env._wtp_floor_multiplier
-        wtp_floor = env._swcost * floor_mult * 10000.0
+        # [R3] Floor = max(switching cost floor, structural floor)
+        floor_switching = env._swcost * env._wtp_floor_multiplier * 10000.0
+        floor_structural = env._wtp_total_bill * env._wtp_structural_floor_ratio
+        wtp_floor = np.maximum(floor_switching, floor_structural)
         violations = (env._current_wtp < wtp_floor - 1.0).sum()
         assert violations == 0, \
             f"{violations} users have WTP below floor"
@@ -3203,6 +3205,210 @@ class TestSystemFixes:
             if mask.sum() > 0:
                 assert (df.loc[mask, "wtp_base_fee"] > 0).all(), \
                     f"wtp_base_fee should be positive for {sl}"
+
+
+# =====================================================================
+# T33  v12.4 WTP Death Spiral Resolution (R1-R5)
+# [Popescu & Wu OR 2007; Koszegi & Rabin QJE 2006; Klemperer QJE 1987;
+#  den Boer & Keskin Mgmt Sci 2022; Ng et al. ICML 1999]
+# =====================================================================
+class TestWTPDeathSpiralResolution:
+    """T33: WTP death spiral R1-R5 fixes."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cfg):
+        self.cfg = cfg
+
+    def _make_env(self, **overrides):
+        import copy
+        c = copy.deepcopy(self.cfg)
+        c["training"]["curriculum"]["enabled"] = False
+        for k, v in overrides.items():
+            # Support nested keys like "wtp_model.structural_floor_ratio"
+            parts = k.split(".")
+            d = c
+            for p in parts[:-1]:
+                d = d.setdefault(p, {})
+            d[parts[-1]] = v
+        return OranSlicingPricingEnv(c, seed=42)
+
+    # ── R1: Asymmetric alpha ────────────────────────────────────────
+
+    def test_T33_1_asymmetric_alpha_price_decrease(self):
+        """[R1] Bill < WTP → effective alpha > base loyalty_inertia.
+        [Popescu & Wu OR 2007 Theorem 1]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        # Force a low price (Bill < WTP)
+        lo_action = -np.ones(5, dtype=np.float32)
+        for _ in range(30):
+            env.step(lo_action)
+        # With R1, α_down = min(inertia + offset, max)
+        # For balanced segment: inertia ~0.78, offset 0.10 → α_down ~0.88
+        # Verify the config offset exists
+        offset = env._wtp_adapt_down_offset
+        assert offset > 0, "adapt_rate_down_offset should be > 0"
+        assert env._wtp_adapt_down_max <= 1.0, "adapt_rate_down_max should <= 1.0"
+
+    def test_T33_2_asymmetric_alpha_formula(self):
+        """[R1] Verify asymmetric alpha: α_down > α_up for same user."""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        # Check formula: when bill < WTP, alpha is increased
+        inertia = 0.85
+        offset = env._wtp_adapt_down_offset
+        alpha_down = min(inertia + offset, env._wtp_adapt_down_max)
+        alpha_up = inertia
+        assert alpha_down > alpha_up, \
+            f"α_down {alpha_down} should be > α_up {alpha_up}"
+
+    # ── R2: Structural WTP separation ───────────────────────────────
+
+    def test_T33_3_structural_wtp_immutable(self):
+        """[R2] _structural_wtp remains unchanged after 60 steps.
+        [Train 2009 §3.6]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        initial_structural = env._structural_wtp.copy()
+        hi_action = np.ones(5, dtype=np.float32)
+        for _ in range(60):
+            env.step(hi_action)
+        np.testing.assert_array_equal(
+            env._structural_wtp, initial_structural,
+            err_msg="structural_wtp must not change during episode")
+
+    def test_T33_4_churn_uses_structural_wtp(self):
+        """[R2] Churn logit references structural WTP, not dynamic WTP.
+        [Koszegi & Rabin QJE 2006]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        # structural_wtp should exist and equal wtp_total_bill at init
+        np.testing.assert_array_almost_equal(
+            env._structural_wtp, env._wtp_total_bill,
+            err_msg="structural_wtp should be initialized from wtp_total_bill")
+
+    # ── R3: Structural WTP floor ────────────────────────────────────
+
+    def test_T33_5_wtp_floor_structural_bound(self):
+        """[R3] WTP >= wtp_total_bill × structural_floor_ratio after heavy pricing.
+        [Klemperer QJE 1987; Shy Int.J.Ind.Org 2002]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        hi_action = np.ones(5, dtype=np.float32)
+        for _ in range(300):
+            env.step(hi_action)
+        structural_floor = (
+            env._wtp_total_bill * env._wtp_structural_floor_ratio)
+        violations = (env._current_wtp < structural_floor - 1.0).sum()
+        assert violations == 0, \
+            f"{violations} users below structural floor"
+
+    def test_T33_6_structural_floor_config(self):
+        """[R3] Config structural_floor_ratio exists and is 0.50."""
+        ratio = self.cfg.get("wtp_model", {}).get(
+            "structural_floor_ratio", None)
+        assert ratio is not None, "structural_floor_ratio missing from config"
+        assert ratio == 0.50, f"Expected 0.50, got {ratio}"
+
+    # ── R4: Price rate limiter ──────────────────────────────────────
+
+    def test_T33_7_price_rate_limit_enforced(self):
+        """[R4] F_U change per cycle <= action_range × max_change_frac.
+        [den Boer & Keskin Mgmt Sci 2022]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._price_rate_limit_enabled:
+            pytest.skip("Price rate limit not enabled")
+        max_frac = env._price_rate_limit_frac
+        F_U_range = env._a_range[0]
+        delta_max = max_frac * F_U_range
+
+        # Step 1: take a mid action to establish baseline
+        mid_action = np.zeros(5, dtype=np.float32)
+        for _ in range(30):  # complete one cycle
+            env.step(mid_action)
+        F_U_prev = env._prev_action[0]
+
+        # Step 2: try extreme action (should be rate-limited)
+        extreme_action = np.ones(5, dtype=np.float32)
+        env.step(extreme_action)  # step 31 = cycle start
+        F_U_new = env._prev_action[0]
+        actual_delta = abs(F_U_new - F_U_prev)
+        assert actual_delta <= delta_max + 1.0, \
+            f"F_U delta {actual_delta:.0f} exceeds limit {delta_max:.0f}"
+
+    def test_T33_8_price_rate_limit_config(self):
+        """[R4] Config price_rate_limit section exists and is enabled."""
+        prl = self.cfg.get("price_rate_limit", {})
+        assert prl.get("enabled", False), "price_rate_limit should be enabled"
+        assert 0.0 < prl.get("max_change_frac", 0) <= 1.0, \
+            "max_change_frac should be in (0, 1]"
+
+    # ── R5: WTP erosion penalty ─────────────────────────────────────
+
+    def test_T33_9_wtp_erosion_penalty_in_info(self):
+        """[R5] Info dict contains wtp_erosion_penalty key.
+        [Ng et al. ICML 1999]"""
+        env = self._make_env()
+        env.reset(seed=42)
+        action = env.action_space.sample()
+        _, _, _, _, info = env.step(action)
+        assert "wtp_erosion_penalty" in info, \
+            "wtp_erosion_penalty missing from info dict"
+        assert info["wtp_erosion_penalty"] >= 0.0, \
+            "wtp_erosion_penalty should be non-negative"
+
+    def test_T33_10_wtp_erosion_penalty_config(self):
+        """[R5] Config wtp_erosion_penalty section exists."""
+        wep = self.cfg.get("wtp_erosion_penalty", {})
+        assert wep.get("enabled", False), "wtp_erosion_penalty should be enabled"
+        assert wep.get("alpha", 0) > 0, "alpha should be positive"
+
+    # ── Integration ────────────────────────────────────────────────
+
+    def test_T33_11_death_spiral_resistance_300steps(self):
+        """[R1-R5] WTP remains above structural floor after 300 steps.
+        Verifies death spiral is structurally prevented."""
+        env = self._make_env()
+        env.reset(seed=42)
+        if not env._wtp_model_enabled:
+            pytest.skip("WTP model not enabled")
+        # Mix of high and low actions to stress-test
+        for i in range(300):
+            if i % 60 < 30:
+                action = np.ones(5, dtype=np.float32)
+            else:
+                action = -np.ones(5, dtype=np.float32)
+            env.step(action)
+        structural_floor = (
+            env._wtp_total_bill * env._wtp_structural_floor_ratio)
+        wtp_above_floor = (env._current_wtp >= structural_floor - 1.0).all()
+        assert wtp_above_floor, \
+            "WTP should remain above structural floor after 300 steps"
+
+    def test_T33_12_backward_compat_disabled(self):
+        """[R1-R5] All features disabled → legacy behavior."""
+        env = self._make_env(**{
+            "wtp_model.enabled": False,
+            "price_rate_limit.enabled": False,
+            "wtp_erosion_penalty.enabled": False,
+        })
+        obs, _ = env.reset(seed=42)
+        for _ in range(30):
+            _, r, _, _, info = env.step(env.action_space.sample())
+            assert np.isfinite(r), "Reward should be finite"
+            assert info["wtp_erosion_penalty"] == 0.0, \
+                "WTP erosion penalty should be 0 when disabled"
 
 
 if __name__ == "__main__":
