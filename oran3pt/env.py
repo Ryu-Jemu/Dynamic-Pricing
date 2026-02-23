@@ -214,8 +214,6 @@ class OranSlicingPricingEnv(gym.Env):
         self.bp_join: float = mc["beta_p_join"]
         self.bq_join: float = mc["beta_q_join"]
         self.market_mode: str = mc.get("mode", "stochastic")
-        self._price_norm: float = mc.get("price_norm", 120000.0)
-
         # [PR-1] Per-slice price normalization bounds [Train 2009; Anderson et al. 1992]
         # Each user evaluates price relative to their own slice's maximum
         acfg = cfg["action"]
@@ -223,8 +221,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._F_E_max: float = acfg["F_E_max"]    # eMBB WTP ceiling
         self._p_over_U_max: float = acfg["p_over_U_max"]
         self._p_over_E_max: float = acfg["p_over_E_max"]
-        # [PR-3] Per-slice normalization replaces scalar price_norm
-        self._use_per_slice_psig: bool = (self._F_U_max > 0 and self._F_E_max > 0)
 
         # [PR-2] Bill shock mechanism [Grubb & Osborne AER 2015; Lambrecht & Skiera JMR 2006]
         self._beta_bill_shock: float = mc.get("beta_bill_shock", 0.0)
@@ -413,7 +409,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_C_U: float = 1.0
         self._prev_C_E: float = 1.0
         self._prev_over_rev_E: float = 0.0
-        self._prev_n_rejected: int = 0       # [D1]
         self._cycle_pricing = np.zeros(4, dtype=np.float64)  # [D2]
         self._pviol_E_ema: float = 0.0     # [D6] EMA for obs trend
         self._lagrangian_boost: float = 1.0  # [D5] curriculum phase boost
@@ -553,7 +548,6 @@ class OranSlicingPricingEnv(gym.Env):
             self._prev_C_U = self.C_total * 0.5 * self.kappa_U
             self._prev_C_E = self.C_total * 0.5
             self._prev_over_rev_E = 0.0
-            self._prev_n_rejected = 0
             self._cycle_pricing = mid[:4].copy()
             self._pviol_E_ema = 0.0       # [D6]
             self._churn_rate_ema = 0.0     # [EP1]
@@ -882,7 +876,6 @@ class OranSlicingPricingEnv(gym.Env):
         self._prev_C_U = C_U
         self._prev_C_E = C_E
         self._prev_over_rev_E = over_rev_E
-        self._prev_n_rejected = n_rejected
 
         info_dict = {
             "step": self.t,
@@ -1096,17 +1089,13 @@ class OranSlicingPricingEnv(gym.Env):
                 F_U / max(mean_wtp_U, 1.0),
                 F_E / max(mean_wtp_E, 1.0)
             )
-        elif self._use_per_slice_psig:
+        else:
             # [PR-1] Per-slice: F_s / F_s_max
             P_sig_users = np.where(
                 self._slice_is_U,
                 F_U / self._F_U_max,      # URLLC: only see F_U
                 F_E / self._F_E_max       # eMBB: only see F_E
             )
-        else:
-            # Backward compatibility fallback
-            P_sig = (F_U + F_E) / (2.0 * self._price_norm)
-            P_sig_users = np.full(self.N_total, P_sig)
 
         # ── [PR-2] Bill shock signal ──────────────────────────────────
         # Computed from cumulative cycle overage; grows within billing cycle

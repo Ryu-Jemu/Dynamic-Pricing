@@ -186,6 +186,7 @@ training:
   gradient_steps: 2             # [OPT-D] 4→2; 총 gradient 계산량 유지 (2×512=4×256)  [Fedus 2020]
   eval_freq: 20000              # [OPT-E] 10K→20K; 평가 간격 2배
   n_eval_episodes: 20            # [EP1] 짧은 에피소드 보상 분산 보상; 20 episodes
+  eval_base_seed: 10000           # [ME-3] 평가 repeat별 독립 시드 기준값
   n_seeds: 5                        # [E9] Multi-seed for statistical significance  [Henderson 2018]
   parallel_seeds: true          # [OPT-A] 다중 seed 병렬 실행  [Henderson 2018]
   max_parallel: 5                # [OPT-A] 최대 동시 프로세스 수

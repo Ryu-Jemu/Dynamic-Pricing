@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# O-RAN 3-Part Tariff Pricing — End-to-End Pipeline (v5.7)
+# O-RAN 3-Part Tariff Pricing — End-to-End Pipeline (v12.5)
 #
 # Mode selection (no interactive input):
 #   ./scripts/run.sh light   — 경량 실행 (100K steps, 1 seeds, ~10분)
@@ -25,7 +25,7 @@ MODE="${1:-}"
 if [ "$MODE" != "light" ] && [ "$MODE" != "full" ]; then
     echo ""
     echo "═══════════════════════════════════════════════"
-    echo "  O-RAN 5G 3-Part Tariff SAC Training (v5.7)"
+    echo "  O-RAN 5G 3-Part Tariff SAC Training (v12.5)"
     echo "═══════════════════════════════════════════════"
     echo ""
     echo "  사용법: ./scripts/run.sh <모드>"
@@ -65,7 +65,7 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════"
-echo "  O-RAN 5G 3-Part Tariff SAC Training (v5.7)"
+echo "  O-RAN 5G 3-Part Tariff SAC Training (v12.5)"
 echo "═══════════════════════════════════════════════"
 echo "  Project : $PROJECT_DIR"
 echo "  Mode    : $MODE_LABEL"

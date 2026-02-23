@@ -1,5 +1,5 @@
 # 5G O-RAN 3-Part Tariff Pricing — SB3 SAC
-# REVISION 7
+# REVISION 12.5
 
 # RL
 stable-baselines3[extra]>=2.3.0

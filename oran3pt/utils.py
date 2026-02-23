@@ -66,11 +66,6 @@ def sigmoid(x: float | np.ndarray) -> float | np.ndarray:
                     np.exp(x) / (1.0 + np.exp(x)))
 
 
-def safe_clip(x, lo=-1e8, hi=1e8):
-    x = np.asarray(x, dtype=np.float64)
-    x = np.nan_to_num(x, nan=0.0, posinf=hi, neginf=lo)
-    return np.clip(x, lo, hi)
-
 # ── Lognormal calibration  [scipy.stats.lognorm] ─────────────────────
 
 def fit_lognormal_quantiles(p50: float, p90: float) -> tuple[float, float]:

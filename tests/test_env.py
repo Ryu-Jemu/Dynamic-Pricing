@@ -412,7 +412,7 @@ class TestCalibration:
 # =====================================================================
 class TestV5Enhancements:
     def test_obs_shape_v9(self, env):
-        """[D5] Observation space should be 24D."""
+        """[FIX-P4] Observation space should be 27D."""
         obs, _ = env.reset(seed=42)
         assert obs.shape == (OBS_DIM,)
 
@@ -565,7 +565,7 @@ class TestV9Design:
     # ── [D5] Observation dim = 24 ─────────────────────────────────────
 
     def test_T12_1_obs_dim_23(self, env):
-        """[ME-1] Observation space should be 23-dimensional."""
+        """[FIX-P4] Observation space should be 27-dimensional."""
         assert env.observation_space.shape == (OBS_DIM,), \
             f"Expected obs dim {OBS_DIM}, got {env.observation_space.shape}"
         obs, _ = env.reset(seed=42)
@@ -1263,7 +1263,7 @@ class TestArchitectureReview:
             f"Integral {cb._error_integral} exceeds max {cb._integral_max}"
 
     def test_T20_2_obs_dim_25_no_inactive_fraction(self, cfg):
-        """[WTP-CHURN] Observation is 25-D, inactive fraction removed."""
+        """[FIX-P4] Observation is 27-D, inactive fraction removed."""
         env = OranSlicingPricingEnv(cfg, seed=42)
         obs, _ = env.reset(seed=42)
         assert obs.shape == (OBS_DIM,), f"Expected obs dim {OBS_DIM}, got {obs.shape}"
@@ -1502,9 +1502,9 @@ class TestPR1SliceSpecificPricing:
         assert np.all(np.isfinite(obs1))
         assert np.all(np.isfinite(obs2))
         assert np.isfinite(r1) and np.isfinite(r2)
-        assert (env._use_per_slice_psig
-                or env._use_wtp_price_signal), \
-            "Per-slice or WTP P_sig should be enabled"
+        # Per-slice P_sig is always active (WTP-based or F/F_max fallback)
+        assert env._F_U_max > 0 and env._F_E_max > 0, \
+            "Per-slice P_sig requires positive F_max bounds"
 
     def test_T22_3_embb_churn_responds_to_F_E(self, cfg):
         """eMBB churn should increase with F_E."""
@@ -3409,6 +3409,85 @@ class TestWTPDeathSpiralResolution:
             assert np.isfinite(r), "Reward should be finite"
             assert info["wtp_erosion_penalty"] == 0.0, \
                 "WTP erosion penalty should be 0 when disabled"
+
+
+# ── T34 · PNG Dashboard Individual Panels (DASH-2) ────────────────
+class TestT34IndividualPanels:
+    """[DASH-2] Individual panel PNG generation tests."""
+
+    def test_T34_1_panel_functions_exist(self):
+        """[DASH-2] 28 _panel_* functions should exist in png_dashboard."""
+        import oran3pt.png_dashboard as pd_mod
+        panel_names = [n for n in dir(pd_mod) if n.startswith("_panel_")]
+        assert len(panel_names) >= 28, (
+            f"Expected >=28 _panel_* functions, found {len(panel_names)}: "
+            f"{panel_names}"
+        )
+
+    def test_T34_2_individual_layout_file_count(self):
+        """[DASH-2] _PANELS_SHEET_1_6 should have 24 entries, _PANELS_SHEET_7 should have 4."""
+        from oran3pt.png_dashboard import _PANELS_SHEET_1_6, _PANELS_SHEET_7
+        assert len(_PANELS_SHEET_1_6) == 24, (
+            f"Expected 24 sheet 1-6 panels, got {len(_PANELS_SHEET_1_6)}"
+        )
+        assert len(_PANELS_SHEET_7) == 4, (
+            f"Expected 4 sheet 7 panels, got {len(_PANELS_SHEET_7)}"
+        )
+
+    def test_T34_3_composite_backward_compat(self):
+        """[DASH-2] generate_all_pngs should accept layout='composite' (default)."""
+        import inspect
+        from oran3pt.png_dashboard import generate_all_pngs
+        sig = inspect.signature(generate_all_pngs)
+        assert "layout" in sig.parameters, "layout parameter missing"
+        assert sig.parameters["layout"].default == "composite", (
+            f"Default layout should be 'composite', got "
+            f"{sig.parameters['layout'].default}"
+        )
+
+    def test_T34_4_both_layout_combined(self):
+        """[DASH-2] _PANELS_SHEET_1_6 + _PANELS_SHEET_7 = 28 total panels."""
+        from oran3pt.png_dashboard import _PANELS_SHEET_1_6, _PANELS_SHEET_7
+        total = len(_PANELS_SHEET_1_6) + len(_PANELS_SHEET_7)
+        assert total == 28, f"Expected 28 total panels, got {total}"
+
+    def test_T34_5_individual_naming_convention(self):
+        """[DASH-2] Panel filenames should follow NN_M_description.png pattern."""
+        import re
+        from oran3pt.png_dashboard import _PANELS_SHEET_1_6, _PANELS_SHEET_7
+        pattern = re.compile(r"^\d{2}_\d_[a-z][a-z0-9_]+\.png$")
+        for entry in _PANELS_SHEET_1_6:
+            fname = entry[1]
+            assert pattern.match(fname), (
+                f"Filename '{fname}' does not match NN_M_description.png"
+            )
+        for entry in _PANELS_SHEET_7:
+            fname = entry[1]
+            assert pattern.match(fname), (
+                f"Filename '{fname}' does not match NN_M_description.png"
+            )
+
+    def test_T34_6_panel_standalone_render(self):
+        """[DASH-2] A single panel function should render on a standalone Axes."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas as pd
+        from oran3pt.png_dashboard import _panel_01_1_revenue_cost_profit
+        from oran3pt.utils import load_config
+
+        cfg = load_config("config/default.yaml")
+        # Create minimal dummy grouped DataFrame with columns used by panel 1.1
+        dummy = pd.DataFrame({
+            "revenue": [100.0, 200.0, 300.0],
+            "cost_total": [50.0, 80.0, 120.0],
+            "profit": [50.0, 120.0, 180.0],
+        })
+        fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+        try:
+            _panel_01_1_revenue_cost_profit(ax, dummy, cfg, "eval")
+        finally:
+            plt.close(fig)
 
 
 if __name__ == "__main__":

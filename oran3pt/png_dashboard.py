@@ -6,7 +6,7 @@ during SAC training and evaluation.  Designed for beginner readability
 with annotated thresholds, config-driven bounds, and colorblind-safe
 palette.
 
-REVISION 9 — New module  [M11].
+REVISION 12.5 — [M11] + [DASH-2] individual panel output.
 
 Sheets:
   1. Financial Overview (revenue, cost, profit, margins)
@@ -20,6 +20,8 @@ Sheets:
 Usage:
   python -m oran3pt.png_dashboard --output outputs --config config/default.yaml
   python -m oran3pt.png_dashboard --output outputs --mode eval --dpi 200
+  python -m oran3pt.png_dashboard --output outputs --layout individual
+  python -m oran3pt.png_dashboard --output outputs --layout both
 
 References:
   [Wong Nat.Methods 2011]   Color-blind safe palette
@@ -33,7 +35,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -87,6 +89,29 @@ _COLORS = {
     "C_U": GREEN,
     "C_E": RED,
 }
+
+# Reference strings per sheet group
+_REF_01 = ("Refs: [Grubb AER 2009] 3-Part Tariff | "
+           "[Nevo Econometrica 2016] Demand Elasticity | "
+           "[Tessler ICML 2019] CMDP")
+_REF_02 = ("Refs: [Dalal NeurIPS 2018] Action Smoothing | "
+           "[Wiewiora ICML 2003] Reward Shaping | "
+           "[Mguni AAMAS 2019] Population Reward")
+_REF_03 = ("Refs: [Kim & Yoon 2004] Churn Determinants | "
+           "[Ahn 2006] Partial Defection | "
+           "[Gupta JSR 2006] CLV")
+_REF_04 = ("Refs: [Grubb AER 2009] Base Fee | "
+           "[Nevo 2016] Overage Price | "
+           "[Huang IoT-J 2020] PRB Allocation")
+_REF_05 = ("Refs: [3GPP TS 38.104] QoS | "
+           "[Tessler ICML 2019] CMDP | "
+           "[Huang IoT-J 2020] URLLC-eMBB Coexistence")
+_REF_06 = ("Refs: [Nevo Econometrica 2016] Demand Elasticity | "
+           "[3GPP TS 23.503] Usage Monitoring | "
+           "[Grubb AER 2009] 3-Part Tariff")
+_REF_07 = ("Refs: [Henderson AAAI 2018] Multi-Seed Evaluation | "
+           "[Narvekar JMLR 2020] Curriculum Learning | "
+           "[Haarnoja ICML 2018] SAC")
 
 
 def _setup_style() -> None:
@@ -257,23 +282,17 @@ def _unavailable(ax, label: str = "Not available") -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# SHEET RENDERERS
+# PANEL FUNCTIONS — atomic rendering units [DASH-2]
+# Each function draws on a single matplotlib Axes object.
 # ══════════════════════════════════════════════════════════════════════
 
-def _render_sheet_01_financial(
-    g: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 1: Financial Overview — Revenue, Cost, Profit, Margins."""
-    import matplotlib.pyplot as plt
+# ── Sheet 1: Financial Overview ──────────────────────────────────────
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 1: Financial Performance Overview",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_01_1_revenue_cost_profit(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 1.1: Revenue, Cost, and Profit trajectory."""
     x = g.index
-
-    # (1,1) Revenue / Cost / Profit
-    ax = axes[0, 0]
     ax.plot(x, g["revenue"] / 1e6, color=_col("revenue"), label="Revenue", lw=2)
     ax.plot(x, g["cost_total"] / 1e6, color=_col("cost"), label="Cost", lw=2)
     ax.plot(x, g["profit"] / 1e6, color=_col("profit"), label="Profit", lw=2)
@@ -289,8 +308,13 @@ def _render_sheet_01_financial(
     mean_profit = g["profit"].mean()
     _callout(ax, f"Mean Profit: {mean_profit/1e6:.2f}M KRW")
 
-    # (1,2) Revenue Decomposition
-    ax = axes[0, 1]
+
+def _panel_01_2_revenue_decomposition(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 1.2: Revenue Decomposition (base + overage)."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     base = _safe_get(g, "base_rev")
     over = _safe_get(g, "over_rev")
     if base.sum() > 0 or over.sum() > 0:
@@ -310,8 +334,13 @@ def _render_sheet_01_financial(
         _unavailable(ax, "Revenue breakdown not available (pre-v7 data)")
         ax.set_title("[1.2] Revenue Decomposition")
 
-    # (2,1) Cost Breakdown
-    ax = axes[1, 0]
+
+def _panel_01_3_cost_breakdown(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 1.3: Cost Breakdown (OPEX, Energy, CAC, SLA)."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     opex = _safe_get(g, "cost_opex")
     energy = _safe_get(g, "cost_energy")
     cac = _safe_get(g, "cost_cac")
@@ -338,8 +367,13 @@ def _render_sheet_01_financial(
         _unavailable(ax, "Cost breakdown not available")
         ax.set_title("[2.1] Cost Breakdown")
 
-    # (2,2) Profit Margin & SLA/Revenue Ratio
-    ax = axes[1, 1]
+
+def _panel_01_4_profitability_ratios(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 1.4: Profit Margin & SLA/Revenue Ratio (dual axis)."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     margin = g["profit"] / g["revenue"].clip(lower=1e-6) * 100
     ax.plot(x, margin, color=_col("profit"), label="Profit Margin (%)", lw=2)
     ax.set_ylabel("Profit Margin (%)", color=_col("profit"))
@@ -361,34 +395,15 @@ def _render_sheet_01_financial(
     ax.set_xlabel(xlabel)
     _callout(ax, f"Mean Margin: {margin.mean():.1f}%")
 
-    fig.text(0.5, 0.01,
-             "Refs: [Grubb AER 2009] 3-Part Tariff | "
-             "[Nevo Econometrica 2016] Demand Elasticity | "
-             "[Tessler ICML 2019] CMDP",
-             ha="center", fontsize=7, color="gray")
 
-    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
-    path = out_dir / "01_financial_overview.png"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return path
+# ── Sheet 2: Reward Decomposition ────────────────────────────────────
 
-
-def _render_sheet_02_reward(
-    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 2: Reward Decomposition — signal analysis."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 2: Reward Signal Decomposition",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_02_1_reward_over_time(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 2.1: Reward over time with rolling mean."""
     x = g.index
     xlabel = "Episode" if mode == "training" else "Step"
-
-    # (1,1) Reward over time with rolling mean
-    ax = axes[0, 0]
     ax.plot(x, g["reward"], color=_col("reward"), alpha=0.4, lw=0.8,
             label="Reward (raw)")
     smoothed = _rolling_smooth(g["reward"],
@@ -402,8 +417,13 @@ def _render_sheet_02_reward(
     ax.legend(loc="best")
     _callout(ax, f"Mean: {g['reward'].mean():.4f}")
 
-    # (1,2) Reward components stacked area
-    ax = axes[0, 1]
+
+def _panel_02_2_reward_shaping_components(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 2.2: Reward shaping components stacked area."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     components = []
     for col_name, label in [
         ("smooth_penalty", "Smooth Penalty"),
@@ -417,7 +437,6 @@ def _render_sheet_02_reward(
     if components:
         for col_name, label in components:
             vals = g[col_name]
-            # Penalties are subtracted (negative effect), bonus is positive
             if "penalty" in col_name:
                 ax.fill_between(x, 0, -vals, alpha=0.5,
                                 color=_col(col_name), label=f"-{label}")
@@ -433,8 +452,11 @@ def _render_sheet_02_reward(
         _unavailable(ax, "Reward components not available")
         ax.set_title("[1.2] Reward Shaping Components")
 
-    # (2,1) Reward distribution histogram
-    ax = axes[1, 0]
+
+def _panel_02_3_reward_distribution(
+    ax, raw_df: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 2.3: Reward distribution histogram."""
     rewards = raw_df["reward"].dropna()
     ax.hist(rewards, bins=60, color=_col("reward"), alpha=0.7,
             edgecolor="white", density=True)
@@ -452,8 +474,13 @@ def _render_sheet_02_reward(
     ax.set_ylabel("Density")
     ax.legend(loc="best")
 
-    # (2,2) Individual penalty/bonus time series
-    ax = axes[1, 1]
+
+def _panel_02_4_penalty_bonus_trajectories(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 2.4: Individual penalty/bonus time series."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     has_any = False
     for col_name, label, ls in [
         ("smooth_penalty", "Smooth Penalty", "-"),
@@ -475,36 +502,17 @@ def _render_sheet_02_reward(
         _unavailable(ax, "Penalty/bonus data not available")
         ax.set_title("[2.2] Penalty & Bonus Trajectories")
 
-    fig.text(0.5, 0.01,
-             "Refs: [Dalal NeurIPS 2018] Action Smoothing | "
-             "[Wiewiora ICML 2003] Reward Shaping | "
-             "[Mguni AAMAS 2019] Population Reward",
-             ha="center", fontsize=7, color="gray")
 
-    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
-    path = out_dir / "02_reward_decomposition.png"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return path
+# ── Sheet 3: Market Dynamics ─────────────────────────────────────────
 
-
-def _render_sheet_03_market(
-    g: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 3: Market Dynamics — population and churn."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 3: Market Dynamics & User Population",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_03_1_active_users(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 3.1: Active Users vs Target."""
     x = g.index
     xlabel = "Episode" if mode == "training" else "Step"
     N_total = cfg.get("population", {}).get("N_total", 500)
     target_ratio = cfg.get("population_reward", {}).get("target_ratio", 0.4)
-
-    # (1,1) Active Users vs Target
-    ax = axes[0, 0]
     ax.plot(x, g["N_active"], color=_col("N_active"), lw=2, label="N_active")
     _annotate_threshold(ax, N_total, f"N_total = {N_total}", color=GRAY)
     _annotate_threshold(ax, target_ratio * N_total,
@@ -516,8 +524,13 @@ def _render_sheet_03_market(
     ax.legend(loc="best")
     _callout(ax, f"Mean: {g['N_active'].mean():.0f} users")
 
-    # (1,2) Per-Slice Users
-    ax = axes[0, 1]
+
+def _panel_03_2_per_slice_subscribers(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 3.2: Per-Slice Subscribers (URLLC/eMBB)."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     if "N_U" in g.columns and "N_E" in g.columns:
         ax.plot(x, g["N_U"], color=_col("N_U"), lw=2, label="N_U (URLLC)")
         ax.plot(x, g["N_E"], color=_col("N_E"), lw=2, label="N_E (eMBB)")
@@ -530,8 +543,13 @@ def _render_sheet_03_market(
         _unavailable(ax, "Per-slice user counts not available")
         ax.set_title("[1.2] Per-Slice Subscribers")
 
-    # (2,1) Join / Churn / Net Flow
-    ax = axes[1, 0]
+
+def _panel_03_3_market_flows(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 3.3: Market Flows — Joins & Churns."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     width = max(1, (x.max() - x.min()) / len(x) * 0.35)
     ax.bar(x, g["n_join"], width=width, color=_col("n_join"),
            alpha=0.7, label="Joins")
@@ -545,8 +563,13 @@ def _render_sheet_03_market(
     ax.set_ylabel("Users per step")
     ax.legend(loc="best")
 
-    # (2,2) Churn Rate & Population Delta
-    ax = axes[1, 1]
+
+def _panel_03_4_churn_rate(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 3.4: Churn Rate Over Time."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     churn_rate = g["n_churn"] / g["N_active"].clip(lower=1)
     ax.plot(x, churn_rate * 100, color=_col("n_churn"), lw=1.5,
             label="Churn Rate (%)")
@@ -563,38 +586,19 @@ def _render_sheet_03_market(
     ax.legend(loc="best")
     _callout(ax, f"Mean: {churn_rate.mean()*100:.3f}%/step")
 
-    fig.text(0.5, 0.01,
-             "Refs: [Kim & Yoon 2004] Churn Determinants | "
-             "[Ahn 2006] Partial Defection | "
-             "[Gupta JSR 2006] CLV",
-             ha="center", fontsize=7, color="gray")
 
-    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
-    path = out_dir / "03_market_dynamics.png"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return path
+# ── Sheet 4: Pricing Actions ─────────────────────────────────────────
 
-
-def _render_sheet_04_actions(
-    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 4: Pricing Actions — agent strategy."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 4: Agent Pricing Strategy",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_04_1_urllc_pricing(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 4.1: URLLC Pricing (F_U + p_over_U dual axis)."""
     x = g.index
     xlabel = "Episode" if mode == "training" else "Step"
     acfg = cfg.get("action", {})
-
-    # (1,1) URLLC Pricing
-    ax = axes[0, 0]
     ax.plot(x, g["F_U"] / 1e3, color=_col("F_U"), lw=2, label="F_U (K KRW)")
     ax.fill_between(x, acfg.get("F_U_min", 30000) / 1e3,
-                    acfg.get("F_U_max", 90000) / 1e3,
+                    acfg.get("F_U_max", 140000) / 1e3,
                     color=_col("F_U"), alpha=0.06, label="F_U bounds")
     ax.set_ylabel("F_U (K KRW)", color=_col("F_U"))
     ax2 = ax.twinx()
@@ -607,11 +611,17 @@ def _render_sheet_04_actions(
     ax.set_title("[1.1] URLLC Pricing")
     ax.set_xlabel(xlabel)
 
-    # (1,2) eMBB Pricing
-    ax = axes[0, 1]
+
+def _panel_04_2_embb_pricing(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 4.2: eMBB Pricing (F_E + p_over_E dual axis)."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
+    acfg = cfg.get("action", {})
     ax.plot(x, g["F_E"] / 1e3, color=_col("F_E"), lw=2, label="F_E (K KRW)")
-    ax.fill_between(x, acfg.get("F_E_min", 40000) / 1e3,
-                    acfg.get("F_E_max", 150000) / 1e3,
+    ax.fill_between(x, acfg.get("F_E_min", 35000) / 1e3,
+                    acfg.get("F_E_max", 100000) / 1e3,
                     color=_col("F_E"), alpha=0.06, label="F_E bounds")
     ax.set_ylabel("F_E (K KRW)", color=_col("F_E"))
     ax2 = ax.twinx()
@@ -624,10 +634,16 @@ def _render_sheet_04_actions(
     ax.set_title("[1.2] eMBB Pricing")
     ax.set_xlabel(xlabel)
 
-    # (2,1) rho_U Resource Allocation
-    ax = axes[1, 0]
-    rho_min = acfg.get("rho_U_min", 0.05)
-    rho_max = acfg.get("rho_U_max", 0.35)
+
+def _panel_04_3_rho_u_allocation(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 4.3: rho_U Resource Allocation."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
+    acfg = cfg.get("action", {})
+    rho_min = acfg.get("rho_U_min", 0.03)
+    rho_max = acfg.get("rho_U_max", 0.10)
     ax.plot(x, g["rho_U"], color=_col("rho_U"), lw=2, label="rho_U")
     ax.fill_between(x, rho_min, rho_max,
                     color=_col("rho_U"), alpha=0.08,
@@ -638,8 +654,12 @@ def _render_sheet_04_actions(
     ax.legend(loc="best")
     _callout(ax, f"Mean: {g['rho_U'].mean():.3f}")
 
-    # (2,2) Action Distributions (box plots)
-    ax = axes[1, 1]
+
+def _panel_04_4_action_distributions(
+    ax, raw_df: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 4.4: Action Distributions (normalized box plots)."""
+    acfg = cfg.get("action", {})
     action_data = []
     action_labels = []
     action_colors = []
@@ -651,12 +671,11 @@ def _render_sheet_04_actions(
         ("rho_U", "rho_U", _col("rho_U")),
     ]:
         if col in raw_df.columns:
-            # Normalize to [0,1] for comparable box plots
             vals = raw_df[col].dropna()
             lo = acfg.get(f"{col}_min", vals.min()) if col != "rho_U" \
-                else acfg.get("rho_U_min", 0.05)
+                else acfg.get("rho_U_min", 0.03)
             hi = acfg.get(f"{col}_max", vals.max()) if col != "rho_U" \
-                else acfg.get("rho_U_max", 0.35)
+                else acfg.get("rho_U_max", 0.10)
             if col.startswith("F_"):
                 lo = acfg.get(f"{col}_min", vals.min())
                 hi = acfg.get(f"{col}_max", vals.max())
@@ -678,35 +697,15 @@ def _render_sheet_04_actions(
         ax.set_ylabel("Normalized Action Value")
         _annotate_threshold(ax, 0.5, "Midpoint", color=GRAY)
 
-    fig.text(0.5, 0.01,
-             "Refs: [Grubb AER 2009] Base Fee | "
-             "[Nevo 2016] Overage Price | "
-             "[Huang IoT-J 2020] PRB Allocation",
-             ha="center", fontsize=7, color="gray")
 
-    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
-    path = out_dir / "04_pricing_actions.png"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return path
+# ── Sheet 5: Network & QoS ──────────────────────────────────────────
 
-
-def _render_sheet_05_network(
-    g: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 5: Network & QoS — load, capacity, violations."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 5: Network Quality & Load Management",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_05_1_urllc_load_capacity(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 5.1: URLLC Load vs Capacity."""
     x = g.index
     xlabel = "Episode" if mode == "training" else "Step"
-    pviol_threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.15)
-
-    # (1,1) URLLC Load vs Capacity
-    ax = axes[0, 0]
     if "L_U" in g.columns and "C_U" in g.columns:
         ax.plot(x, g["L_U"], color=_col("L_U"), lw=1.5, label="L_U (load)")
         ax.plot(x, g["C_U"], color=_col("C_U"), lw=1.5, label="C_U (capacity)")
@@ -726,8 +725,13 @@ def _render_sheet_05_network(
         _unavailable(ax, "URLLC load/capacity not available")
         ax.set_title("[1.1] URLLC Load vs Capacity")
 
-    # (1,2) eMBB Load vs Capacity
-    ax = axes[0, 1]
+
+def _panel_05_2_embb_load_capacity(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 5.2: eMBB Load vs Capacity."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     if "L_E" in g.columns and "C_E" in g.columns:
         ax.plot(x, g["L_E"], color=_col("L_E"), lw=1.5, label="L_E (load)")
         ax.plot(x, g["C_E"], color=_col("C_E"), lw=1.5, label="C_E (capacity)")
@@ -747,8 +751,14 @@ def _render_sheet_05_network(
         _unavailable(ax, "eMBB load/capacity not available")
         ax.set_title("[1.2] eMBB Load vs Capacity")
 
-    # (2,1) QoS Violation Probabilities
-    ax = axes[1, 0]
+
+def _panel_05_3_qos_violation_prob(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 5.3: QoS Violation Probability."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
+    pviol_threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.08)
     ax.plot(x, g["pviol_U"], color=_col("pviol_U"), lw=2,
             label="pviol_U (URLLC)")
     ax.plot(x, g["pviol_E"], color=_col("pviol_E"), lw=2,
@@ -766,8 +776,13 @@ def _render_sheet_05_network(
     ax.legend(loc="best")
     _callout(ax, f"Mean pviol_E: {g['pviol_E'].mean():.3f}")
 
-    # (2,2) Utilization Ratios
-    ax = axes[1, 1]
+
+def _panel_05_4_slice_utilization(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 5.4: Slice Utilization Ratios."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     if "L_U" in g.columns and "C_U" in g.columns:
         util_U = g["L_U"] / g["C_U"].clip(lower=1e-6)
         ax.plot(x, util_U, color=_col("L_U"), lw=1.5,
@@ -782,36 +797,16 @@ def _render_sheet_05_network(
     ax.set_ylabel("Load / Capacity")
     ax.legend(loc="best")
 
-    fig.text(0.5, 0.01,
-             "Refs: [3GPP TS 38.104] QoS | "
-             "[Tessler ICML 2019] CMDP | "
-             "[Huang IoT-J 2020] URLLC-eMBB Coexistence",
-             ha="center", fontsize=7, color="gray")
 
-    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
-    path = out_dir / "05_network_qos.png"
-    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return path
+# ── Sheet 6: Billing & Usage ─────────────────────────────────────────
 
-
-def _render_sheet_06_billing(
-    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
-    out_dir: Path, dpi: int, mode: str,
-) -> Path:
-    """Sheet 6: Billing & Usage — cycle usage, overage, elasticity."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Sheet 6: Billing Cycle & Traffic Analysis",
-                 fontsize=14, fontweight="bold", y=0.98)
+def _panel_06_1_urllc_cycle_usage(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 6.1: URLLC Cycle Usage vs Allowance."""
     x = g.index
     xlabel = "Episode" if mode == "training" else "Step"
     Q_U = cfg.get("tariff", {}).get("Q_U_gb", 5.0)
-    Q_E = cfg.get("tariff", {}).get("Q_E_gb", 50.0)
-
-    # (1,1) URLLC Cycle Usage vs Allowance
-    ax = axes[0, 0]
     if "cycle_usage_U" in g.columns and "N_U" in g.columns:
         ax.plot(x, g["cycle_usage_U"], color=_col("L_U"), lw=1.5,
                 label="Cycle Usage (GB)")
@@ -836,8 +831,14 @@ def _render_sheet_06_billing(
         _unavailable(ax, "Cycle usage data not available")
         ax.set_title("[1.1] URLLC: Cycle Usage vs Allowance")
 
-    # (1,2) eMBB Cycle Usage vs Allowance
-    ax = axes[0, 1]
+
+def _panel_06_2_embb_cycle_usage(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 6.2: eMBB Cycle Usage vs Allowance."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
+    Q_E = cfg.get("tariff", {}).get("Q_E_gb", 50.0)
     if "cycle_usage_E" in g.columns and "N_E" in g.columns:
         ax.plot(x, g["cycle_usage_E"], color=_col("L_E"), lw=1.5,
                 label="Cycle Usage (GB)")
@@ -862,8 +863,13 @@ def _render_sheet_06_billing(
         _unavailable(ax, "Cycle usage data not available")
         ax.set_title("[1.2] eMBB: Cycle Usage vs Allowance")
 
-    # (2,1) Overage Revenue by Slice
-    ax = axes[1, 0]
+
+def _panel_06_3_overage_revenue(
+    ax, g: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 6.3: Overage Revenue by Slice."""
+    x = g.index
+    xlabel = "Episode" if mode == "training" else "Step"
     if "over_rev" in g.columns and "over_rev_E" in g.columns:
         over_rev_U = g["over_rev"] - g["over_rev_E"]
         ax.fill_between(x, 0, over_rev_U / 1e3,
@@ -890,15 +896,18 @@ def _render_sheet_06_billing(
         _unavailable(ax, "Overage revenue data not available")
         ax.set_title("[2.1] Overage Revenue by Slice")
 
-    # (2,2) Demand Elasticity: p_over_E vs L_E scatter
-    ax = axes[1, 1]
+
+def _panel_06_4_demand_elasticity(
+    ax, raw_df: pd.DataFrame, cfg: Dict[str, Any], mode: str,
+) -> None:
+    """Panel 6.4: Demand Elasticity scatter (p_over_E vs L_E)."""
     if "p_over_E" in raw_df.columns and "L_E" in raw_df.columns:
         sample = raw_df[["p_over_E", "L_E"]].dropna()
         if len(sample) > 2000:
             sample = sample.sample(2000, random_state=42)
-        sc = ax.scatter(sample["p_over_E"], sample["L_E"],
-                        c=sample.index, cmap="viridis",
-                        alpha=0.3, s=8, edgecolors="none")
+        ax.scatter(sample["p_over_E"], sample["L_E"],
+                   c=sample.index, cmap="viridis",
+                   alpha=0.3, s=8, edgecolors="none")
         ax.set_title("[2.2] Demand Elasticity: Overage Price vs eMBB Load")
         ax.set_xlabel("p_over_E (KRW/GB)")
         ax.set_ylabel("L_E (GB/step)")
@@ -911,12 +920,308 @@ def _render_sheet_06_billing(
         _unavailable(ax, "Price/load data not available for scatter")
         ax.set_title("[2.2] Demand Elasticity Scatter")
 
-    fig.text(0.5, 0.01,
-             "Refs: [Nevo Econometrica 2016] Demand Elasticity | "
-             "[3GPP TS 23.503] Usage Monitoring | "
-             "[Grubb AER 2009] 3-Part Tariff",
-             ha="center", fontsize=7, color="gray")
 
+# ── Sheet 7: Multi-Seed Convergence ──────────────────────────────────
+
+def _prepare_convergence_data(
+    seed_dfs: Dict[int, pd.DataFrame],
+) -> Tuple[Dict[int, pd.DataFrame], int, int]:
+    """Pre-compute per-seed episode aggregations for convergence panels.
+
+    Returns:
+        (seed_episodes, n_seeds, max_episodes)
+    """
+    seed_episodes: Dict[int, pd.DataFrame] = {}
+    for sid, df in seed_dfs.items():
+        df_ep = _detect_episodes(df)
+        ep_agg = df_ep.groupby("_episode").agg(
+            reward_mean=("reward", "mean"),
+            profit_mean=("profit", "mean"),
+            pviol_E_mean=("pviol_E", "mean"),
+            rho_U_mean=("rho_U", "mean"),
+        )
+        seed_episodes[sid] = ep_agg
+
+    n_seeds = len(seed_episodes)
+    max_episodes = max(len(ep) for ep in seed_episodes.values()) if seed_episodes else 0
+    return seed_episodes, n_seeds, max_episodes
+
+
+def _convergence_envelope(
+    ax, seed_episodes: Dict[int, pd.DataFrame],
+    metric: str, n_seeds: int, max_episodes: int,
+    cfg: Dict[str, Any], title: str, ylabel: str, color: str,
+    show_legend: bool = False,
+) -> None:
+    """Shared logic for convergence envelope plots (Sheet 7 panels)."""
+    all_series = []
+    for sid in sorted(seed_episodes.keys()):
+        ep = seed_episodes[sid]
+        vals = ep[metric].values
+        if n_seeds > 1:
+            ax.plot(range(len(vals)), vals, color=color, alpha=0.25, lw=0.7,
+                    label="Individual seeds" if sid == min(seed_episodes.keys()) else "")
+        padded = np.full(max_episodes, np.nan)
+        padded[:len(vals)] = vals
+        all_series.append(padded)
+
+    arr = np.array(all_series)
+    mean_vals = np.nanmean(arr, axis=0)
+    episodes = np.arange(max_episodes)
+
+    if n_seeds == 1:
+        ax.plot(episodes, mean_vals, color=color, lw=2.5,
+                label=f"Seed {min(seed_episodes.keys())}")
+    else:
+        p25 = np.nanpercentile(arr, 25, axis=0)
+        p75 = np.nanpercentile(arr, 75, axis=0)
+        ax.plot(episodes, mean_vals, color=color, lw=2.5,
+                label="Mean (all seeds)")
+        ax.fill_between(episodes, p25, p75, color=color, alpha=0.15,
+                        label="P25\u2013P75 envelope")
+
+    # Curriculum phase boundaries
+    cur_cfg = cfg.get("training", {}).get("curriculum", {})
+    phases = cur_cfg.get("phases", [])
+    cumul = 0.0
+    for pi, phase in enumerate(phases[:-1]):
+        cumul += phase.get("fraction", 0)
+        boundary_ep = int(max_episodes * cumul)
+        if 0 < boundary_ep < max_episodes:
+            ax.axvline(boundary_ep, color=GRAY, ls=":", alpha=0.6)
+            ax.text(boundary_ep + 1, ax.get_ylim()[1] * 0.95,
+                    f"Phase {pi+1}\u2192{pi+2}", fontsize=7, color=GRAY)
+
+    # pviol_E threshold
+    pviol_threshold = cfg.get("lagrangian_qos", {}).get("pviol_E_threshold", 0.08)
+    if metric == "pviol_E_mean":
+        _annotate_threshold(ax, pviol_threshold,
+                            f"Threshold = {pviol_threshold}",
+                            color=DARK_RED)
+
+    ax.set_title(title)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel(ylabel)
+    if show_legend:
+        ax.legend(loc="best")
+
+
+def _panel_07_1_reward_convergence(
+    ax, seed_episodes: Dict[int, pd.DataFrame],
+    cfg: Dict[str, Any], n_seeds: int, max_episodes: int,
+) -> None:
+    """Panel 7.1: Reward Convergence."""
+    _convergence_envelope(ax, seed_episodes, "reward_mean",
+                          n_seeds, max_episodes, cfg,
+                          "[1.1] Reward Convergence", "Reward",
+                          _col("reward"), show_legend=True)
+
+
+def _panel_07_2_profit_convergence(
+    ax, seed_episodes: Dict[int, pd.DataFrame],
+    cfg: Dict[str, Any], n_seeds: int, max_episodes: int,
+) -> None:
+    """Panel 7.2: Profit Convergence."""
+    _convergence_envelope(ax, seed_episodes, "profit_mean",
+                          n_seeds, max_episodes, cfg,
+                          "[1.2] Profit Convergence", "Profit (KRW)",
+                          _col("profit"))
+
+
+def _panel_07_3_pviol_convergence(
+    ax, seed_episodes: Dict[int, pd.DataFrame],
+    cfg: Dict[str, Any], n_seeds: int, max_episodes: int,
+) -> None:
+    """Panel 7.3: eMBB QoS Violation Convergence."""
+    _convergence_envelope(ax, seed_episodes, "pviol_E_mean",
+                          n_seeds, max_episodes, cfg,
+                          "[2.1] eMBB QoS Violation Convergence", "pviol_E",
+                          _col("pviol_E"))
+
+
+def _panel_07_4_rho_convergence(
+    ax, seed_episodes: Dict[int, pd.DataFrame],
+    cfg: Dict[str, Any], n_seeds: int, max_episodes: int,
+) -> None:
+    """Panel 7.4: Resource Allocation Convergence."""
+    _convergence_envelope(ax, seed_episodes, "rho_U_mean",
+                          n_seeds, max_episodes, cfg,
+                          "[2.2] Resource Allocation Convergence", "rho_U",
+                          _col("rho_U"))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# INDIVIDUAL PANEL SAVE HELPER [DASH-2]
+# ══════════════════════════════════════════════════════════════════════
+
+def _save_individual_panel(
+    panel_fn: Callable,
+    panel_args: tuple,
+    out_path: Path,
+    dpi: int,
+    figsize: Tuple[float, float] = (10, 7),
+    ref_text: Optional[str] = None,
+) -> Path:
+    """Create a single-axis figure, call the panel function, and save.
+
+    [DASH-2] Each panel is rendered as a standalone PNG file with
+    optional reference citation at the bottom.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    panel_fn(ax, *panel_args)
+    if ref_text:
+        fig.text(0.5, 0.01, ref_text, ha="center", fontsize=7, color="gray")
+        plt.tight_layout(rect=[0, 0.03, 1, 1.0])
+    else:
+        plt.tight_layout()
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return out_path
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SHEET RENDERERS (thin wrappers calling panel functions)
+# ══════════════════════════════════════════════════════════════════════
+
+def _render_sheet_01_financial(
+    g: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 1: Financial Overview — Revenue, Cost, Profit, Margins."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 1: Financial Performance Overview",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_01_1_revenue_cost_profit(axes[0, 0], g, cfg, mode)
+    _panel_01_2_revenue_decomposition(axes[0, 1], g, cfg, mode)
+    _panel_01_3_cost_breakdown(axes[1, 0], g, cfg, mode)
+    _panel_01_4_profitability_ratios(axes[1, 1], g, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_01, ha="center", fontsize=7, color="gray")
+    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
+    path = out_dir / "01_financial_overview.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+def _render_sheet_02_reward(
+    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 2: Reward Decomposition — signal analysis."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 2: Reward Signal Decomposition",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_02_1_reward_over_time(axes[0, 0], g, cfg, mode)
+    _panel_02_2_reward_shaping_components(axes[0, 1], g, cfg, mode)
+    _panel_02_3_reward_distribution(axes[1, 0], raw_df, cfg, mode)
+    _panel_02_4_penalty_bonus_trajectories(axes[1, 1], g, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_02, ha="center", fontsize=7, color="gray")
+    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
+    path = out_dir / "02_reward_decomposition.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+def _render_sheet_03_market(
+    g: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 3: Market Dynamics — population and churn."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 3: Market Dynamics & User Population",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_03_1_active_users(axes[0, 0], g, cfg, mode)
+    _panel_03_2_per_slice_subscribers(axes[0, 1], g, cfg, mode)
+    _panel_03_3_market_flows(axes[1, 0], g, cfg, mode)
+    _panel_03_4_churn_rate(axes[1, 1], g, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_03, ha="center", fontsize=7, color="gray")
+    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
+    path = out_dir / "03_market_dynamics.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+def _render_sheet_04_actions(
+    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 4: Pricing Actions — agent strategy."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 4: Agent Pricing Strategy",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_04_1_urllc_pricing(axes[0, 0], g, cfg, mode)
+    _panel_04_2_embb_pricing(axes[0, 1], g, cfg, mode)
+    _panel_04_3_rho_u_allocation(axes[1, 0], g, cfg, mode)
+    _panel_04_4_action_distributions(axes[1, 1], raw_df, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_04, ha="center", fontsize=7, color="gray")
+    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
+    path = out_dir / "04_pricing_actions.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+def _render_sheet_05_network(
+    g: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 5: Network & QoS — load, capacity, violations."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 5: Network Quality & Load Management",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_05_1_urllc_load_capacity(axes[0, 0], g, cfg, mode)
+    _panel_05_2_embb_load_capacity(axes[0, 1], g, cfg, mode)
+    _panel_05_3_qos_violation_prob(axes[1, 0], g, cfg, mode)
+    _panel_05_4_slice_utilization(axes[1, 1], g, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_05, ha="center", fontsize=7, color="gray")
+    plt.tight_layout(rect=[0, 0.025, 1, 0.96])
+    path = out_dir / "05_network_qos.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return path
+
+
+def _render_sheet_06_billing(
+    g: pd.DataFrame, raw_df: pd.DataFrame, cfg: Dict[str, Any],
+    out_dir: Path, dpi: int, mode: str,
+) -> Path:
+    """Sheet 6: Billing & Usage — cycle usage, overage, elasticity."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle("Sheet 6: Billing Cycle & Traffic Analysis",
+                 fontsize=14, fontweight="bold", y=0.98)
+
+    _panel_06_1_urllc_cycle_usage(axes[0, 0], g, cfg, mode)
+    _panel_06_2_embb_cycle_usage(axes[0, 1], g, cfg, mode)
+    _panel_06_3_overage_revenue(axes[1, 0], g, cfg, mode)
+    _panel_06_4_demand_elasticity(axes[1, 1], raw_df, cfg, mode)
+
+    fig.text(0.5, 0.01, _REF_06, ha="center", fontsize=7, color="gray")
     plt.tight_layout(rect=[0, 0.025, 1, 0.96])
     path = out_dir / "06_billing_usage.png"
     fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
@@ -935,118 +1240,96 @@ def _render_sheet_07_convergence(
         logger.info("  No training data — skipping Sheet 7")
         return None
 
+    seed_episodes, n_seeds, max_episodes = _prepare_convergence_data(seed_dfs)
+
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    n_seeds = len(seed_dfs)
     seed_label = "1 Seed" if n_seeds == 1 else f"{n_seeds} Seeds"
     fig.suptitle(f"Sheet 7: Training Convergence ({seed_label})",
                  fontsize=14, fontweight="bold", y=0.98)
 
-    # Aggregate each seed to episode level
-    seed_episodes: Dict[int, pd.DataFrame] = {}
-    for sid, df in seed_dfs.items():
-        df_ep = _detect_episodes(df)
-        ep_agg = df_ep.groupby("_episode").agg(
-            reward_mean=("reward", "mean"),
-            profit_mean=("profit", "mean"),
-            pviol_E_mean=("pviol_E", "mean"),
-            rho_U_mean=("rho_U", "mean"),
-        )
-        seed_episodes[sid] = ep_agg
+    _panel_07_1_reward_convergence(axes[0, 0], seed_episodes, cfg, n_seeds, max_episodes)
+    _panel_07_2_profit_convergence(axes[0, 1], seed_episodes, cfg, n_seeds, max_episodes)
+    _panel_07_3_pviol_convergence(axes[1, 0], seed_episodes, cfg, n_seeds, max_episodes)
+    _panel_07_4_rho_convergence(axes[1, 1], seed_episodes, cfg, n_seeds, max_episodes)
 
-    # Build aligned arrays
-    max_episodes = max(len(ep) for ep in seed_episodes.values())
-
-    metrics_config = [
-        ("reward_mean", "[1.1] Reward Convergence", "Reward", _col("reward")),
-        ("profit_mean", "[1.2] Profit Convergence", "Profit (KRW)", _col("profit")),
-        ("pviol_E_mean", "[2.1] eMBB QoS Violation Convergence", "pviol_E",
-         _col("pviol_E")),
-        ("rho_U_mean", "[2.2] Resource Allocation Convergence", "rho_U",
-         _col("rho_U")),
-    ]
-
-    for idx, (metric, title, ylabel, color) in enumerate(metrics_config):
-        ax = axes[idx // 2, idx % 2]
-
-        # Collect per-seed series
-        all_series = []
-        for sid in sorted(seed_episodes.keys()):
-            ep = seed_episodes[sid]
-            vals = ep[metric].values
-            # [DASH-1] Single seed: skip thin line (mean line is identical)
-            # Multi-seed: label first thin line as "Individual seeds"
-            if n_seeds > 1:
-                ax.plot(range(len(vals)), vals, color=color, alpha=0.25, lw=0.7,
-                        label="Individual seeds" if sid == min(seed_episodes.keys()) else "")
-            # Pad to max_episodes for envelope computation
-            padded = np.full(max_episodes, np.nan)
-            padded[:len(vals)] = vals
-            all_series.append(padded)
-
-        arr = np.array(all_series)
-        mean_vals = np.nanmean(arr, axis=0)
-
-        episodes = np.arange(max_episodes)
-        # [DASH-1] Single seed: label as "Seed N", no envelope
-        # Multi-seed: label as "Mean (all seeds)" with P25-P75 envelope
-        if n_seeds == 1:
-            ax.plot(episodes, mean_vals, color=color, lw=2.5,
-                    label=f"Seed {min(seed_episodes.keys())}")
-        else:
-            p25 = np.nanpercentile(arr, 25, axis=0)
-            p75 = np.nanpercentile(arr, 75, axis=0)
-            ax.plot(episodes, mean_vals, color=color, lw=2.5,
-                    label="Mean (all seeds)")
-            ax.fill_between(episodes, p25, p75, color=color, alpha=0.15,
-                            label="P25\u2013P75 envelope")
-
-        # [ME-4] Curriculum phase boundaries — use phases list (v9+)
-        cur_cfg = cfg.get("training", {}).get("curriculum", {})
-        phases = cur_cfg.get("phases", [])
-        if phases:
-            cumul = 0.0
-            for pi, phase in enumerate(phases[:-1]):
-                cumul += phase.get("fraction", 0)
-                boundary_ep = int(max_episodes * cumul)
-                if 0 < boundary_ep < max_episodes:
-                    ax.axvline(boundary_ep, color=GRAY, ls=":", alpha=0.6)
-                    ax.text(boundary_ep + 1, ax.get_ylim()[1] * 0.95,
-                            f"Phase {pi+1}→{pi+2}", fontsize=7, color=GRAY)
-        else:
-            # Legacy fallback: single phase1_fraction boundary
-            curriculum_frac = cur_cfg.get("phase1_fraction", 0.20)
-            phase1_ep = int(max_episodes * curriculum_frac)
-            if 0 < phase1_ep < max_episodes:
-                ax.axvline(phase1_ep, color=GRAY, ls=":", alpha=0.6)
-                ax.text(phase1_ep + 1, ax.get_ylim()[1] * 0.95,
-                        "Phase 1→2", fontsize=7, color=GRAY)
-
-        # Specific thresholds
-        pviol_threshold = cfg.get("lagrangian_qos", {}).get(
-            "pviol_E_threshold", 0.15)
-        if metric == "pviol_E_mean":
-            _annotate_threshold(ax, pviol_threshold,
-                                f"Threshold = {pviol_threshold}",
-                                color=DARK_RED)
-
-        ax.set_title(title)
-        ax.set_xlabel("Episode")
-        ax.set_ylabel(ylabel)
-        # Only show legend for first subplot to avoid clutter
-        if idx == 0:
-            ax.legend(loc="best")
-
-    fig.text(0.5, 0.01,
-             "Refs: [Henderson AAAI 2018] Multi-Seed Evaluation | "
-             "[Narvekar JMLR 2020] Curriculum Learning | "
-             "[Haarnoja ICML 2018] SAC",
-             ha="center", fontsize=7, color="gray")
-
+    fig.text(0.5, 0.01, _REF_07, ha="center", fontsize=7, color="gray")
     plt.tight_layout(rect=[0, 0.025, 1, 0.96])
     path = out_dir / "07_multi_seed_convergence.png"
     fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return path
+
+
+# ══════════════════════════════════════════════════════════════════════
+# INDIVIDUAL PANEL GENERATION [DASH-2]
+# ══════════════════════════════════════════════════════════════════════
+
+# Panel registry: (function, filename, ref_text, uses_raw_df)
+_PANELS_SHEET_1_6 = [
+    # Sheet 1
+    (_panel_01_1_revenue_cost_profit, "01_1_revenue_cost_profit.png", _REF_01, False),
+    (_panel_01_2_revenue_decomposition, "01_2_revenue_decomposition.png", _REF_01, False),
+    (_panel_01_3_cost_breakdown, "01_3_cost_breakdown.png", _REF_01, False),
+    (_panel_01_4_profitability_ratios, "01_4_profitability_ratios.png", _REF_01, False),
+    # Sheet 2
+    (_panel_02_1_reward_over_time, "02_1_reward_over_time.png", _REF_02, False),
+    (_panel_02_2_reward_shaping_components, "02_2_reward_shaping_components.png", _REF_02, False),
+    (_panel_02_3_reward_distribution, "02_3_reward_distribution.png", _REF_02, True),
+    (_panel_02_4_penalty_bonus_trajectories, "02_4_penalty_bonus_trajectories.png", _REF_02, False),
+    # Sheet 3
+    (_panel_03_1_active_users, "03_1_active_users.png", _REF_03, False),
+    (_panel_03_2_per_slice_subscribers, "03_2_per_slice_subscribers.png", _REF_03, False),
+    (_panel_03_3_market_flows, "03_3_market_flows.png", _REF_03, False),
+    (_panel_03_4_churn_rate, "03_4_churn_rate.png", _REF_03, False),
+    # Sheet 4
+    (_panel_04_1_urllc_pricing, "04_1_urllc_pricing.png", _REF_04, False),
+    (_panel_04_2_embb_pricing, "04_2_embb_pricing.png", _REF_04, False),
+    (_panel_04_3_rho_u_allocation, "04_3_rho_u_allocation.png", _REF_04, False),
+    (_panel_04_4_action_distributions, "04_4_action_distributions.png", _REF_04, True),
+    # Sheet 5
+    (_panel_05_1_urllc_load_capacity, "05_1_urllc_load_capacity.png", _REF_05, False),
+    (_panel_05_2_embb_load_capacity, "05_2_embb_load_capacity.png", _REF_05, False),
+    (_panel_05_3_qos_violation_prob, "05_3_qos_violation_prob.png", _REF_05, False),
+    (_panel_05_4_slice_utilization, "05_4_slice_utilization.png", _REF_05, False),
+    # Sheet 6
+    (_panel_06_1_urllc_cycle_usage, "06_1_urllc_cycle_usage.png", _REF_06, False),
+    (_panel_06_2_embb_cycle_usage, "06_2_embb_cycle_usage.png", _REF_06, False),
+    (_panel_06_3_overage_revenue, "06_3_overage_revenue.png", _REF_06, False),
+    (_panel_06_4_demand_elasticity, "06_4_demand_elasticity.png", _REF_06, True),
+]
+
+_PANELS_SHEET_7 = [
+    (_panel_07_1_reward_convergence, "07_1_reward_convergence.png", _REF_07),
+    (_panel_07_2_profit_convergence, "07_2_profit_convergence.png", _REF_07),
+    (_panel_07_3_pviol_convergence, "07_3_pviol_convergence.png", _REF_07),
+    (_panel_07_4_rho_convergence, "07_4_rho_convergence.png", _REF_07),
+]
+
+
+def _generate_individual_panels(
+    g: pd.DataFrame, raw_df: pd.DataFrame,
+    cfg: Dict[str, Any], out: Path, dpi: int, mode: str,
+    seed_dfs: Optional[Dict[int, pd.DataFrame]] = None,
+) -> List[Path]:
+    """Generate all 28 individual panel PNGs. [DASH-2]"""
+    generated: List[Path] = []
+
+    for panel_fn, fname, ref, uses_raw in _PANELS_SHEET_1_6:
+        data = raw_df if uses_raw else g
+        p = _save_individual_panel(
+            panel_fn, (data, cfg, mode),
+            out / fname, dpi, ref_text=ref)
+        generated.append(p)
+
+    if seed_dfs and len(seed_dfs) > 0:
+        seed_episodes, n_seeds, max_episodes = _prepare_convergence_data(seed_dfs)
+        for panel_fn, fname, ref in _PANELS_SHEET_7:
+            p = _save_individual_panel(
+                panel_fn, (seed_episodes, cfg, n_seeds, max_episodes),
+                out / fname, dpi, ref_text=ref)
+            generated.append(p)
+
+    return generated
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1058,6 +1341,7 @@ def generate_all_pngs(
     config_path: str = "config/default.yaml",
     mode: str = "auto",
     dpi: int = 180,
+    layout: str = "composite",
 ) -> List[Path]:
     """Generate all themed PNG dashboard sheets.
 
@@ -1068,6 +1352,9 @@ def generate_all_pngs(
               ``"eval"`` reads rollout_log.csv,
               ``"auto"`` detects available files.
         dpi: Resolution for output PNGs.
+        layout: ``"composite"`` (7 sheets, default),
+                ``"individual"`` (28 individual panels),
+                ``"both"`` (7 + 28 = 35 files).
 
     Returns:
         List of Paths to generated PNG files.
@@ -1106,7 +1393,7 @@ def generate_all_pngs(
     generated: List[Path] = []
 
     if mode == "eval" and has_eval:
-        logger.info("=== Generating Evaluation Dashboard (7 sheets) ===")
+        logger.info("=== Generating Evaluation Dashboard ===")
         rollout, _, _ = _load_eval_data(output_dir)
         if rollout is None:
             logger.error("rollout_log.csv detected but could not be loaded from %s",
@@ -1118,28 +1405,35 @@ def generate_all_pngs(
         # For eval: aggregate by step across repeats
         g = rollout.groupby("step").mean(numeric_only=True)
 
-        generated.append(
-            _render_sheet_01_financial(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_02_reward(g, rollout, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_03_market(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_04_actions(g, rollout, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_05_network(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_06_billing(g, rollout, cfg, out, dpi, mode))
-
-        # Also generate convergence if training data exists
+        seed_dfs = None
         if has_training:
             seed_dfs = _load_training_data(output_dir)
-            p = _render_sheet_07_convergence(seed_dfs, cfg, out, dpi)
-            if p:
-                generated.append(p)
+
+        if layout in ("composite", "both"):
+            generated.append(
+                _render_sheet_01_financial(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_02_reward(g, rollout, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_03_market(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_04_actions(g, rollout, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_05_network(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_06_billing(g, rollout, cfg, out, dpi, mode))
+            if seed_dfs:
+                p = _render_sheet_07_convergence(seed_dfs, cfg, out, dpi)
+                if p:
+                    generated.append(p)
+
+        if layout in ("individual", "both"):
+            generated.extend(
+                _generate_individual_panels(g, rollout, cfg, out, dpi, mode,
+                                            seed_dfs=seed_dfs))
 
     elif mode == "training" and has_training:
-        logger.info("=== Generating Training Dashboard (7 sheets) ===")
+        logger.info("=== Generating Training Dashboard ===")
         seed_dfs = _load_training_data(output_dir)
 
         # [DASH-1] Use best seed from training_metadata.json for sheets 1-6
@@ -1162,23 +1456,29 @@ def generate_all_pngs(
         primary_df = _detect_episodes(primary_df)
         g = primary_df.groupby("_episode").mean(numeric_only=True)
 
-        generated.append(
-            _render_sheet_01_financial(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_02_reward(g, primary_df, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_03_market(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_04_actions(g, primary_df, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_05_network(g, cfg, out, dpi, mode))
-        generated.append(
-            _render_sheet_06_billing(g, primary_df, cfg, out, dpi, mode))
-        p = _render_sheet_07_convergence(seed_dfs, cfg, out, dpi)
-        if p:
-            generated.append(p)
+        if layout in ("composite", "both"):
+            generated.append(
+                _render_sheet_01_financial(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_02_reward(g, primary_df, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_03_market(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_04_actions(g, primary_df, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_05_network(g, cfg, out, dpi, mode))
+            generated.append(
+                _render_sheet_06_billing(g, primary_df, cfg, out, dpi, mode))
+            p = _render_sheet_07_convergence(seed_dfs, cfg, out, dpi)
+            if p:
+                generated.append(p)
 
-    logger.info("=== Generated %d PNG sheets ===", len(generated))
+        if layout in ("individual", "both"):
+            generated.extend(
+                _generate_individual_panels(g, primary_df, cfg, out, dpi, mode,
+                                            seed_dfs=seed_dfs))
+
+    logger.info("=== Generated %d PNG files ===", len(generated))
     for p in generated:
         logger.info("  %s", p)
 
@@ -1199,6 +1499,11 @@ def main() -> None:
         "--mode", default="auto", choices=["training", "eval", "auto"],
         help="Data mode: training, eval, or auto-detect (default: auto)")
     parser.add_argument(
+        "--layout", default="composite",
+        choices=["composite", "individual", "both"],
+        help="Output layout: composite (7 sheets), individual (28 panels), "
+             "or both (default: composite)")
+    parser.add_argument(
         "--dpi", type=int, default=180,
         help="Output resolution in DPI (default: 180)")
     args = parser.parse_args()
@@ -1213,8 +1518,9 @@ def main() -> None:
         config_path=args.config,
         mode=args.mode,
         dpi=args.dpi,
+        layout=args.layout,
     )
-    print(f"\nGenerated {len(paths)} PNG dashboard sheets:")
+    print(f"\nGenerated {len(paths)} PNG files:")
     for p in paths:
         print(f"  {p}")
 
