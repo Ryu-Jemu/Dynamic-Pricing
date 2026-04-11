@@ -38,6 +38,27 @@ outputs_test/
 .idea/
 .vscode/
 
-# Markdown files (except README.md)
-*.md
-!README.md
+# Non-code documents
+*.pdf
+*.doc
+*.docx
+*.svg
+
+# LaTeX sources & artifacts
+*.tex
+*.bib
+*.bst
+*.cls
+*.aux
+*.out
+*.toc
+
+# Trained model artifacts
+*.zip
+
+# Experiment results
+Networking-Price/experiments/results/*.json
+Networking-Price/experiments/models/
+
+# Specific excluded docs
+Networking-Price/model-architecture.md
