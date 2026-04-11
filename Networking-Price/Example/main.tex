@@ -1,0 +1,322 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs,longtable,array,tabularx}
+\usepackage{enumitem}
+\usepackage{color}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\setlength{\LTpre}{0pt}
+\setlength{\LTpost}{0pt}
+\renewcommand{\arraystretch}{1.15}
+
+\title{Dynamic Pricing Optimization for 5G Network Slicing via Three-Part Tariff\\\large Model Specification}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\paragraph{Objective.}
+Maximize service-provider revenue by learning the fixed fee $F$ and per-unit overage fee $p$ of a three-part tariff for URLLC and eMBB slices through reinforcement learning.
+
+\section{Sets and Indices}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Definition & Range \\
+\midrule
+\endhead
+$s$ & Slice type & $s \in \mathcal{S} = \{U, E\}$ \\
+$t$ & Timestep & $t \in \{1, 2, \ldots, T\}$, one step $=$ one hour \\
+$i$ & Individual user & $i \in \mathbb{N}$ \\
+$N_{s,t}$ & Subscribers in slice $s$ at start of step $t$ & $\mathbb{Z}^{+}$ (state variable) \\
+$\mathcal{A}_{s,t}$ & Active-user set in slice $s$ at step $t$ & set \\
+\bottomrule
+\end{longtable}
+
+\section{Three-Part Tariff (3PT)}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Range & Role \\
+\midrule
+\endhead
+$F_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Fixed fee (learned; action dimensions 1 and 3) \\
+$\bar{Q}_{s}$ & $s$ & $\mathbb{R}^{+}$ & Allowance (pre-fixed constant) \\
+$p_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Per-unit overage fee (learned; action dimensions 2 and 4) \\
+$q_{i,s,t}$ & $i,s,t$ & $\mathbb{R}^{+}$ & {\color{blue}{Data usage (random variable)}} \\
+$B_{i,s,t}$ & $i,s,t$ & $\mathbb{R}^{+}$ & Bill (computed) \\
+\bottomrule
+\end{longtable}
+
+\begin{equation}
+B_{i,s,t} = F_{s,t} + \max\bigl(0,\, q_{i,s,t} - \bar{Q}_{s}\bigr) \cdot p_{s,t}
+\tag{F1}
+\end{equation}
+
+\section{Data Usage Model}
+
+\begin{equation}
+q_{i,s,t} \sim \operatorname{LogNormal}(\mu_s,\sigma_s^2)
+\iff
+\ln q_{i,s,t} \sim \mathcal{N}(\mu_s,\sigma_s^2)
+\tag{F2}
+\end{equation}
+
+\begin{equation*}
+\mathbb{E}[q] = \exp\!\left(\mu_s + \frac{\sigma_s^2}{2}\right),
+\qquad
+\operatorname{Var}[q] = \bigl(\exp(\sigma_s^2) - 1\bigr)\exp(2\mu_s + \sigma_s^2).
+\end{equation*}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Range & Meaning \\
+\midrule
+\endhead
+$\mu_s$ & $s$ & $\mathbb{R}$ & Mean of log-usage \\
+$\sigma_s^2$ & $s$ & $\mathbb{R}^{+}$ & Variance of log-usage \\
+\bottomrule
+\end{longtable}
+
+\section{Timestep Dynamics}
+
+\subsection*{Phase A --- Agent Decision}
+\textbf{Step 1. Observe state.}
+\begin{equation*}
+\mathcal{S}_t = \bigl(N_{U,t},\, N_{E,t},\, \eta_{U,t-1},\, \eta_{E,t-1}\bigr).
+\end{equation*}
+
+\textbf{Step 2. Select action.}
+\begin{equation*}
+a_t = \bigl(F_{U,t},\, p_{U,t},\, F_{E,t},\, p_{E,t}\bigr) \in \mathcal{A}.
+\end{equation*}
+
+\subsection*{Phase B --- Subscriber Dynamics}
+\textbf{Step 3. Departure.}
+\begin{equation}
+P_{s,t}^{\mathrm{dep}} = \sigma\!\left(\gamma_{0,s} + \gamma_F \tilde{F}_{s,t} + \gamma_p \tilde{p}_{s,t} - \gamma_{\eta,s}\eta_{s,t-1}\right)
+\tag{F3}
+\end{equation}
+where $\sigma(x) = 1/(1 + e^{-x})$.\\
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Sign & Meaning \\
+\midrule
+\endhead
+$\gamma_{0,s}$ & $s$ & $< 0$ & Base retention tendency of slice $s$ \\
+$\gamma_F$ & shared & $> 0$ & Fixed-fee departure sensitivity \\
+$\gamma_p$ & shared & $> 0$ & Overage-fee departure sensitivity \\
+$\gamma_{\eta,s}$ & $s$ & $> 0$ & QoS departure sensitivity; $\gamma_{\eta,U} \gg \gamma_{\eta,E}$ \\
+$\tilde{F}_{s,t}$ & $s,t$ & --- & $F_{s,t}/F_{\mathrm{ref},s}$ \\
+$\tilde{p}_{s,t}$ & $s,t$ & --- & $p_{s,t}/p_{\mathrm{ref},s}$ \\
+$\eta_{s,t-1}$ & $s,t-1$ & --- & Previous-step QoS \\
+$F_{\mathrm{ref},s}$ & $s$ & $\mathbb{R}^{+}$ & Fixed-fee normalization reference \\
+$p_{\mathrm{ref},s}$ & $s$ & $\mathbb{R}^{+}$ & Overage-fee normalization reference \\
+\bottomrule
+\end{longtable}
+
+\begin{equation*}
+\mathrm{Leave}_{i,s,t} \sim \operatorname{Bernoulli}\bigl(P_{s,t}^{\mathrm{dep}}\bigr),
+\qquad \forall i \in \{1,\ldots,N_{s,t}\},
+\end{equation*}
+\begin{equation*}
+N_{s,t}^{\mathrm{surv}} = N_{s,t} - N_{s,t}^{\mathrm{leave}}.
+\end{equation*}
+
+\textbf{Step 4. Arrival.}
+\begin{equation}
+P_{s,t}^{\mathrm{arr}} = \sigma\!\left(\beta_{0,s} - \beta_F \tilde{F}_{s,t} - \beta_p \tilde{p}_{s,t}\right)
+\tag{F4}
+\end{equation}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Sign & Meaning \\
+\midrule
+\endhead
+$\beta_{0,s}$ & $s$ & $> 0$ & Base arrival tendency of slice $s$ \\
+$\beta_F$ & shared & $> 0$ & Fixed-fee arrival sensitivity \\
+$\beta_p$ & shared & $> 0$ & Overage-fee arrival sensitivity \\
+\bottomrule
+\end{longtable}
+
+\begin{equation}
+N_{s,t}^{\mathrm{new}} \sim \operatorname{Poisson}\bigl(\lambda_{\max,s} \cdot P_{s,t}^{\mathrm{arr}}\bigr)
+\tag{F5}
+\end{equation}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Range & Meaning \\
+\midrule
+\endhead
+$\lambda_{\max,s}$ & $s$ & $\mathbb{R}^{+}$ & Max hourly arrival rate \\
+\bottomrule
+\end{longtable}
+
+\begin{equation}
+\mathcal{A}_{s,t} = \{\text{survivors}\} \cup \{\text{newcomers}\},
+\qquad
+N_{s,t}^{\mathrm{active}} = N_{s,t}^{\mathrm{surv}} + N_{s,t}^{\mathrm{new}}
+\tag{F6}
+\end{equation}
+
+\subsection*{Phase C --- Usage and QoS}
+\textbf{Step 5. Usage generation and billing.}
+\begin{equation*}
+q_{i,s,t} \sim \operatorname{LogNormal}(\mu_s,\sigma_s^2),
+\qquad
+B_{i,s,t} = F_{s,t} + \max\bigl(0,\, q_{i,s,t} - \bar{Q}_s\bigr) \cdot p_{s,t},
+\quad \forall i \in \mathcal{A}_{s,t}.
+\end{equation*}
+
+\textbf{{\color{blue}{Step 6. QoS realization.}}}
+\begin{equation}
+\eta_{s,t} \sim \operatorname{Uniform}\bigl(\eta_s^{\mathrm{low}},\eta_s^{\mathrm{high}}\bigr)
+\tag{F7}
+\end{equation}
+\begin{equation*}
+\eta_{s,(t+1)-1} = \eta_{s,t}.
+\end{equation*}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Range & Meaning \\
+\midrule
+\endhead
+$\eta_{s,t}$ & $s,t$ & $[0,1]$ & QoS satisfaction \\
+$\eta_s^{\mathrm{tgt}}$ & $s$ & $(0,1]$ & SLA target QoS \\
+$\eta_s^{\mathrm{low}}$ & $s$ & $[0,1]$ & QoS lower bound \\
+$\eta_s^{\mathrm{high}}$ & $s$ & $[0,1]$ & QoS upper bound \\
+\bottomrule
+\end{longtable}
+{\color{red}{$\eta_s^{\mathrm{low}}<\eta_s^{\mathrm{high}}$}}.
+
+\subsection*{Phase D --- Learning Signal}
+\textbf{Step 7. Reward computation.}
+\begin{equation}
+R_t = \sum_{s \in \{U,E\}} \sum_{i \in \mathcal{A}_{s,t}} B_{i,s,t}
+\tag{F8}
+\end{equation}
+
+\begin{equation}
+\mathrm{Pen}_t = \sum_{s \in \{U,E\}} w_s \cdot N_{s,t}^{\mathrm{active}} \cdot \max\bigl(0,\, \eta_s^{\mathrm{tgt}} - \eta_{s,t}\bigr)
+\tag{F9}
+\end{equation}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+Symbol & Index & Range & Meaning \\
+\midrule
+\endhead
+$w_s$ & $s$ & $\mathbb{R}^{+}$ & SLA penalty weight per user \\
+$R_t$ & $t$ & $\mathbb{R}^{+}$ & Total revenue \\
+$\mathrm{Pen}_t$ & $t$ & $\mathbb{R}_{\ge 0}$ & QoS penalty \\
+$r_t$ & $t$ & $\mathbb{R}$ & Reward \\
+\bottomrule
+\end{longtable}
+
+\begin{equation}
+\boxed{r_t = R_t - \mathrm{Pen}_t}
+\tag{F10}
+\end{equation}
+
+\textbf{Step 8. State transition.}
+\begin{equation}
+N_{s,t+1} = N_{s,t}^{\mathrm{active}}
+\tag{F11}
+\end{equation}
+
+\begin{equation*}
+\mathcal{S}_{t+1} = \bigl(N_{U,t+1},\, N_{E,t+1},\, \eta_{U,t},\, \eta_{E,t}\bigr),
+\qquad t \leftarrow t+1.
+\end{equation*}
+
+\section{MDP Definition}
+
+\begin{longtable}{@{}p{0.18\textwidth}p{0.76\textwidth}@{}}
+\toprule
+Component & Specification \\
+\midrule
+\endhead
+State & $\mathcal{S}_t = (N_{U,t},\, N_{E,t},\, \eta_{U,t-1},\, \eta_{E,t-1})$ --- 4-dimensional \\
+Action & $a_t = (F_{U,t},\, p_{U,t},\, F_{E,t},\, p_{E,t}) \in \mathcal{A}$ --- 4-dimensional \\
+Reward & $r_t = R_t - \mathrm{Pen}_t$ \\
+Transition & $N_{s,t+1} = N_{s,t}^{\mathrm{active}}$, with QoS carried forward \\
+Initial state & $\mathcal{S}_1 = (N_{U,1},\, N_{E,1},\, \eta_{U,0},\, \eta_{E,0})$ \\
+Objective & $\max_{\pi}\; \mathbb{E}\!\left[\sum_{t=1}^{T} \gamma^{t-1} r_t\right], \quad \gamma \in [0,1)$ \\
+\bottomrule
+\end{longtable}
+
+\section{Variable Dictionary}
+
+\small
+\begin{longtable}{@{}llll@{}}
+\toprule
+Variable & Index & Range & Meaning \\
+\midrule
+\endhead
+$s$ & --- & $\{U,E\}$ & Slice type \\
+$t$ & --- & $\{1,\ldots,T\}$ & Timestep \\
+$i$ & --- & $\mathbb{N}$ & User ID \\
+$N_{s,t}$ & $s,t$ & $\mathbb{Z}^{+}$ & Subscribers at start of $t$ \\
+$F_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Fixed fee \\
+$p_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Overage fee per unit \\
+$\bar{Q}_s$ & $s$ & $\mathbb{R}^{+}$ & Allowance (fixed) \\
+$q_{i,s,t}$ & $i,s,t$ & $\mathbb{R}^{+}$ & Data usage \\
+$B_{i,s,t}$ & $i,s,t$ & $\mathbb{R}^{+}$ & Bill \\
+$\eta_{s,t}$ & $s,t$ & $[0,1]$ & QoS satisfaction \\
+$P_{s,t}^{\mathrm{dep}}$ & $s,t$ & $[0,1]$ & Departure probability \\
+$P_{s,t}^{\mathrm{arr}}$ & $s,t$ & $[0,1]$ & Arrival probability \\
+$N_{s,t}^{\mathrm{surv}}$ & $s,t$ & $\mathbb{Z}^{+}$ & Survivors \\
+$N_{s,t}^{\mathrm{new}}$ & $s,t$ & $\mathbb{Z}^{+}$ & Newcomers \\
+$N_{s,t}^{\mathrm{active}}$ & $s,t$ & $\mathbb{Z}^{+}$ & Active users \\
+$N_{s,t}^{\mathrm{leave}}$ & $s,t$ & $\mathbb{Z}^{+}$ & Departed \\
+$\mathcal{A}_{s,t}$ & $s,t$ & set & Active-user set \\
+$\gamma_{0,s}$ & $s$ & $\mathbb{R}^{-}$ & Base retention tendency \\
+$\gamma_F$ & shared & $\mathbb{R}^{+}$ & Fixed-fee departure sensitivity \\
+$\gamma_p$ & shared & $\mathbb{R}^{+}$ & Overage-fee departure sensitivity \\
+$\gamma_{\eta,s}$ & $s$ & $\mathbb{R}^{+}$ & QoS departure sensitivity of slice $s$ \\
+$\beta_{0,s}$ & $s$ & $\mathbb{R}^{+}$ & Base arrival tendency \\
+$\beta_F$ & shared & $\mathbb{R}^{+}$ & Fixed-fee arrival sensitivity \\
+$\beta_p$ & shared & $\mathbb{R}^{+}$ & Overage-fee arrival sensitivity \\
+$\lambda_{\max,s}$ & $s$ & $\mathbb{R}^{+}$ & Max hourly arrival rate \\
+$\mu_s$ & $s$ & $\mathbb{R}$ & Mean of log-usage \\
+$\sigma_s^2$ & $s$ & $\mathbb{R}^{+}$ & Variance of log-usage \\
+$w_s$ & $s$ & $\mathbb{R}^{+}$ & SLA penalty weight per user \\
+$\eta_s^{\mathrm{tgt}}$ & $s$ & $(0,1]$ & SLA target QoS \\
+$\eta_s^{\mathrm{low}}$ & $s$ & $[0,1]$ & QoS lower bound \\
+$\eta_s^{\mathrm{high}}$ & $s$ & $[0,1]$ & QoS upper bound \\
+$F_{\mathrm{ref},s}$ & $s$ & $\mathbb{R}^{+}$ & Fixed-fee normalization reference \\
+$p_{\mathrm{ref},s}$ & $s$ & $\mathbb{R}^{+}$ & Overage-fee normalization reference \\
+$\tilde{F}_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Normalized fixed fee \\
+$\tilde{p}_{s,t}$ & $s,t$ & $\mathbb{R}^{+}$ & Normalized overage fee \\
+$R_t$ & $t$ & $\mathbb{R}^{+}$ & Total revenue \\
+$\mathrm{Pen}_t$ & $t$ & $\mathbb{R}_{\ge 0}$ & QoS penalty \\
+$r_t$ & $t$ & $\mathbb{R}$ & Reward \\
+$\mathcal{S}_t$ & $t$ & vector & State \\
+$a_t$ & $t$ & vector & Action \\
+$\gamma$ & shared & $[0,1)$ & Discount factor \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\section{References}
+
+\begin{enumerate}[label=Ref\arabic*.,leftmargin=2.2em]
+    \item 3PT structure, Eq.~(8)--(9): Wu \& Behzad (2023), \emph{Mathematical Methods of Operations Research}, 97:233--258.
+    \item Zero marginal cost: Wu \& Behzad (2023), p.~238.
+    \item $p_j$ notation convention: Jiang (2014); see also Chen, Jiang \& Shah (2022), \emph{International Journal of Industrial Organization}, 83:102848.
+    \item Departure variables at $t-1$ and churn determinants: Ahn et al. (2006), \emph{Telecommunications Policy}, 30:552--568.
+    \item Arrival price elasticity sign: Jiang (2014), Table 6; see also Chen, Jiang \& Shah (2022), \emph{International Journal of Industrial Organization}, 83:102848.
+    \item Log-normal traffic: Alasmar et al. (2021), \emph{IEEE/ACM Transactions on Networking}, 29(3):1266--1279.
+    \item Logistic regression as a standard churn model: Ribeiro et al. (2023), \emph{Management Review Quarterly}, 74:1327--1364.
+    \item URLLC/eMBB QoS requirement gap: 3GPP TS 22.261.
+    \item QoS penalty in RL reward: Kim et al. (2019), \emph{Applied Sciences}, 9(11):2361, Eq.~(11).
+\end{enumerate}
+
+\end{document}
