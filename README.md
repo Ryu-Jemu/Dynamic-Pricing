@@ -15,16 +15,16 @@ A Gymnasium env with two slices (URLLC=0, eMBB=1) and a 720-step episode (1 hour
 
 | | |
 |---|---|
-| **State** | `(N_U, N_E, η_U_prev, η_E_prev)` — current subscribers + previous QoS, normalized |
-| **Action** | `(F_U, p_U, F_E, p_E)` ∈ `[0,1]⁴`, scaled inside `step()` to flat fee `F` and per-unit price `p` |
-| **Reward** | `(Revenue − QoS Penalty) × 1e-5` |
+| **State** | $(N_U,\ N_E,\ \eta_U^{\text{prev}},\ \eta_E^{\text{prev}})$ — current subscribers + previous QoS, normalized |
+| **Action** | $(F_U,\ p_U,\ F_E,\ p_E) \in [0,1]^4$, scaled inside `step()` to flat fee $F$ and per-unit price $p$ |
+| **Reward** | $(\text{Revenue} - \text{Penalty}) \times 10^{-5}$ |
 
 Each `step()` runs four phases that mirror the model spec (F1–F11):
 
-1. **Departure** — `P_dep = σ(γ₀ + γ_F·F̃ + γ_p·p̃ − γ_η·η_prev)`, sampled per-user (Binomial).
-2. **Arrival** — `P_arr = σ(β₀ − β_F·F̃ − β_p·p̃)`, new users sampled (Poisson with `λ = λ_max·P_arr`).
-3. **Billing & QoS** — usage `q ~ LogNormal(μ_s, σ_s²)`; bill `B = F_s + max(0, q − Q̄_s)·p_s`; QoS `η_s ~ Uniform(η_low, η_high)` (exogenous).
-4. **Reward** — `Penalty = Σ_s w_s · N_active_s · max(0, η_tgt_s − η_s)`; reward = revenue − penalty (scaled).
+1. **Departure** — $P_{\text{dep}} = \sigma(\gamma_0 + \gamma_F \tilde{F} + \gamma_p \tilde{p} - \gamma_\eta\, \eta_{\text{prev}})$, sampled per-user (Binomial).
+2. **Arrival** — $P_{\text{arr}} = \sigma(\beta_0 - \beta_F \tilde{F} - \beta_p \tilde{p})$, new users sampled (Poisson with $\lambda = \lambda_{\max} P_{\text{arr}}$).
+3. **Billing & QoS** — usage $q \sim \mathrm{LogNormal}(\mu_s, \sigma_s^2)$; bill $B = F_s + \max(0,\ q - \bar{Q}_s)\, p_s$; QoS $\eta_s \sim \mathcal{U}(\eta_{\text{low}}, \eta_{\text{high}})$ (exogenous).
+4. **Reward** — $\text{Penalty} = \sum_s w_s\, N_s^{\text{active}}\, \max(0,\ \eta_s^{\text{tgt}} - \eta_s)$; reward $=$ revenue $-$ penalty (scaled).
 
 All numerical parameters live in `ENV_CONFIG` of [`train/config.py`](train/config.py) and are sanity-checked by [`tests/test_env.py`](tests/test_env.py) (LogNormal moments, departure/arrival probabilities, expected bill, full-episode stability).
 
@@ -38,13 +38,13 @@ Raising prices increases per-user revenue but also increases churn and reduces a
 
 ### Algorithms — [`train/train_sac.py`](train/train_sac.py), [`train/train_ppo.py`](train/train_ppo.py)
 
-Both use Stable-Baselines3 with an MLP policy `[256, 256, 256]`, `lr=3e-4`, `γ=0.99`, `seed=42`.
+Both use Stable-Baselines3 with an MLP policy `[256, 256, 256]`, $\text{lr}=3\times 10^{-4}$, $\gamma=0.99$, $\text{seed}=42$.
 
 | | SAC | PPO |
 |---|---|---|
 | Episodes | 500 | 1,000 |
-| Off/On-policy | off-policy, replay buffer 1M | on-policy, GAE λ=0.95, clip 0.2 |
-| Batch | 256 | 64 (×10 epochs) |
+| Off/On-policy | off-policy, replay buffer 1M | on-policy, GAE $\lambda=0.95$, clip $0.2$ |
+| Batch | 256 | 64 ($\times 10$ epochs) |
 
 Training loop (same for both):
 
@@ -70,7 +70,7 @@ Four fixed policies are evaluated with the same 20-episode protocol:
 
 Mean over 20 evaluation episodes (reward is the env-internal `×1e-5` scaled value).
 
-| Policy | Reward ↑ | Revenue (USD) | Final N_U | Final N_E |
+| Policy | Reward ↑ | Revenue (USD) | Final $N_U$ | Final $N_E$ |
 |---|---:|---:|---:|---:|
 | **PPO**          | **8,194** | **840.8 M** | 950   | **4,102** |
 | **SAC**          | 7,176     | 738.5 M     | 990   | 2,188     |
@@ -102,6 +102,6 @@ python3 experiments/make_figures.py   # 4 PNGs in experiments/figures/
 
 ## 5. Limitations
 
-- Single seed (`seed=42`); multi-seed sweep is defined in `EVAL_CONFIG["seeds"]` but not yet run.
-- QoS `η` is exogenous, so the policy cannot reduce the URLLC penalty floor. A joint pricing + resource-allocation extension is left as future work.
+- Single seed ($\text{seed}=42$); multi-seed sweep is defined in `EVAL_CONFIG["seeds"]` but not yet run.
+- QoS $\eta$ is exogenous, so the policy cannot reduce the URLLC penalty floor. A joint pricing + resource-allocation extension is left as future work.
 - Only two slices (URLLC, eMBB); no mMTC.
