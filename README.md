@@ -1,7 +1,7 @@
 # Networking-Price
 
 Reinforcement learning for **dynamic pricing in 5G network slicing** (URLLC + eMBB).
-A subscription-based MDP is solved with PPO and SAC, then compared against four non-RL baselines.
+A subscription-based MDP is solved with PPO and SAC, then compared against three non-RL baselines.
 
 Repository: <https://github.com/Ryu-Jemu/network-pricing>
 
@@ -42,7 +42,7 @@ Both use Stable-Baselines3 with an MLP policy `[256, 256, 256]`, $\text{lr}=3\ti
 
 | | SAC | PPO |
 |---|---|---|
-| Episodes | 500 | 1,000 |
+| Episodes | 500 | 500 |
 | Off/On-policy | off-policy, replay buffer 1M | on-policy, GAE $\lambda=0.95$, clip $0.2$ |
 | Batch | 256 | 64 ($\times 10$ epochs) |
 
@@ -55,11 +55,10 @@ Training loop (same for both):
 
 ### Baselines — [`train/baselines.py`](train/baselines.py)
 
-Four fixed policies are evaluated with the same 20-episode protocol:
+Three fixed policies are evaluated with the same 20-episode protocol:
 
 - **Static-Heuristic** — always reference prices `[0.5, 0.5, 0.3, 0.25]`
 - **Random** — `Uniform(0,1)⁴`
-- **Zero-Price** — `[0, 0, 0, 0]` (revenue = 0)
 - **Max-Price** — `[1, 1, 1, 1]` (`F=100, p=20` on both slices)
 
 ---
@@ -72,14 +71,13 @@ Mean over 20 evaluation episodes (reward is the env-internal `×1e-5` scaled val
 
 | Policy | Reward ↑ | Revenue (USD) | Final $N_U$ | Final $N_E$ |
 |---|---:|---:|---:|---:|
-| **PPO**          | **8,194** | **840.8 M** | 950   | **4,102** |
+| **PPO**          | **7,777** | **798.6 M** | 938   | **3,344** |
 | **SAC**          | 7,176     | 738.5 M     | 990   | 2,188     |
 | Max-Price        | 5,870     | 606.3 M     | 921   | 909       |
 | Random           | 5,342     | 556.4 M     | 1,003 | 4,358     |
 | Static-Heuristic | 3,117     | 334.3 M     | 1,006 | 5,003     |
-| Zero-Price       | −228      | 0           | 1,028 | 5,090     |
 
-- **PPO is +162.9 % over Static-Heuristic and +39.6 % over Max-Price.**
+- **PPO is +149.5 % over Static-Heuristic and +32.5 % over Max-Price.**
 - Max-Price looks competitive on revenue alone but **collapses the eMBB base from 5,000 → 909**, which is unsustainable.
 - A ~20 M USD penalty floor exists for *every* policy because URLLC QoS is exogenous (target 0.99999 is rarely met).
 - Raw JSON: [`experiments/results/`](experiments/results/). Plots: [`experiments/figures/`](experiments/figures/) — see [`experiments/figures/README.md`](experiments/figures/README.md) for the figure-by-figure walkthrough.
@@ -102,6 +100,7 @@ python3 experiments/make_figures.py   # 4 PNGs in experiments/figures/
 
 ## 5. Limitations
 
-- Single seed ($\text{seed}=42$); multi-seed sweep is defined in `EVAL_CONFIG["seeds"]` but not yet run.
+- Single seed ($\text{seed}=42$); multi-seed sweep is defined in `EVAL_CONFIG["seeds"]` but not yet run. Statistical significance of inter-algorithm differences is unverified.
+- Environment parameter coefficients are set to produce qualitatively realistic behavior (e.g., ~1.5% monthly churn at reference prices) rather than calibrated from measured data. Sensitivity analysis is left as future work.
 - QoS $\eta$ is exogenous, so the policy cannot reduce the URLLC penalty floor. A joint pricing + resource-allocation extension is left as future work.
 - Only two slices (URLLC, eMBB); no mMTC.

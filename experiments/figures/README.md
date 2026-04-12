@@ -1,69 +1,69 @@
-# 시각화 결과물 — 발표용 talking points
+# Visualization Results — Presentation Talking Points
 
-이 폴더에 있는 4개의 그림은 5G 네트워크 슬라이싱 동적 가격 결정 강화학습 결과를
-청중에게 한눈에 설명하기 위해 만들어졌습니다. 그림 옆에 적힌 한 줄 요약과
-"이렇게 말하세요" 문장을 그대로 사용해도 충분합니다.
+The 4 figures in this folder are designed to explain the 5G network slicing
+dynamic pricing RL results to an audience at a glance. The one-line summaries
+and "say this" sentences next to each figure can be used as-is.
 
-> **읽기 순서:** `fig_dashboard.png` 한 장만으로도 전체 이야기를 끝낼 수 있도록
-> 설계되었습니다. 시간이 더 있다면 그림 2 → 3 → 4 순으로 깊게 들어가세요.
+> **Reading order:** `fig_dashboard.png` alone is designed to tell the full story.
+> If you have more time, go deeper in order: Figure 2 -> 3 -> 4.
 
 ---
 
-## 1. `fig_dashboard.png` — 헤드라인 한 장 요약 (2×3 패널)
+## 1. `fig_dashboard.png` — Headline One-page Summary (2x3 panel)
 
-**한 줄로:** "PPO 가 수익과 가입자 유지를 동시에 잡아 정적 정책 대비 +162.9%."
+**In one line:** "PPO simultaneously captures revenue and subscriber retention, +162.9% over the static policy."
 
-| 패널 | 무엇을 보여주는가 | 이렇게 말하세요 |
+| Panel | What it shows | Say this |
 |---|---|---|
-| (a) 수익 vs. 유지 | 6개 정책의 (총 수익, 최종 eMBB 가입자) 산점도 | "오른쪽 위로 갈수록 좋습니다. PPO 만 유일하게 두 축을 모두 잡았고, Max-Price 는 수익은 비슷해 보여도 가입자가 거의 사라졌습니다." |
-| (b) 순보상 막대 | 6개 정책의 평균 순보상 | "PPO 는 정적 정책 대비 2.6배, Max-Price 대비 +40% 의 순보상을 얻습니다." |
-| (c) eMBB 가입자 추이 | 720시간 동안 N_E(t) 곡선 4개 | "Max-Price 는 첫 100시간 만에 가입자가 급락하지만, PPO/SAC 는 4천 명 이상을 유지합니다." |
-| (d) PPO 가격 시계열 | 학습된 F_U(t), F_E(t) | "기준가가 아니라 시간에 따라 가격이 움직이는 것이 보입니다 — 이게 '동적' 정책입니다." |
-| (e) 학습 곡선 | PPO/SAC 학습 보상 추이 | "두 알고리즘 모두 학습 초기에 정적 정책을 추월하고 안정적으로 수렴합니다." |
-| (f) Eval 분포 | 20 episode 평가 결과 박스플롯 | "표준편차가 매우 작아 결과가 우연이 아니라 일관적임을 보여줍니다." |
+| (a) Revenue vs. Retention | Scatter plot of (total revenue, final eMBB subscribers) for 6 policies | "Upper-right is better. PPO is the only one that captures both axes; Max-Price looks similar in revenue but subscribers have nearly vanished." |
+| (b) Net Reward Bar | Average net reward for 6 policies | "PPO achieves 2.6x the net reward of the static policy and +40% over Max-Price." |
+| (c) eMBB Subscriber Trend | 4 N_E(t) curves over 720 hours | "Max-Price causes subscribers to plummet within the first 100 hours, while PPO/SAC maintain over 4,000." |
+| (d) PPO Price Time Series | Learned F_U(t), F_E(t) | "Prices move over time rather than staying at reference values — this is the 'dynamic' policy." |
+| (e) Learning Curves | PPO/SAC training reward trends | "Both algorithms surpass the static policy early in training and converge stably." |
+| (f) Eval Distribution | Box plot of 20-episode evaluation results | "The very small standard deviation shows the results are consistent, not coincidental." |
 
-**주의해서 말할 것:** 순보상 축은 환경 내부의 ×10⁻⁵ 스케일링이 적용된 값입니다.
-패널티(약 20M USD)는 URLLC QoS 가 외생적으로 모델링되어 모든 정책에 공통으로 존재하는 *구조적 하한* 입니다.
-
----
-
-## 2. `fig_subscriber_dynamics.png` — 정책별 가입자 동역학
-
-**한 줄로:** "Max-Price 의 매력적인 수익은 가입자 붕괴의 부작용이다."
-
-- URLLC 슬라이스 (왼쪽): 모든 정책이 1,000명 부근에서 비교적 안정.
-- eMBB 슬라이스 (오른쪽): Max-Price 가 5,000 → 약 900명까지 수직 낙하. PPO/SAC 는 각각 ~4,000, ~2,200명을 유지.
-- "**Max-Price 는 단기 수익을 극대화하지만 장기 지속 불가능합니다. PPO 는 가격을 너무 올리면 가입자를 잃는다는 것을 학습으로 발견했습니다.**"
+**Note:** The net reward axis uses the environment's internal x10^-5 scaling.
+The penalty (~20M USD) is a *structural lower bound* common to all policies, as URLLC QoS is modeled exogenously.
 
 ---
 
-## 3. `fig_price_trajectories.png` — PPO 와 SAC 가 학습한 가격 정책
+## 2. `fig_subscriber_dynamics.png` — Subscriber Dynamics by Policy
 
-**한 줄로:** "두 알고리즘은 같은 보상을 다른 가격 전략으로 추구한다."
+**In one line:** "Max-Price's attractive revenue is a side effect of subscriber collapse."
 
-- 4개 패널: F_U, p_U, F_E, p_E 각각.
-- 점선 = 기준가, 회색 점선 = 행동 공간 상한.
-- 청중에게 보여줄 포인트:
-  - "PPO 와 SAC 가 어떤 슬라이스에서는 비슷하게, 어떤 슬라이스에서는 다른 가격을 선택하는 것을 볼 수 있습니다."
-  - "단순히 '가격을 올리거나 내리는' 정책이 아니라, 슬라이스 특성과 가입자 상태에 반응하는 정책을 학습했습니다."
+- URLLC slice (left): All policies are relatively stable around 1,000 subscribers.
+- eMBB slice (right): Max-Price drops vertically from 5,000 to ~900. PPO/SAC maintain ~4,000 and ~2,200 respectively.
+- "**Max-Price maximizes short-term revenue but is unsustainable long-term. PPO learned through training that raising prices too much leads to subscriber loss.**"
 
 ---
 
-## 4. `fig_revenue_breakdown.png` — 수익 구성 분해
+## 3. `fig_price_trajectories.png` — Pricing Policies Learned by PPO and SAC
 
-**한 줄로:** "PPO 의 우위는 한 슬라이스를 쥐어짜는 게 아니라 두 슬라이스의 균형에서 온다."
+**In one line:** "The two algorithms pursue the same reward with different pricing strategies."
 
-- (a) 적층 막대: 정책별 URLLC/eMBB 수익 + QoS 패널티.
-- (b) 가로 막대: 전체 수익에서 eMBB 가 차지하는 비율.
-- 청중에게 보여줄 포인트:
-  - "PPO/SAC 의 수익 구조는 두 슬라이스에 분산되어 있어 한 슬라이스가 무너져도 견딜 수 있습니다."
-  - "Max-Price 는 두 슬라이스 모두 가입자가 줄어 수익 풀 자체가 작아진 상태입니다."
+- 4 panels: F_U, p_U, F_E, p_E respectively.
+- Dashed line = reference price, gray dotted line = action space upper bound.
+- Key points for the audience:
+  - "You can see PPO and SAC choosing similar prices for some slices and different prices for others."
+  - "These are not simply 'raise or lower prices' policies — they learned to respond to slice characteristics and subscriber state."
 
 ---
 
-## 자주 받는 질문에 대한 짧은 답
+## 4. `fig_revenue_breakdown.png` — Revenue Composition Breakdown
 
-1. **"왜 PPO 가 SAC 보다 잘했나?"** — PPO 는 on-policy 이라 가입자 수가 점진적으로 변하는 환경(비정상성)에 더 빠르게 적응했습니다.
-2. **"패널티가 왜 0 으로 안 떨어지나?"** — URLLC 의 QoS 가 본 모델에서 외생적(랜덤 변수)이라, 99.999% 목표를 거의 항상 미달합니다. 약 20M USD 의 구조적 하한이 모든 정책에 공통으로 존재합니다. 향후 연구로 가격–자원 결합 최적화가 남아 있습니다.
-3. **"왜 Random 이 Static-Heuristic 보다 보상이 높나?"** — 무작위 탐색이 기준가 이상의 가격을 자주 시도했기 때문입니다. 그러나 가입자가 불안정하게 변동하여 장기적으로 지속 가능한 정책은 아닙니다.
-4. **"단일 시드 결과 아닌가?"** — 네, 본 그림들은 seed=42 의 학습 결과 + 단일 episode rollout 입니다. 평가 단계는 20 episode 의 분포(그림 1f)로 재현 가능성을 보강합니다. 다중 시드 검증은 향후 작업입니다.
+**In one line:** "PPO's advantage comes not from squeezing one slice, but from balancing both."
+
+- (a) Stacked bar: Per-policy URLLC/eMBB revenue + QoS penalty.
+- (b) Horizontal bar: eMBB's share of total revenue.
+- Key points for the audience:
+  - "PPO/SAC's revenue structure is distributed across both slices, making it resilient even if one slice collapses."
+  - "Max-Price has fewer subscribers in both slices, shrinking the revenue pool itself."
+
+---
+
+## Brief Answers to Frequently Asked Questions
+
+1. **"Why did PPO outperform SAC?"** — PPO is on-policy, so it adapted faster to the environment where subscriber counts change gradually (non-stationarity).
+2. **"Why doesn't the penalty drop to 0?"** — URLLC QoS is exogenous (random variable) in this model, so the 99.999% target is almost always missed. A structural lower bound of ~20M USD is common to all policies. Joint price-resource optimization remains for future work.
+3. **"Why does Random have higher reward than Static-Heuristic?"** — Random exploration frequently tries prices above the reference. However, subscriber counts fluctuate unstably, so it is not a sustainable long-term policy.
+4. **"Isn't this a single-seed result?"** — Yes, these figures are from seed=42 training + single episode rollout. The evaluation phase supplements reproducibility with a 20-episode distribution (Figure 1f). Multi-seed validation is future work.

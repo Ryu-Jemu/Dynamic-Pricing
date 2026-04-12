@@ -63,7 +63,7 @@ PPO_CONFIG = {
     "gae_lambda": 0.95,
     "gamma": 0.99,
     "policy_kwargs": dict(net_arch=[256, 256, 256]),
-    "total_timesteps": 720 * 1000,  # 1000 episodes
+    "total_timesteps": 720 * 500,   # 500 episodes
     "seed": 42,
 }
 
