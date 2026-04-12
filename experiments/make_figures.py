@@ -278,6 +278,8 @@ def load_results():
         "summary": summary,
         "ppo_train": ppo["train_rewards"],
         "sac_train": sac["train_rewards"],
+        "ppo_train_N_E": ppo.get("train_final_N_E", []),
+        "sac_train_N_E": sac.get("train_final_N_E", []),
     }
 
 
@@ -432,6 +434,25 @@ def plot_dashboard(results, rollouts, T_env=720):
     ax.set_ylabel("Training Episode Reward (1e-5 scale)")
     ax.set_title("(e) Learning Curves — both algorithms surpass the static policy", fontweight="bold")
     ax.legend(loc="lower right")
+
+    # Subscriber overlay on secondary axis (if data available)
+    ppo_ne = results.get("ppo_train_N_E", [])
+    sac_ne = results.get("sac_train_N_E", [])
+    if ppo_ne and sac_ne:
+        ax2 = ax.twinx()
+        ppo_ne_arr = np.asarray(ppo_ne, dtype=float)
+        sac_ne_arr = np.asarray(sac_ne, dtype=float)
+        if len(ppo_ne_arr) > 20:
+            sm_ppo_ne = smooth(ppo_ne_arr, 20)
+            ax2.plot(steps(len(ppo_ne_arr))[19:], sm_ppo_ne,
+                     color="#d62728", lw=1.2, ls="--", alpha=0.6)
+        if len(sac_ne_arr) > 20:
+            sm_sac_ne = smooth(sac_ne_arr, 20)
+            ax2.plot(steps(len(sac_ne_arr))[19:], sm_sac_ne,
+                     color="#1f77b4", lw=1.2, ls="--", alpha=0.6)
+        ax2.set_ylabel("Final eMBB Subscribers (dashed)",
+                        color="gray", fontsize=8)
+        ax2.tick_params(axis="y", labelcolor="gray", labelsize=7)
 
     # ── (f) Eval Distribution (Box plot) ─────────────────────────────────────
     ax = fig.add_subplot(gs[1, 2])
