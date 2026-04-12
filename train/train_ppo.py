@@ -41,7 +41,7 @@ def train_ppo(seed=42, total_timesteps=None):
     callback = EpisodeLogCallback()
     model.learn(total_timesteps=ts, callback=callback, progress_bar=True)
 
-    return model, callback.episode_rewards
+    return model, callback
 
 
 def main():
@@ -49,14 +49,17 @@ def main():
     os.makedirs("experiments/models", exist_ok=True)
 
     seed = EVAL_CONFIG["seeds"][0]
-    model, train_rewards = train_ppo(seed=seed)
+    model, cb = train_ppo(seed=seed)
+    train_rewards = cb.episode_rewards
 
     model_path = f"experiments/models/ppo_seed{seed}"
     model.save(model_path)
     print(f"\nModel saved: {model_path}")
 
-    print(f"\nEvaluating ({EVAL_CONFIG['n_eval_episodes']} episodes)...")
-    results = evaluate_policy(model, ENV_CONFIG, EVAL_CONFIG["n_eval_episodes"], seed)
+    n_eval = EVAL_CONFIG['n_eval_episodes']
+    print(f"\nEvaluating ({n_eval} episodes)...")
+    results = evaluate_policy(
+        model, ENV_CONFIG, n_eval, seed)
 
     rewards = [r["total_reward"] for r in results]
     revenues = [r["total_revenue"] for r in results]
@@ -65,16 +68,24 @@ def main():
     print(f"\n{'='*60}")
     print(f"PPO Evaluation Results (seed={seed})")
     print(f"{'='*60}")
-    print(f"  Reward:  {np.mean(rewards):>14,.0f} ± {np.std(rewards):>10,.0f}")
-    print(f"  Revenue: {np.mean(revenues):>14,.0f} ± {np.std(revenues):>10,.0f}")
-    print(f"  Penalty: {np.mean(penalties):>14,.0f} ± {np.std(penalties):>10,.0f}")
-    print(f"  Final N_U: {np.mean([r['final_N_U'] for r in results]):>8,.0f}")
-    print(f"  Final N_E: {np.mean([r['final_N_E'] for r in results]):>8,.0f}")
+    print(f"  Reward:  {np.mean(rewards):>14,.0f}"
+          f" ± {np.std(rewards):>10,.0f}")
+    print(f"  Revenue: {np.mean(revenues):>14,.0f}"
+          f" ± {np.std(revenues):>10,.0f}")
+    print(f"  Penalty: {np.mean(penalties):>14,.0f}"
+          f" ± {np.std(penalties):>10,.0f}")
+    nu = np.mean([r['final_N_U'] for r in results])
+    ne = np.mean([r['final_N_E'] for r in results])
+    print(f"  Final N_U: {nu:>8,.0f}")
+    print(f"  Final N_E: {ne:>8,.0f}")
 
     save_data = {
         "train_rewards": train_rewards,
-        "eval_results": [{k: v for k, v in r.items() if k != "trajectory"}
-                         for r in results],
+        "train_final_N_U": cb.episode_final_N_U,
+        "train_final_N_E": cb.episode_final_N_E,
+        "eval_results": [
+            {k: v for k, v in r.items() if k != "trajectory"}
+            for r in results],
     }
     result_path = f"experiments/results/ppo_seed{seed}.json"
     with open(result_path, "w") as f:

@@ -15,12 +15,14 @@ from train.config import ENV_CONFIG, SAC_CONFIG, EVAL_CONFIG
 
 
 class EpisodeLogCallback(BaseCallback):
-    """Logs episode reward at each episode end."""
+    """Logs episode reward and final subscriber counts at each episode end."""
 
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.episode_rewards = []
         self.episode_lengths = []
+        self.episode_final_N_U = []
+        self.episode_final_N_E = []
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
@@ -28,6 +30,8 @@ class EpisodeLogCallback(BaseCallback):
             if "episode" in info:
                 self.episode_rewards.append(info["episode"]["r"])
                 self.episode_lengths.append(info["episode"]["l"])
+                self.episode_final_N_U.append(info.get("N_U", 0))
+                self.episode_final_N_E.append(info.get("N_E", 0))
                 ep_num = len(self.episode_rewards)
                 if ep_num % 50 == 0:
                     recent = self.episode_rewards[-50:]
@@ -104,7 +108,7 @@ def train_sac(seed=42, total_timesteps=None):
     callback = EpisodeLogCallback()
     model.learn(total_timesteps=ts, callback=callback, progress_bar=True)
 
-    return model, callback.episode_rewards
+    return model, callback
 
 
 def main():
@@ -112,7 +116,8 @@ def main():
     os.makedirs("experiments/models", exist_ok=True)
 
     seed = EVAL_CONFIG["seeds"][0]
-    model, train_rewards = train_sac(seed=seed)
+    model, callback = train_sac(seed=seed)
+    train_rewards = callback.episode_rewards
 
     # Save model
     model_path = f"experiments/models/sac_seed{seed}"
@@ -139,6 +144,8 @@ def main():
     # Save results
     save_data = {
         "train_rewards": train_rewards,
+        "train_final_N_U": callback.episode_final_N_U,
+        "train_final_N_E": callback.episode_final_N_E,
         "eval_results": [{k: v for k, v in r.items() if k != "trajectory"}
                          for r in results],
         "config": {"env": str(ENV_CONFIG), "sac": str(SAC_CONFIG)},
