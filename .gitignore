@@ -57,7 +57,8 @@ outputs_test/
 *.zip
 
 # Experiment results
-Networking-Price/experiments/results/*.json
+Networking-Price/experiments/results/
+Networking-Price/experiments/results/figures/
 Networking-Price/experiments/models/
 
 # Specific excluded docs
